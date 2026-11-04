@@ -24,13 +24,13 @@ Repo: `mauroociappinaph/zk-secrets` (private), branches `main` and `develop`.
 - T3 [S4] audit store, verify, Sheets mirror + Apps Script — inline — df94e23 — done
 - T4 [S1] canary tests through `run` — inline, mutation-checked (3 mutants killed) — 67ff5c4 — done
 - T5 [S6,S8] install script, skill, docs, AGENTS.md rule, CI — worker — eea3174 — done
-- T6 [S7] GitHub private repo, main + develop — inline — repo created; feature merge after verify
+- T6 [S7] GitHub private repo, main + develop — inline — merged and pushed (see L16)
 - T7 [S1,S4,S5] verify round 1 corrections (L5, L6) — worker — 74d1ebb — done (round 2: all 7 fixed)
 - T7b [S1,S5] round 2 residuals (L11) — worker — 23eba13 — done
 - T8 [S10] trusted destinations — worker — 23eba13 — done
 - T9 [S11] zks capture via ego-browser — worker — def689c — done (real ego e2e ok)
 - T10 [S9] skill + AGENTS.md autonomy rules, docs — worker — def689c — done
-- T11 [S1,S10,S11] verify round 3 corrections (L13, L14) — worker — commit: pending
+- T11 [S1,S10,S11] verify round 3 corrections (L13, L14) + recheck residuals N1-N3 — worker + inline — 4929e03, ac197e9 — done
 
 ## Log
 
@@ -48,3 +48,5 @@ Repo: `mauroociappinaph/zk-secrets` (private), branches `main` and `develop`.
 - L12 (evidence): 125/125 tests; reinstalled; doctor install ok, tools from tools.json (command -v paths, chosen over versioned realpaths so upgrades keep working), trust ok, audit count 6 anchored; ~/AGENTS.md block updated for autonomy. Verify round for T7b-T10 running.
 - L13 (verify round 3 on T7b-T10): S4, S5, S9, S10 met; S1 unmet, S11 partial. H1: `capture fill --from` fills any Keychain item into any page with no approval and optional origin (page JS can exfiltrate). M1: after a reveal click, failures leave the token on screen (no about:blank). M2: fill checks origin once before a 15 s wait; page.fill can reach cross-origin iframes. M3: skill claims more than code. L1: GitHub repo/env `.`/`..` segments accepted. L2: vercel trust key collision (no team vs teamId "personal"). L3: captures not mirrored. L4: first zks/* capture unapproved (same-user residual, document).
 - L14 (decision): --origin mandatory for every fill; --from silent only to the origin recorded in the audit for that item's last successful capture/generate, otherwise approval dialog; fill only into input[type=password] in the main frame via evaluate with an origin re-check in the same evaluate; finally about:blank whenever a reveal click ran; reject `.`/`..` GitHub segments; vercel trust keys vercel:team:<id> / vercel:personal; capture triggers mirror sync; document L4.
+- L15 (recheck of 4929e03): H1, M1, M2, L1, L2, L3 fixed. New N1 (secret passed into page JS via evaluate before origin re-check), N2 (--from silent decision ignored later item replacement), N3 (process timeout shorter than script waits). Fixed inline test-first in ac197e9: keyboard.insertText into a secret-free focused password input with origin checks before the Keychain read and before typing; --from silent only while Keychain mdat <= recorded capture ts; timeout 120 s. 145/145 tests; real ego e2e: generate fill length 32, silent --from same origin length 32; dummy item deleted; audit ok count 11 anchored. RDD assess on 4929e03: reviewDue false (under budget).
+- L16 (delivery): feature/zks-core fast-forwarded into develop and main, pushed to origin.
