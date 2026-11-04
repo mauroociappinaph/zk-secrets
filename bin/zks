@@ -1,0 +1,6 @@
+#!/bin/sh
+# zks launcher: no core dumps, no inherited NODE_OPTIONS, experimental sqlite warning silenced.
+ulimit -c 0
+unset NODE_OPTIONS
+ZKS_ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+exec node --disable-warning=ExperimentalWarning "$ZKS_ROOT/dist/cli.js" "$@"
