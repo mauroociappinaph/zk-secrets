@@ -925,3 +925,91 @@ test("S5 (A2): a capture records the stored item's modification time as its vers
   assert.equal(record!.providerVersion, h.keychain.modified.get("app/new")!.toISOString());
 });
 
+
+test("S1: a split typing that lands in both fields leaves both empty and leaves the page", async () => {
+  const pw = Object.assign(new FakeInput(), { type: "password" });
+  const text = Object.assign(new FakeInput(), { type: "text" });
+  const { page, calls } = domPage({ nodes: [pw] });
+  page.keyboard = {
+    insertText: async (value: string) => {
+      calls.push("insertText");
+      pw.value += value.slice(0, 5);
+      (globalThis as Record<string, unknown>).__zksFocused = text;
+      text.value += value.slice(5);
+    },
+  };
+  const { printed } = await runScript(buildCaptureScript(fillSpec(), fakeSecurity()), page);
+  assert.deepEqual(printed, ['ZKS_RESULT {"ok":false,"code":"browser_failed"}']);
+  assert.equal(pw.value, "");
+  assert.equal(text.value, "");
+  assert.ok(calls.includes("goto:about:blank"));
+});
+
+test("S1: the focus check itself re-checks the document origin", async () => {
+  const pw = Object.assign(new FakeInput(), { type: "password" });
+  let reads = 0;
+  const { page, calls } = domPage({ nodes: [pw] });
+  const evaluate = page.evaluate as (fn: unknown, arg: unknown) => Promise<unknown>;
+  page.evaluate = async (fn: unknown, arg: unknown) => {
+    const result = await evaluate(fn, arg);
+    return result;
+  };
+  // document.location.origin turns evil from the 2nd evaluate (the focus check) on, while page.url() still matches.
+  const g = globalThis as Record<string, unknown>;
+  const realEvaluate = page.evaluate;
+  page.evaluate = async (fn: unknown, arg: unknown) => {
+    reads++;
+    const run = realEvaluate as (fn: unknown, arg: unknown) => Promise<unknown>;
+    if (reads < 2) return run(fn, arg);
+    const saved = g.document;
+    const res = await (async () => {
+      const inner = evaluate as (fn: unknown, arg: unknown) => Promise<unknown>;
+      const wrapped = (a: unknown) => {
+        const doc = g.document as Record<string, unknown>;
+        g.document = { ...doc, location: { origin: "https://evil.example" }, querySelectorAll: doc.querySelectorAll, get activeElement() { return g.__zksFocused; }, hasFocus: () => false };
+        try {
+          return (fn as (a: unknown) => unknown)(a);
+        } finally {
+          g.document = doc;
+        }
+      };
+      return inner(wrapped, arg);
+    })();
+    g.document = saved;
+    return res;
+  };
+  const { printed } = await runScript(buildCaptureScript(fillSpec(), fakeSecurity()), page);
+  assert.deepEqual(printed, ['ZKS_RESULT {"ok":false,"code":"not_password_field"}']);
+  assert.ok(!calls.includes("insertText"));
+  assert.ok(!pw.value.includes(CANARY));
+});
+
+test("S5: fill --from with a capture record that has no item time asks first", async () => {
+  const h = harness({ exec: OK(14), keychain: { "app/password": "stored" }, approve: false });
+  capturedFrom(h, ORIGIN);
+  const store = h.deps.openAudit();
+  store.close();
+  // Re-record the capture without an item time, as an older zks version would have.
+  const s2 = h.deps.openAudit();
+  try {
+    s2.append({ ts: "2026-11-04T11:30:00.000Z", actorHuman: "tester", actorAgent: "pi:old", project: "app", provider: "keychain", target: "app/password", environment: ORIGIN, variableName: "password", action: "capture", sensitive: true, sourceKind: "capture-generate", result: "applied", providerVersion: "", errorCode: "" });
+  } finally {
+    s2.close();
+  }
+  assert.equal((await run(FROM, h.deps)).exitCode, 3);
+});
+
+test("S1 (N4): a contenteditable that received the typed text is cleared too", async () => {
+  const pw = Object.assign(new FakeInput(), { type: "password" });
+  const editable = Object.assign(new FakeElement(), { isContentEditable: true, textContent: "" });
+  const { page } = domPage({ nodes: [pw] });
+  page.keyboard = {
+    insertText: async (value: string) => {
+      (globalThis as Record<string, unknown>).__zksFocused = editable;
+      editable.textContent += value;
+    },
+  };
+  const { printed } = await runScript(buildCaptureScript(fillSpec(), fakeSecurity()), page);
+  assert.deepEqual(printed, ['ZKS_RESULT {"ok":false,"code":"browser_failed"}']);
+  assert.equal(editable.textContent, "");
+});

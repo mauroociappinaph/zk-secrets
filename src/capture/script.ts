@@ -155,6 +155,7 @@ function clearAfterFailure(selector) {
   const clear = (el) => {
     if (el instanceof HTMLInputElement) Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(el, "");
     else if (el instanceof HTMLTextAreaElement) Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(el, "");
+    else if (el && el.isContentEditable) el.textContent = "";
   };
   clear(document.activeElement);
   document.querySelectorAll(selector).forEach(clear);
