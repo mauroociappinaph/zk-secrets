@@ -30,6 +30,7 @@ Repo: `mauroociappinaph/zk-secrets` (private), branches `main` and `develop`.
 - T8 [S10] trusted destinations — worker — 23eba13 — done
 - T9 [S11] zks capture via ego-browser — worker — def689c — done (real ego e2e ok)
 - T10 [S9] skill + AGENTS.md autonomy rules, docs — worker — def689c — done
+- T11 [S1,S10,S11] verify round 3 corrections (L13, L14) — worker — commit: pending
 
 ## Log
 
@@ -45,3 +46,5 @@ Repo: `mauroociappinaph/zk-secrets` (private), branches `main` and `develop`.
 - L10 (user decisions): approval "Por destino de confianza (Recomendado)"; ego-browser logged-in sessions "Sí, autorizado" (Gmail verification and token sites).
 - L11 (verify round 2): L5 findings 1-7 fixed. New: (M1) ~/.aws/config endpoint_url redirects SSM/SM writes (fix: ignoreConfiguredEndpointUrls: true); ~/.config/gh/config.yml http_unix_socket redirects gh writes (decision: stop using gh for writes; get the token with `gh auth token` and call the GitHub REST API directly with libsodium sealed-box encryption); (M2) unbounded dialog line length; (L3) dotenv resolved against agent-chosen cwd: show absolute resolved path in dialog; (L4) realpath-then-read race: read the resolved path; (L5) reserved keychain service check case-insensitive; (L6) stale architecture.md lines 76/83; (L7) flags a command does not use are ignored; (L8) __proto__/constructor/prototype accepted as variable names.
 - L12 (evidence): 125/125 tests; reinstalled; doctor install ok, tools from tools.json (command -v paths, chosen over versioned realpaths so upgrades keep working), trust ok, audit count 6 anchored; ~/AGENTS.md block updated for autonomy. Verify round for T7b-T10 running.
+- L13 (verify round 3 on T7b-T10): S4, S5, S9, S10 met; S1 unmet, S11 partial. H1: `capture fill --from` fills any Keychain item into any page with no approval and optional origin (page JS can exfiltrate). M1: after a reveal click, failures leave the token on screen (no about:blank). M2: fill checks origin once before a 15 s wait; page.fill can reach cross-origin iframes. M3: skill claims more than code. L1: GitHub repo/env `.`/`..` segments accepted. L2: vercel trust key collision (no team vs teamId "personal"). L3: captures not mirrored. L4: first zks/* capture unapproved (same-user residual, document).
+- L14 (decision): --origin mandatory for every fill; --from silent only to the origin recorded in the audit for that item's last successful capture/generate, otherwise approval dialog; fill only into input[type=password] in the main frame via evaluate with an origin re-check in the same evaluate; finally about:blank whenever a reveal click ran; reject `.`/`..` GitHub segments; vercel trust keys vercel:team:<id> / vercel:personal; capture triggers mirror sync; document L4.
