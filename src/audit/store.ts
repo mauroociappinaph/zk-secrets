@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { AuditEntryInput, AuditRecord, AuditStore, AuditVerification } from "./types.ts";
+import type { AuditAnchor, AuditEntryInput, AuditRecord, AuditStore, AuditVerification } from "./types.ts";
 
 export const GENESIS_HASH = "0".repeat(64);
 const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -92,9 +92,11 @@ export function openAuditStore(dbPath: string): AuditStore {
     `INSERT INTO audit (${COLUMNS.map(([, c]) => c).join(", ")}) VALUES (${COLUMNS.map(() => "?").join(", ")})`,
   );
   const lastHash = db.prepare("SELECT hash FROM audit ORDER BY seq DESC LIMIT 1");
+  const countRows = db.prepare("SELECT COUNT(*) AS n FROM audit");
 
   return {
     append(entry: AuditEntryInput): AuditRecord {
+      // Outside the try: ROLLBACK only runs after a BEGIN that succeeded.
       db.exec("BEGIN IMMEDIATE");
       try {
         const prevHash = String((lastHash.get() as Row | undefined)?.hash ?? GENESIS_HASH);
@@ -120,9 +122,16 @@ export function openAuditStore(dbPath: string): AuditStore {
         : db.prepare("SELECT * FROM audit ORDER BY seq DESC LIMIT ?").all(limit);
       return (rows as Row[]).map(fromRow);
     },
-    verify(): AuditVerification {
+    head(): AuditAnchor {
+      return {
+        count: Number((countRows.get() as Row).n),
+        hash: String((lastHash.get() as Row | undefined)?.hash ?? GENESIS_HASH),
+      };
+    },
+    verify(anchor?: AuditAnchor): AuditVerification {
       let prev = GENESIS_HASH;
       let count = 0;
+      let hashAtAnchor = anchor && anchor.count === 0 ? GENESIS_HASH : undefined;
       for (const row of db.prepare("SELECT * FROM audit ORDER BY seq ASC").iterate() as Iterable<Row>) {
         const record = fromRow(row);
         if (record.prevHash !== prev || computeHash(prev, withoutChainFields(record)) !== record.hash) {
@@ -130,7 +139,9 @@ export function openAuditStore(dbPath: string): AuditStore {
         }
         prev = record.hash;
         count++;
+        if (anchor && count === anchor.count) hashAtAnchor = record.hash;
       }
+      if (anchor && (count < anchor.count || hashAtAnchor !== anchor.hash)) return { ok: false, count, brokenAt: "truncated" };
       return { ok: true, count };
     },
     pendingMirror(limit) {
@@ -139,6 +150,7 @@ export function openAuditStore(dbPath: string): AuditStore {
     },
     markMirrored(auditIds, ts) {
       const update = db.prepare("UPDATE audit SET mirrored_at = ? WHERE audit_id = ? AND mirrored_at = ''");
+      // Outside the try: ROLLBACK only runs after a BEGIN that succeeded.
       db.exec("BEGIN IMMEDIATE");
       try {
         for (const id of auditIds) update.run(ts, id);

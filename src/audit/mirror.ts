@@ -2,6 +2,8 @@ import { createHmac } from "node:crypto";
 import { ZKS_KEYCHAIN_SERVICE, type Keychain } from "../platform/keychain.ts";
 import type { AuditStore, Mirror, MirrorResult } from "./types.ts";
 
+/** The only webhook zks pushes to: a deployed Apps Script web app. */
+export const SHEETS_WEBHOOK_URL = /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/;
 export const MIRROR_BATCH = 200;
 const MIRROR_TIMEOUT_MS = 10_000;
 const MAX_BATCHES_PER_SYNC = 25;
@@ -32,6 +34,9 @@ export function createSheetsMirror(deps: MirrorDeps): Mirror {
       try {
         const url = (await deps.readConfig()).sheets?.webhookUrl;
         if (!url) return { configured: false, pushed, pending: pendingCount(store) };
+        if (typeof url !== "string" || !SHEETS_WEBHOOK_URL.test(url)) {
+          return { configured: true, pushed, pending: pendingCount(store), error: "invalid sheets webhook URL in config" };
+        }
 
         const key = await deps.keychain.get(ZKS_KEYCHAIN_SERVICE, "sheets-hmac");
         if (!key || key.length === 0) {

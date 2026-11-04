@@ -33,10 +33,18 @@ export interface AuditVerification {
   brokenAt?: string;
 }
 
+/** Record count and last hash, kept outside the database so a deleted tail is detected. */
+export interface AuditAnchor {
+  count: number;
+  hash: string;
+}
+
 export interface AuditStore {
   append(entry: AuditEntryInput): AuditRecord;
   list(options?: { limit?: number; project?: string }): AuditRecord[];
-  verify(): AuditVerification;
+  head(): AuditAnchor;
+  /** With an anchor, also fails with brokenAt "truncated" when records up to the anchor are missing. */
+  verify(anchor?: AuditAnchor): AuditVerification;
   pendingMirror(limit: number): AuditRecord[];
   markMirrored(auditIds: string[], ts: string): void;
   close(): void;

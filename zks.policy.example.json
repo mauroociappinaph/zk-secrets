@@ -6,7 +6,7 @@
     "ssm-prod": { "provider": "aws-ssm", "region": "us-east-1", "prefix": "/acme-shop/prod/", "roleArn": "arn:aws:iam::123456789012:role/zks-secret-writer" },
     "sm-prod": { "provider": "aws-sm", "region": "us-east-1", "prefix": "acme-shop/prod/", "profile": "acme-prod" },
     "github-prod": { "provider": "github", "repo": "acme/shop", "environment": "production" },
-    "railway-prod": { "provider": "railway", "projectId": "REPLACE_ME", "environmentId": "REPLACE_ME", "serviceId": "REPLACE_ME", "tokenType": "project" },
+    "railway-prod": { "provider": "railway", "projectId": "REPLACE-ME", "environmentId": "REPLACE-ME", "serviceId": "REPLACE-ME", "tokenType": "project" },
     "supabase-prod": { "provider": "supabase", "projectRef": "abcdefghijklmnopqrst" }
   },
   "variables": {

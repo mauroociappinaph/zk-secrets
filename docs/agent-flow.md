@@ -28,7 +28,7 @@ Human                    Agent                         zks                      
   │                       │    you to approve"          │                              │
   │                       │    zks apply --only --target│                              │
   │                       │────────────────────────────▶│                              │
-  │◀════════ native dialog: NAME -> target … [Approve / Deny] ══════════│               │
+  │◀════════ native dialog: NAME -> destination … [Approve / Deny] ═════│               │
   │═════════ Approve ══════════════════════════════════▶│                              │
   │                       │                             │ resolve value (op/keychain/  │
   │                       │                             │ prompt/generate/dotenv)      │
@@ -47,7 +47,7 @@ Human                    Agent                         zks                      
 
 Branches:
 
-- **Exit 2** (usage or policy): the agent fixes the policy or command and repeats from step 3.
+- **Exit 2** (usage or policy): the agent fixes the policy or command and repeats from step 3. `too_many_operations` means more than 20 writes: split the apply with `--only` / `--target`.
 - **Exit 3** (not approved): nothing was written. The agent asks the human whether to retry; it never retries on its own.
 - **Exit 1 with `missing_token`**: the agent tells the human to run `zks auth set <vercel|railway|supabase>`; the token goes through a hidden dialog, never through chat.
 - **AWS credentials expired**: the human runs `aws sso login`. **GitHub failures**: the human runs `gh auth login`.
@@ -60,7 +60,11 @@ Branches:
 | "It's in 1Password" | `op` | `{"kind":"op","ref":"op://Vault/Item/field"}` | Ask for the reference; it is not secret |
 | "I'll type it" / "I have it copied" | `prompt` | `{"kind":"prompt"}` | Hidden macOS dialog during apply |
 | "Make a new random key" | `generate` | `{"kind":"generate","bytes":32}` | New value on **every** apply: it rotates each time |
-| "It's in my Keychain" | `keychain` | `{"kind":"keychain","service":"svc","account":"acct"}` | Item must exist |
-| "It's in `.env.production`" | `dotenv` | `{"kind":"dotenv","path":".env.production","key":"NAME"}` | Agent passes the path; only zks opens the file |
+| "It's in my Keychain" | `keychain` | `{"kind":"keychain","service":"svc","account":"acct"}` | Item must exist; service `zks` is reserved |
+| "It's in `.env.production`" | `dotenv` | `{"kind":"dotenv","path":".env.production","key":"NAME"}` | Relative `.env*` file inside the project; agent passes the path; only zks opens the file |
 | "It's a public URL / log level" | literal | `"sensitive": false, "value": "info"` | Never for sensitive values |
 | Not sure | ask | — | Default to `sensitive: true` and `prompt` |
+
+Every row with a `source` needs `"sensitive": true`; zks rejects a source on a non-sensitive variable. Only a literal `value` can be `sensitive: false`.
+
+The approval dialog and `zks plan` show each write's real destination (`destination`), for example `github acme/shop env production secret` or `aws-ssm us-east-1 /acme-shop/prod/NAME role arn:…`. `zks config set|unset sheets-webhook` also opens an approval dialog.

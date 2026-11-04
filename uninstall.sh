@@ -3,12 +3,13 @@
 # Keeps the audit log, the config and the Keychain tokens, and says so.
 set -eu
 
-BIN_LAUNCHER="$HOME/.local/bin/zks"
-LIBEXEC="$HOME/.local/libexec/zks"
-SKILL_DIR="$HOME/.agents/skills/zks-secrets"
-AGENTS="$HOME/AGENTS.md"
-CONFIG_DIR="$HOME/.config/zks"
-STATE_DIR="$HOME/.local/state/zks"
+USER_HOME="$(eval echo "~$(id -un)")"
+BIN_LAUNCHER="$USER_HOME/.local/bin/zks"
+LIBEXEC="$USER_HOME/.local/libexec/zks"
+SKILL_DIR="$USER_HOME/.agents/skills/zks-secrets"
+AGENTS="$USER_HOME/AGENTS.md"
+CONFIG_DIR="$USER_HOME/.config/zks"
+STATE_DIR="$USER_HOME/.local/state/zks"
 BEGIN_MARK='<!-- zks:begin -->'
 END_MARK='<!-- zks:end -->'
 

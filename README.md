@@ -7,8 +7,9 @@
 **Guaranteed by design**
 
 - Secret values never appear in zks argv, environment, stdout, stderr, temp files or the audit log. Output is JSON metadata; any echoed secret is scrubbed.
-- zks rejects secret values on the command line (`--value`, `--secret`, `--token`, `--password`) and in the policy (`value` is only allowed when `sensitive: false`).
-- Nothing is written until you click **Approve** in a macOS dialog. Denial, timeout or no GUI writes nothing and is audited as `denied`.
+- zks rejects secret values on the command line (`--value`, `--secret`, `--token`, `--password`) and in the policy (`value` is only allowed when `sensitive: false`). Any `source` requires `sensitive: true`, so a resolved value can never go out as a readable plain variable.
+- Nothing is written until you click **Approve** in a macOS dialog. The dialog lists every write with its real destination (Vercel project/team, AWS region/name/role/profile/KMS key, GitHub repo/environment, Railway ids, Supabase project), at most 20 writes per apply. Denial, timeout or no GUI writes nothing and is audited as `denied`.
+- zks ignores the caller's environment: the launcher runs node through `env -i` with only `HOME`, `USER`, `LOGNAME`, `LANG`, a fixed `PATH` and the agent label, and zks empties `process.env` again before loading anything else. Variables such as `AWS_ENDPOINT_URL`, `HTTPS_PROXY`, `NODE_EXTRA_CA_CERTS`, `GH_HOST` or `XDG_CONFIG_HOME` cannot redirect a write.
 - Provider tokens live in the macOS Keychain; AWS uses your existing SSO or profile credentials.
 
 **Honest limits**
@@ -16,7 +17,10 @@
 - Values transit the zks process memory briefly: read, send, zero. zks zeroes its buffers and disables core dumps, but it cannot stop the OS from paging memory to swap, and the short-lived JavaScript strings sent to provider APIs cannot be zeroed.
 - An agent running as the **same macOS user** has the same file and Keychain access as you:
   - the install integrity check (`zks doctor`) is **tamper-evident, not tamper-proof**: it detects a modified install, it cannot prevent one;
-  - Keychain items can be read with `security find-generic-password -w` by the same user unless their ACL restricts it. The skill and `~/AGENTS.md` rule forbid this; they cannot enforce it.
+  - Keychain items (provider tokens, the audit anchor) can be read with `/usr/bin/security find-generic-password -w` by any process of the same user. The skill and `~/AGENTS.md` rule forbid this; they cannot enforce it. For a hard boundary, run the agent as a dedicated macOS user;
+  - it can edit the files zks trusts after `env -i`: `~/.aws/config` (endpoints, `credential_process`), `~/.config/gh` and the Homebrew binaries on the fixed `PATH` (`/opt/homebrew/bin/gh`, `op`).
+- The agent field of the audit log (`actorAgent`) is a **self-declared label** (`--agent`, `PI_SESSION_ID`, `AI_AGENT`); zks cannot authenticate who asked.
+- The local hash chain, the Keychain anchor (`audit-head`) and the Sheet mirror make tampering with the audit log **evident, not impossible**.
 - After the write, the provider's own access rules apply. Vercel `sensitive` variables and GitHub secrets cannot be read back; SSM SecureString and Secrets Manager values can be read by any principal with decrypt/read permission; Railway variables stay readable by every member of the Railway project.
 - The Google Sheets audit is a **mirror**. The source of truth is the local log (`zks audit verify`) and the providers' own audit logs.
 
@@ -82,6 +86,13 @@ Rules: Vercel sensitive variables cannot target `development`; Supabase rejects 
 | `dotenv` | a dotenv file read by zks (`path`, optional `key`) | migrating an existing `.env` file |
 | *(none)* `value` | literal in the policy | only `sensitive: false` env vars |
 
+Source rules:
+
+- Every `source` needs `"sensitive": true`. Only a literal `value` can be non-sensitive.
+- `keychain`: `service` and `account` match `^[A-Za-z0-9_.-]{1,128}$`; the service `zks` is reserved for zks's own tokens.
+- `dotenv`: `path` is a relative `.env*` file inside the project (for example `.env.production` or `apps/web/.env.local`): ASCII, no `..`, no absolute path.
+- `op`: `ref` is `op://` followed by printable ASCII without spaces, at most 512 characters.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -96,8 +107,8 @@ Rules: Vercel sensitive variables cannot target `development`; Supabase rejects 
 Every apply appends one record per variable × target to `~/.local/state/zks/audit.db` (SQLite, append-only triggers, SHA-256 hash chain): time, human, agent, project, provider, target, environment, variable name, sensitive flag, source kind, result, provider version, error code. There is no field for a value or a hash of a value.
 
 - `zks audit list` — read records.
-- `zks audit verify` — check the chain.
-- `zks audit sync` — push to the optional Google Sheets mirror; setup in [docs/apps-script](./docs/apps-script/README.md).
+- `zks audit verify` — check the chain, and check it against the anchor (record count and last hash) that every apply stores in the Keychain item `zks`/`audit-head`; a deleted tail fails with `brokenAt: "truncated"`.
+- `zks audit sync` — push to the optional Google Sheets mirror; setup in [docs/apps-script](./docs/apps-script/README.md). `zks config set|unset sheets-webhook` asks for your approval in a dialog.
 
 ## Uninstall
 

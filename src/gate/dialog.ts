@@ -7,7 +7,8 @@ export interface HumanChannel {
   promptSecret(title: string, message: string): Promise<SecretBuffer | null>;
 }
 
-const MAX_LINES = 25;
+/** Hard cap: a dialog with more lines is denied, never truncated (apply sends at most 23). */
+export const MAX_LINES = 25;
 const APPROVAL_TIMEOUT_SECONDS = 180;
 const PROMPT_TIMEOUT_SECONDS = 300;
 
@@ -15,19 +16,18 @@ export function appleScriptString(text: string): string {
   return `"${text.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
-function joinLines(lines: string[]): string {
-  const shown = lines.slice(0, MAX_LINES);
-  if (lines.length > MAX_LINES) shown.push(`... and ${lines.length - MAX_LINES} more`);
-  return shown.join("\n");
+/** Replaces every character outside printable ASCII (newlines, tabs, bidi controls) with "?". */
+export function sanitizeLine(text: string): string {
+  return text.replace(/[^\x20-\x7E]/g, "?");
 }
 
 export function createMacDialogs(exec: Exec, platform: NodeJS.Platform = process.platform): HumanChannel {
   return {
     async approve(title, lines) {
-      if (platform !== "darwin") return false;
+      if (platform !== "darwin" || lines.length > MAX_LINES) return false;
       const script = [
-        `set msg to ${appleScriptString(joinLines(lines))}`,
-        `set r to display dialog msg with title ${appleScriptString(title)} buttons {"Deny", "Approve"} default button "Deny" cancel button "Deny" with icon caution giving up after ${APPROVAL_TIMEOUT_SECONDS}`,
+        `set msg to ${appleScriptString(lines.map(sanitizeLine).join("\n"))}`,
+        `set r to display dialog msg with title ${appleScriptString(sanitizeLine(title))} buttons {"Deny", "Approve"} default button "Deny" cancel button "Deny" with icon caution giving up after ${APPROVAL_TIMEOUT_SECONDS}`,
         `if gave up of r then return "timeout"`,
         `return button returned of r`,
       ].join("\n");

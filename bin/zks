@@ -1,6 +1,14 @@
 #!/bin/sh
-# zks launcher: no core dumps, no inherited NODE_OPTIONS, experimental sqlite warning silenced.
+# zks dev launcher: no core dumps; node runs through `env -i` with only HOME, USER, LOGNAME,
+# LANG, a fixed PATH and the self-declared agent label, so no inherited variable reaches zks.
+# The installed launcher (install.sh) also fixes the node binary; this one takes node from PATH.
+set -eu
 ulimit -c 0
-unset NODE_OPTIONS
 ZKS_ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
-exec node --disable-warning=ExperimentalWarning "$ZKS_ROOT/dist/cli.js" "$@"
+NODE_BIN="$(command -v node)" || { printf 'zks: node not found on PATH\n' >&2; exit 1; }
+ZKS_USER="$(id -un)"
+ZKS_HOME="$(eval echo "~$ZKS_USER")"
+if [ -n "${PI_SESSION_ID:-}" ]; then ZKS_LABEL="pi:$PI_SESSION_ID"; else ZKS_LABEL="${AI_AGENT:-}"; fi
+exec /usr/bin/env -i HOME="$ZKS_HOME" USER="$ZKS_USER" LOGNAME="$ZKS_USER" LANG=en_US.UTF-8 \
+  PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin ZKS_AGENT_LABEL="$ZKS_LABEL" \
+  "$NODE_BIN" --disable-warning=ExperimentalWarning "$ZKS_ROOT/dist/cli.js" "$@"

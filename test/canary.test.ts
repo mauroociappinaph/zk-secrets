@@ -121,7 +121,7 @@ test("S5: denying the dialog writes nothing, audits denied and exits 3", async (
   assert.equal(h.aws.calls.length, 0);
   assert.equal(h.exec.calls.length, 0);
   assert.equal(h.human.approvals.length, 1);
-  assert.ok(h.human.approvals[0]!.some((l) => l.startsWith("- STRIPE_SECRET_KEY -> vercel-prod (vercel/production+preview) [secret; Keychain hismia/stripe]")));
+  assert.ok(h.human.approvals[0]!.some((l) => l === "- STRIPE_SECRET_KEY -> vercel project prj_1 team team_1 env production+preview [secret; Keychain hismia/stripe] (target vercel-prod)"));
   const store = openAuditStore(h.auditDb);
   assert.deepEqual(store.list().map((r) => r.result), Array(6).fill("denied"));
   store.close();
@@ -200,8 +200,24 @@ test("plan lists operations without network, dialogs or audit", async () => {
     ok: true,
     project: "hismia-web",
     operations: [
-      { name: "STRIPE_SECRET_KEY", target: "gh", provider: "github", environment: "production", sensitive: true, source: "Keychain hismia/stripe" },
-      { name: "STRIPE_SECRET_KEY", target: "supa", provider: "supabase", environment: "", sensitive: true, source: "Keychain hismia/stripe" },
+      {
+        name: "STRIPE_SECRET_KEY",
+        target: "gh",
+        provider: "github",
+        environment: "production",
+        destination: "github acme/web env production secret",
+        sensitive: true,
+        source: "Keychain hismia/stripe",
+      },
+      {
+        name: "STRIPE_SECRET_KEY",
+        target: "supa",
+        provider: "supabase",
+        environment: "",
+        destination: "supabase project abcdefghijklmnopqrst",
+        sensitive: true,
+        source: "Keychain hismia/stripe",
+      },
     ],
   });
   assert.equal(h.human.approvals.length + h.fetch.calls.length + h.exec.calls.length, 0);

@@ -1,4 +1,3 @@
-import { homedir } from "node:os";
 import { join } from "node:path";
 
 export interface ZksPaths {
@@ -9,7 +8,8 @@ export interface ZksPaths {
   auditDb: string;
 }
 
-export function zksPaths(home: string = homedir()): ZksPaths {
+/** zks paths under the real home directory (os.userInfo().homedir); $HOME is never used. */
+export function zksPaths(home: string): ZksPaths {
   const configDir = join(home, ".config", "zks");
   const stateDir = join(home, ".local", "state", "zks");
   return {

@@ -5,6 +5,9 @@
  * and appends them to the "audit" sheet. No record field can hold a secret value.
  *
  * Script Properties: ZKS_HMAC_KEY (the same value stored with `zks auth set sheets-hmac`).
+ * The script keeps ZKS_LAST_HASH itself: the hash of the last mirrored record. Each appended row
+ * gets a chainOk column, TRUE when its prevHash equals that hash (or nothing was mirrored yet),
+ * so a rewritten or truncated local log shows up as FALSE in the Sheet.
  */
 var SHEET_NAME = "audit";
 var MAX_AGE_MS = 10 * 60 * 1000;
@@ -13,6 +16,7 @@ var COLUMNS = [
   "variableName", "action", "sensitive", "sourceKind", "result", "providerVersion", "errorCode",
   "prevHash", "hash"
 ];
+var HEADER = COLUMNS.concat(["chainOk"]);
 
 function doPost(e) {
   try {
@@ -38,6 +42,8 @@ function doPost(e) {
       if (last > 1) {
         sheet.getRange(2, 1, last - 1, 1).getValues().forEach(function (row) { existing[row[0]] = true; });
       }
+      var properties = PropertiesService.getScriptProperties();
+      var lastHash = properties.getProperty("ZKS_LAST_HASH");
       var accepted = [];
       var rows = [];
       (payload.records || []).forEach(function (record) {
@@ -45,9 +51,16 @@ function doPost(e) {
         accepted.push(record.auditId);
         if (existing[record.auditId]) return;
         existing[record.auditId] = true;
-        rows.push(COLUMNS.map(function (c) { return record[c] === undefined ? "" : String(record[c]); }));
+        var chainOk = !lastHash || record.prevHash === lastHash;
+        var row = COLUMNS.map(function (c) { return record[c] === undefined ? "" : String(record[c]); });
+        row.push(chainOk);
+        rows.push(row);
+        lastHash = String(record.hash);
       });
-      if (rows.length > 0) sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, COLUMNS.length).setValues(rows);
+      if (rows.length > 0) {
+        sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, HEADER.length).setValues(rows);
+        properties.setProperty("ZKS_LAST_HASH", lastHash);
+      }
       return reply({ ok: true, accepted: accepted });
     } finally {
       lock.releaseLock();
@@ -61,7 +74,7 @@ function auditSheet() {
   var book = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = book.getSheetByName(SHEET_NAME) || book.insertSheet(SHEET_NAME);
   if (sheet.getLastRow() === 0) {
-    sheet.appendRow(COLUMNS);
+    sheet.appendRow(HEADER);
     sheet.setFrozenRows(1);
   }
   return sheet;

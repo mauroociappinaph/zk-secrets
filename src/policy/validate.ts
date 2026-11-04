@@ -12,7 +12,17 @@ import {
 export const VARIABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 export const TARGET_KEY = /^[a-z0-9][a-z0-9-]{0,62}$/;
 export const PROJECT_NAME = /^[A-Za-z0-9._-]{1,64}$/;
-const SAFE_ID = /^[A-Za-z0-9._:/@+=-]{1,256}$/;
+const VERCEL_ID = /^[A-Za-z0-9_.-]{1,100}$/;
+const GIT_BRANCH = /^[A-Za-z0-9_.\/-]{1,250}$/;
+const GITHUB_ENVIRONMENT = /^[A-Za-z0-9_.-]{1,255}$/;
+const RAILWAY_ID = /^[A-Za-z0-9-]{1,64}$/;
+const AWS_PROFILE = /^[A-Za-z0-9_.-]{1,64}$/;
+const KMS_KEY_ID = /^(alias\/[A-Za-z0-9\/_-]{1,250}|[0-9a-f-]{36}|arn:aws[a-z-]*:kms:[a-z0-9-]+:\d{12}:(key|alias)\/[A-Za-z0-9\/_-]+)$/;
+const KEYCHAIN_ID = /^[A-Za-z0-9_.-]{1,128}$/;
+const OP_REF = /^op:\/\/[\x21-\x7E]{1,512}$/;
+const DOTENV_PATH = /^(?:[A-Za-z0-9_-][A-Za-z0-9_.-]*\/)*\.env[A-Za-z0-9_.-]*$/;
+/** Keychain service holding zks's own provider tokens and audit anchor; never a policy source. */
+const RESERVED_KEYCHAIN_SERVICE = "zks";
 const AWS_REGION = /^[a-z]{2}(-[a-z]+)+-\d$/;
 const SSM_PREFIX = /^\/([A-Za-z0-9_.-]+\/)*$/;
 const SM_PREFIX = /^([A-Za-z0-9_.+=@-]+\/)*$/;
@@ -80,9 +90,14 @@ function validateTarget(path: string, target: unknown, issues: string[]): void {
   }
   switch (provider) {
     case "vercel": {
-      requireString(`${path}.projectId`, target.projectId, SAFE_ID, issues);
-      optionalString(`${path}.teamId`, target.teamId, SAFE_ID, issues);
-      optionalString(`${path}.gitBranch`, target.gitBranch, SAFE_ID, issues);
+      requireString(`${path}.projectId`, target.projectId, VERCEL_ID, issues);
+      optionalString(`${path}.teamId`, target.teamId, VERCEL_ID, issues);
+      if (
+        target.gitBranch !== undefined &&
+        (typeof target.gitBranch !== "string" || !GIT_BRANCH.test(target.gitBranch) || target.gitBranch.includes(".."))
+      ) {
+        issues.push(`${path}.gitBranch: must match ${GIT_BRANCH} without ".."`);
+      }
       const envs = target.environments;
       if (
         !Array.isArray(envs) ||
@@ -97,19 +112,19 @@ function validateTarget(path: string, target: unknown, issues: string[]): void {
     case "aws-sm": {
       requireString(`${path}.region`, target.region, AWS_REGION, issues);
       requireString(`${path}.prefix`, target.prefix, provider === "aws-ssm" ? SSM_PREFIX : SM_PREFIX, issues);
-      optionalString(`${path}.profile`, target.profile, SAFE_ID, issues);
+      optionalString(`${path}.profile`, target.profile, AWS_PROFILE, issues);
       optionalString(`${path}.roleArn`, target.roleArn, ROLE_ARN, issues);
-      optionalString(`${path}.kmsKeyId`, target.kmsKeyId, SAFE_ID, issues);
+      optionalString(`${path}.kmsKeyId`, target.kmsKeyId, KMS_KEY_ID, issues);
       break;
     }
     case "github":
       requireString(`${path}.repo`, target.repo, GITHUB_REPO, issues);
-      optionalString(`${path}.environment`, target.environment, SAFE_ID, issues);
+      optionalString(`${path}.environment`, target.environment, GITHUB_ENVIRONMENT, issues);
       break;
     case "railway":
-      requireString(`${path}.projectId`, target.projectId, SAFE_ID, issues);
-      requireString(`${path}.environmentId`, target.environmentId, SAFE_ID, issues);
-      optionalString(`${path}.serviceId`, target.serviceId, SAFE_ID, issues);
+      requireString(`${path}.projectId`, target.projectId, RAILWAY_ID, issues);
+      requireString(`${path}.environmentId`, target.environmentId, RAILWAY_ID, issues);
+      optionalString(`${path}.serviceId`, target.serviceId, RAILWAY_ID, issues);
       if (target.tokenType !== undefined && target.tokenType !== "account" && target.tokenType !== "project") {
         issues.push(`${path}.tokenType: must be "account" or "project"`);
       }
@@ -130,13 +145,17 @@ function validateSource(path: string, source: unknown, issues: string[]): void {
   }
   switch (source.kind) {
     case "op":
-      if (typeof source.ref !== "string" || !/^op:\/\/[^\s]+$/.test(source.ref)) {
+      if (typeof source.ref !== "string" || !OP_REF.test(source.ref)) {
         issues.push(`${path}.ref: must be an op:// reference`);
       }
       break;
     case "keychain":
-      requireString(`${path}.service`, source.service, SAFE_ID, issues);
-      requireString(`${path}.account`, source.account, SAFE_ID, issues);
+      if (source.service === RESERVED_KEYCHAIN_SERVICE) {
+        issues.push(`${path}.service: "${RESERVED_KEYCHAIN_SERVICE}" is reserved for zks provider tokens`);
+      } else {
+        requireString(`${path}.service`, source.service, KEYCHAIN_ID, issues);
+      }
+      requireString(`${path}.account`, source.account, KEYCHAIN_ID, issues);
       break;
     case "prompt":
       break;
@@ -151,7 +170,9 @@ function validateSource(path: string, source: unknown, issues: string[]): void {
       break;
     }
     case "dotenv":
-      if (typeof source.path !== "string" || source.path.length === 0) issues.push(`${path}.path: must be a file path`);
+      if (typeof source.path !== "string" || !DOTENV_PATH.test(source.path) || source.path.split("/").includes("..")) {
+        issues.push(`${path}.path: must be a relative .env* file inside the project`);
+      }
       optionalString(`${path}.key`, source.key, VARIABLE_NAME, issues);
       break;
     default:
@@ -177,6 +198,9 @@ function validateVariable(name: string, spec: unknown, targets: Json, issues: st
   if (spec.value !== undefined && typeof spec.value !== "string") issues.push(`${path}.value: must be a string`);
   if (spec.source === undefined && spec.value === undefined) issues.push(`${path}: needs a source or a value`);
   if (spec.source !== undefined && spec.value !== undefined) issues.push(`${path}: use either source or value, not both`);
+  if (spec.source !== undefined && spec.sensitive === false) {
+    issues.push(`${path}.sensitive: must be true when a source is used; only literal values can be non-sensitive`);
+  }
   if (spec.source !== undefined) validateSource(`${path}.source`, spec.source, issues);
 
   if (!Array.isArray(spec.targets) || spec.targets.length === 0) {
@@ -184,7 +208,7 @@ function validateVariable(name: string, spec: unknown, targets: Json, issues: st
     return;
   }
   for (const key of spec.targets) {
-    const target = typeof key === "string" ? targets[key] : undefined;
+    const target = typeof key === "string" && Object.hasOwn(targets, key) ? targets[key] : undefined;
     if (!isObject(target)) {
       issues.push(`${path}.targets: unknown target "${String(key)}"`);
       continue;
@@ -214,8 +238,8 @@ export interface Selection {
 
 /** Expands variables × targets into operations, filtered by --only and --target. */
 export function planOperations(policy: Policy, selection: Selection = {}): Operation[] {
-  const unknownNames = (selection.only ?? []).filter((n) => !(n in policy.variables));
-  const unknownTargets = (selection.targets ?? []).filter((t) => !(t in policy.targets));
+  const unknownNames = (selection.only ?? []).filter((n) => !Object.hasOwn(policy.variables, n));
+  const unknownTargets = (selection.targets ?? []).filter((t) => !Object.hasOwn(policy.targets, t));
   const issues = [
     ...unknownNames.map((n) => `--only: unknown variable "${n}"`),
     ...unknownTargets.map((t) => `--target: unknown target "${t}"`),

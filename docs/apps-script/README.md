@@ -2,6 +2,8 @@
 
 The Sheet is a **mirror**. The source of truth is the local hash-chained log (`zks audit verify`) plus the providers' own logs (AWS CloudTrail, Vercel audit log, GitHub audit log). Anyone with edit access to a Sheet can change rows, so never treat it as tamper-proof evidence.
 
+The script also keeps the hash of the last mirrored record in the Script Property `ZKS_LAST_HASH` (it sets it; you do not) and adds a `chainOk` column: `FALSE` means the record does not continue the chain the Sheet saw before, so the local log was rewritten or truncated. A Sheet created with an older `Code.gs` needs the `chainOk` header added by hand.
+
 Records hold metadata only: id, time, human, agent, project, provider, target, environment, variable name, result and the provider version. There is no field for a value or a hash of a value.
 
 ## Setup (about five minutes)

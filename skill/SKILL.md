@@ -16,7 +16,9 @@ Set secrets and env vars on Vercel, AWS SSM, AWS Secrets Manager, GitHub Actions
 - Never edit, chmod or replace files under `~/.local/libexec/zks`, `~/.local/bin/zks` or `~/.config/zks/integrity.json`.
 - Never script, click, focus or dismiss the approval or prompt dialog (`osascript`, accessibility tools, `cliclick`, browser automation). The human answers it.
 - If the human pastes a secret in chat: do not use it, do not repeat it, do not write it anywhere. Say it is now exposed and recommend rotating it, then continue with a `prompt` or `op` source.
-- Literal `value` is only for `sensitive: false` variables. If in doubt, mark it sensitive.
+- Literal `value` is only for `sensitive: false` variables. Every `source` needs `"sensitive": true`; zks rejects a source on a non-sensitive variable. If in doubt, mark it sensitive.
+- Never use the Keychain service `zks` as a source: it holds zks's own tokens and is rejected.
+- At most 20 writes per apply (`too_many_operations`); split with `--only` / `--target`.
 
 ## Workflow
 
@@ -29,11 +31,11 @@ Set secrets and env vars on Vercel, AWS SSM, AWS Secrets Manager, GitHub Actions
    | Human will type it | `{"kind":"prompt"}` — zks opens a hidden dialog |
    | New random key (signing key, webhook secret) | `{"kind":"generate","bytes":32}` — warn: a NEW value on every apply, so it rotates each time |
    | Already in the macOS Keychain | `{"kind":"keychain","service":"...","account":"..."}` |
-   | Migrating an existing `.env` file | `{"kind":"dotenv","path":".env.production","key":"NAME"}` — pass the path, never open the file |
+   | Migrating an existing `.env` file | `{"kind":"dotenv","path":".env.production","key":"NAME"}` — pass the path, never open the file; it must be a relative `.env*` file inside the project (no `..`, no absolute path) |
    | Non-sensitive config (`sensitive: false`) | `"value": "..."` instead of `source` |
 
 3. **Validate.** `zks validate`. Fix every listed issue and rerun until `"ok": true`.
-4. **Plan.** `zks plan --only A,B --target t1,t2`. Show the human the list (name → target, environment, sensitive, source).
+4. **Plan.** `zks plan --only A,B --target t1,t2`. Show the human the list (name → `destination`, sensitive, source). The approval dialog shows the same destinations.
 5. **Apply.** `zks apply --only A,B --target t1,t2` with the narrowest selection. Before running it, tell the human: "a macOS dialog will ask you to approve these writes". Wait for the command; do not retry a denial on your own.
 6. **Report.** Show only the JSON `results`: `name`, `target`, `result`, `version`, `auditId` (plus `error.code` when failed). Exit codes:
 
@@ -60,7 +62,7 @@ Set secrets and env vars on Vercel, AWS SSM, AWS Secrets Manager, GitHub Actions
     "ssm-prod": { "provider": "aws-ssm", "region": "us-east-1", "prefix": "/acme-shop/prod/", "roleArn": "arn:aws:iam::123456789012:role/zks-secret-writer" },
     "sm-prod": { "provider": "aws-sm", "region": "us-east-1", "prefix": "acme-shop/prod/", "profile": "acme-prod" },
     "github-prod": { "provider": "github", "repo": "acme/shop", "environment": "production" },
-    "railway-prod": { "provider": "railway", "projectId": "REPLACE_ME", "environmentId": "REPLACE_ME", "serviceId": "REPLACE_ME", "tokenType": "project" },
+    "railway-prod": { "provider": "railway", "projectId": "REPLACE-ME", "environmentId": "REPLACE-ME", "serviceId": "REPLACE-ME", "tokenType": "project" },
     "supabase-prod": { "provider": "supabase", "projectRef": "abcdefghijklmnopqrst" }
   },
   "variables": {
@@ -79,17 +81,17 @@ Set secrets and env vars on Vercel, AWS SSM, AWS Secrets Manager, GitHub Actions
 }
 ```
 
-Names match `^[A-Za-z_][A-Za-z0-9_]{0,127}$`; target keys match `^[a-z0-9][a-z0-9-]{0,62}$`; `project` matches `^[A-Za-z0-9._-]{1,64}$`.
+Names match `^[A-Za-z_][A-Za-z0-9_]{0,127}$`; target keys match `^[a-z0-9][a-z0-9-]{0,62}$`; `project` matches `^[A-Za-z0-9._-]{1,64}$`. Keychain `service`/`account` match `^[A-Za-z0-9_.-]{1,128}$`; `op://` references are printable ASCII without spaces.
 
 ## Target fields
 
 | Provider | Required | Optional | Rules |
 |---|---|---|---|
-| `vercel` | `projectId`, `environments` (non-empty subset of `production`, `preview`, `development`) | `teamId`, `gitBranch` | Sensitive variables cannot target `development`. Sensitive → Vercel type `sensitive`, plain → `plain`. |
-| `aws-ssm` | `region` (e.g. `us-east-1`), `prefix` | `profile`, `roleArn`, `kmsKeyId` | `prefix` starts and ends with `/` (e.g. `/app/prod/`). Sensitive → `SecureString`, plain → `String`. |
+| `vercel` | `projectId`, `environments` (non-empty subset of `production`, `preview`, `development`) | `teamId`, `gitBranch` | Ids match `^[A-Za-z0-9_.-]{1,100}$`; `gitBranch` has no `..`. Sensitive variables cannot target `development`. Sensitive → Vercel type `sensitive`, plain → `plain`. |
+| `aws-ssm` | `region` (e.g. `us-east-1`), `prefix` | `profile`, `roleArn`, `kmsKeyId` | `prefix` starts and ends with `/` (e.g. `/app/prod/`). `kmsKeyId` is `alias/<name>`, a key UUID or a KMS ARN. Sensitive → `SecureString`, plain → `String`. |
 | `aws-sm` | `region`, `prefix` | `profile`, `roleArn`, `kmsKeyId` | `prefix` has no leading `/`; empty or segments ending in `/` (e.g. `app/prod/`). |
-| `github` | `repo` (`owner/name`) | `environment` | Sensitive → Actions secret, plain → Actions variable. |
-| `railway` | `projectId`, `environmentId` | `serviceId`, `tokenType` (`account` or `project`), `skipDeploys` (boolean) | Without `serviceId` the variable is shared across the environment. |
+| `github` | `repo` (`owner/name`) | `environment` (`^[A-Za-z0-9_.-]{1,255}$`) | Sensitive → Actions secret, plain → Actions variable. |
+| `railway` | `projectId`, `environmentId` | `serviceId`, `tokenType` (`account` or `project`), `skipDeploys` (boolean) | Ids match `^[A-Za-z0-9-]{1,64}$`. Without `serviceId` the variable is shared across the environment. |
 | `supabase` | `projectRef` (exactly 20 lowercase letters or digits) | — | Edge Functions secrets. Names must not start with `SUPABASE_`. |
 
 `roleArn` matches `arn:aws:iam::<12 digits>:role/<name>`; zks assumes it for 15 minutes with a session policy that only allows writes under `prefix`.
@@ -97,7 +99,7 @@ Names match `^[A-Za-z_][A-Za-z0-9_]{0,127}$`; target keys match `^[a-z0-9][a-z0-
 ## Audit
 
 - `zks audit list [--limit N] [--project P]` — metadata records (time, human, agent, project, provider, target, variable, result). Never values.
-- `zks audit verify` — checks the hash chain; exit 1 means the local log was altered. Tell the human.
+- `zks audit verify` — checks the hash chain and the Keychain anchor; exit 1 (`brokenAt` a record id or `"truncated"`) means the local log was altered. Tell the human.
 - `zks audit sync` — pushes pending records to the Google Sheets mirror, if configured.
 
 ## When to stop and ask the human

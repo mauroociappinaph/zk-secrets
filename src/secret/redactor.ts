@@ -5,7 +5,7 @@ const MIN_REDACT_LENGTH = 4;
 
 /**
  * Last line of defense: every text that leaves the process passes through scrub(),
- * which removes any registered secret in raw, JSON-escaped, URL-encoded or base64 form.
+ * which removes any registered secret in raw, JSON-escaped, URL-encoded, base64, base64url or hex form.
  */
 export class Redactor {
   #needles = new Set<string>();
@@ -17,6 +17,7 @@ export class Redactor {
     this.#needles.add(JSON.stringify(raw).slice(1, -1));
     this.#needles.add(encodeURIComponent(raw));
     this.#needles.add(Buffer.from(raw, "utf8").toString("base64"));
+    this.#needles.add(Buffer.from(raw, "utf8").toString("base64url"));
     this.#needles.add(Buffer.from(raw, "utf8").toString("hex"));
   }
 

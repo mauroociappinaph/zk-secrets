@@ -1,7 +1,8 @@
 #!/bin/sh
 # Installs zks for the current macOS user:
 #   ~/.local/libexec/zks/<version>/   read-only app (dist, bin, production node_modules)
-#   ~/.local/bin/zks                  launcher with the absolute install path baked in
+#   ~/.local/bin/zks                  launcher with node, home and install path baked in; runs
+#                                     node through `env -i` with a fixed PATH
 #   ~/.config/zks/integrity.json      digest of the install, checked by `zks doctor`
 #   ~/.agents/skills/zks-secrets/     agent skill
 #   ~/AGENTS.md                       global rule between <!-- zks:begin --> and <!-- zks:end -->
@@ -24,14 +25,24 @@ node -e 'const [a, b] = process.versions.node.split(".").map(Number); process.ex
 
 REPO="$(pwd -P)"
 VERSION="$(node -p 'require("./package.json").version')"
-LIBEXEC="$HOME/.local/libexec/zks"
+# Fixed at install time so the launcher never trusts the caller's PATH or HOME.
+NODE_BIN="$(node -p 'require("node:fs").realpathSync(process.execPath)')"
+USER_NAME="$(id -un)"
+USER_HOME="$(eval echo "~$USER_NAME")"
+SAFE_PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+for baked in "$NODE_BIN" "$USER_HOME" "$USER_NAME"; do
+  case "$baked" in
+    "" | *[!A-Za-z0-9/._@+-]*) die "unsupported character in \"$baked\"; zks needs plain paths for node and your home" ;;
+  esac
+done
+LIBEXEC="$USER_HOME/.local/libexec/zks"
 DEST="$LIBEXEC/$VERSION"
-BIN_DIR="$HOME/.local/bin"
+BIN_DIR="$USER_HOME/.local/bin"
 LAUNCHER="$BIN_DIR/zks"
-CONFIG_DIR="$HOME/.config/zks"
+CONFIG_DIR="$USER_HOME/.config/zks"
 INTEGRITY="$CONFIG_DIR/integrity.json"
-SKILL_DIR="$HOME/.agents/skills/zks-secrets"
-AGENTS="$HOME/AGENTS.md"
+SKILL_DIR="$USER_HOME/.agents/skills/zks-secrets"
+AGENTS="$USER_HOME/AGENTS.md"
 BEGIN_MARK='<!-- zks:begin -->'
 END_MARK='<!-- zks:end -->'
 
@@ -54,6 +65,7 @@ cp -R dist bin package.json package-lock.json "$DEST/"
 (cd "$DEST" && npm ci --omit=dev --ignore-scripts)
 chmod 755 "$DEST/bin/zks"
 DEST="$(cd "$DEST" && pwd -P)"
+case "$DEST" in *[!A-Za-z0-9/._@+-]*) die "unsupported character in install path $DEST" ;; esac
 
 printf '==> Writing launcher %s\n' "$LAUNCHER"
 mkdir -p "$BIN_DIR"
@@ -64,7 +76,13 @@ fi
 cat >"$LAUNCHER" <<EOF
 #!/bin/sh
 # zks launcher written by install.sh. Do not edit: reinstall with ./install.sh instead.
-exec "$DEST/bin/zks" "\$@"
+# node runs through env -i with only HOME, USER, LOGNAME, LANG, a fixed PATH and the
+# self-declared agent label; node, home and the app path were fixed at install time.
+ulimit -c 0
+if [ -n "\${PI_SESSION_ID:-}" ]; then ZKS_LABEL="pi:\$PI_SESSION_ID"; else ZKS_LABEL="\${AI_AGENT:-}"; fi
+exec /usr/bin/env -i HOME="$USER_HOME" USER="$USER_NAME" LOGNAME="$USER_NAME" LANG=en_US.UTF-8 \\
+  PATH="$SAFE_PATH" ZKS_AGENT_LABEL="\$ZKS_LABEL" \\
+  "$NODE_BIN" --disable-warning=ExperimentalWarning "$DEST/dist/cli.js" "\$@"
 EOF
 chmod 555 "$LAUNCHER"
 
@@ -134,14 +152,14 @@ cat <<EOF
 
 zks $VERSION installed.
   app (read-only):  $DEST
-  launcher:         $LAUNCHER
+  launcher:         $LAUNCHER (node $NODE_BIN; reinstall after upgrading node)
   integrity:        $INTEGRITY (install status: $INSTALL_STATUS)
   skill:            $SKILL_DIR/SKILL.md
   agent rule:       $AGENTS ($BEGIN_MARK ... $END_MARK)
 EOF
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
-  *) printf '\nAdd %s to your PATH, for example in ~/.zshrc:\n  export PATH="$HOME/.local/bin:$PATH"\n' "$BIN_DIR" ;;
+  *) printf '\nAdd %s to your PATH, for example in ~/.zshrc:\n  export PATH="%s:$PATH"\n' "$BIN_DIR" "$BIN_DIR" ;;
 esac
 printf '\nNext: zks auth set vercel|railway|supabase, aws sso login, gh auth login, then zks init in a project.\n'
 [ "$INSTALL_STATUS" = "ok" ] || die "install status is \"$INSTALL_STATUS\", expected \"ok\""

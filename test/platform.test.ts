@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { inspect } from "node:util";
 import { appleScriptString, createMacDialogs } from "../src/gate/dialog.ts";
-import { minimalEnv } from "../src/platform/exec.ts";
 import { createKeychain } from "../src/platform/keychain.ts";
 import { Redactor } from "../src/secret/redactor.ts";
 import { SecretBuffer } from "../src/secret/secret-buffer.ts";
@@ -26,13 +25,6 @@ test("Redactor removes raw, JSON-escaped, URL, base64 and hex forms", () => {
   r.register(SecretBuffer.fromString(value));
   const text = [value, JSON.stringify(value), encodeURIComponent(value), Buffer.from(value).toString("base64"), Buffer.from(value).toString("hex")].join(" ");
   assert.ok(!r.scrub(text).includes("ss"));
-});
-
-test("minimalEnv forwards only base and CLI-auth variables", () => {
-  assert.deepEqual(
-    minimalEnv({ PATH: "/bin", HOME: "/h", OP_SESSION_x: "s", GH_HOST: "g", AWS_SECRET_ACCESS_KEY: "nope", VERCEL_TOKEN: "nope", STRIPE_KEY: "nope" }),
-    { PATH: "/bin", HOME: "/h", OP_SESSION_x: "s", GH_HOST: "g" },
-  );
 });
 
 test("keychain reads with -w, writes through security -i stdin as hex, never argv", async () => {

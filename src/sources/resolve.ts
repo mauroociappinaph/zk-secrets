@@ -1,6 +1,6 @@
 import { randomBytes as nodeRandomBytes } from "node:crypto";
-import { readFile as nodeReadFile } from "node:fs/promises";
-import { resolve as resolvePath } from "node:path";
+import { readFile as nodeReadFile, realpath as nodeRealpath } from "node:fs/promises";
+import { isAbsolute, relative, resolve as resolvePath } from "node:path";
 import type { SourceSpec, VariableSpec } from "../policy/types.ts";
 import type { HumanChannel } from "../gate/dialog.ts";
 import type { Exec } from "../platform/exec.ts";
@@ -14,6 +14,7 @@ export interface SourceDeps {
   cwd: string;
   readFile?: (path: string) => Promise<Buffer>;
   randomBytes?: (size: number) => Buffer;
+  realpath?: (path: string) => Promise<string>;
 }
 
 export class SourceError extends Error {
@@ -61,7 +62,19 @@ async function resolveSource(name: string, source: SourceSpec, deps: SourceDeps)
     }
     case "dotenv": {
       const read = deps.readFile ?? nodeReadFile;
-      const file = await read(resolvePath(deps.cwd, source.path)).catch(() => null);
+      const fullPath = resolvePath(deps.cwd, source.path);
+      const inside = relative(resolvePath(deps.cwd), fullPath);
+      if (inside === "" || inside.startsWith("..") || isAbsolute(inside)) {
+        throw new SourceError("source_invalid", `dotenv path for ${name} must stay inside the project`);
+      }
+      // Symlinks are resolved too: a .env link to ~/.aws/credentials stays outside the project.
+      const real = deps.realpath ?? nodeRealpath;
+      const realOrSelf = (path: string) => real(path).catch(() => path);
+      const realInside = relative(await realOrSelf(resolvePath(deps.cwd)), await realOrSelf(fullPath));
+      if (realInside === "" || realInside.startsWith("..") || isAbsolute(realInside)) {
+        throw new SourceError("source_invalid", `dotenv path for ${name} must stay inside the project`);
+      }
+      const file = await read(fullPath).catch(() => null);
       if (!file) throw new SourceError("source_missing", `dotenv file ${source.path} not readable`);
       const value = findDotenvValue(file.toString("utf8"), source.key ?? name);
       file.fill(0);

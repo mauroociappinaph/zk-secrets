@@ -1,7 +1,10 @@
+import { readAuditAnchor, writeAuditAnchor } from "./audit/anchor.ts";
+import { SHEETS_WEBHOOK_URL } from "./audit/mirror.ts";
 import type { AuditRecord, AuditStore, Mirror, MirrorResult } from "./audit/types.ts";
 import type { HumanChannel } from "./gate/dialog.ts";
 import type { Exec } from "./platform/exec.ts";
 import { ZKS_KEYCHAIN_SERVICE, type Keychain } from "./platform/keychain.ts";
+import { describeDestination } from "./policy/describe.ts";
 import { PolicyError, describeSource, planOperations, validatePolicy } from "./policy/validate.ts";
 import type { Operation, Policy, Provider, TargetConfig } from "./policy/types.ts";
 import { Redactor } from "./secret/redactor.ts";
@@ -15,6 +18,9 @@ export const EXIT_OK = 0;
 export const EXIT_FAILED = 1;
 export const EXIT_USAGE = 2;
 export const EXIT_DENIED = 3;
+
+/** One dialog must show every write in full; larger applies are refused, never truncated. */
+export const MAX_OPERATIONS_PER_APPROVAL = 20;
 
 export const TOKEN_ACCOUNTS = ["vercel", "railway", "supabase", "sheets-hmac"] as const;
 export type TokenAccount = (typeof TOKEN_ACCOUNTS)[number];
@@ -66,6 +72,15 @@ interface OperationResult {
 
 class UsageError extends Error {}
 
+/** A provider write succeeded but its audit record could not be appended. */
+class AuditWriteError extends Error {
+  readonly op: Operation;
+  constructor(op: Operation) {
+    super(`the provider write for ${op.name} -> ${op.targetKey} succeeded but its audit record could not be written`);
+    this.op = op;
+  }
+}
+
 const FORBIDDEN_FLAGS = ["--value", "--secret", "--token", "--password"];
 const FLAGS_WITH_VALUE = ["--policy", "--only", "--target", "--agent", "--limit", "--project"];
 
@@ -79,10 +94,11 @@ function parseArgs(argv: string[]): ParsedArgs {
   const flags = new Map<string, string>();
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i] as string;
-    if (!arg.startsWith("--")) {
+    if (!arg.startsWith("-")) {
       positionals.push(arg);
       continue;
     }
+    if (!arg.startsWith("--")) throw new UsageError(`unknown option ${arg}`);
     const [flag, inline] = arg.split(/=(.*)/s, 2) as [string, string | undefined];
     if (FORBIDDEN_FLAGS.includes(flag)) {
       throw new UsageError(
@@ -99,6 +115,26 @@ function parseArgs(argv: string[]): ParsedArgs {
     flags.set(flag, value);
   }
   return { positionals, flags };
+}
+
+/** Positionals each command accepts, including the command itself; undefined lets the command report usage. */
+function positionalLimit(command: string, sub: string | undefined): number | undefined {
+  switch (command) {
+    case "init":
+    case "validate":
+    case "plan":
+    case "apply":
+    case "doctor":
+      return 1;
+    case "audit":
+      return 2;
+    case "auth":
+      return sub === "status" ? 2 : sub === "set" || sub === "delete" ? 3 : undefined;
+    case "config":
+      return sub === "show" ? 2 : sub === "set" ? 4 : sub === "unset" ? 3 : undefined;
+    default:
+      return undefined;
+  }
 }
 
 function list(value: string | undefined): string[] | undefined {
@@ -141,6 +177,7 @@ function describeOperation(op: Operation): Record<string, unknown> {
     target: op.targetKey,
     provider: op.target.provider,
     environment: environmentOf(op.target),
+    destination: describeDestination(op),
     sensitive: op.variable.sensitive,
     source: describeSource(op.variable.source),
   };
@@ -149,10 +186,9 @@ function describeOperation(op: Operation): Record<string, unknown> {
 function approvalLines(policy: Policy, ops: Operation[]): string[] {
   const lines = [`Project: ${policy.project}`, `Write ${ops.length} value(s):`, ""];
   for (const op of ops) {
-    const env = environmentOf(op.target);
     lines.push(
-      `- ${op.name} -> ${op.targetKey} (${op.target.provider}${env ? `/${env}` : ""}) ` +
-        `[${op.variable.sensitive ? "secret" : "plain"}; ${describeSource(op.variable.source)}]`,
+      `- ${op.name} -> ${describeDestination(op)} ` +
+        `[${op.variable.sensitive ? "secret" : "plain"}; ${describeSource(op.variable.source)}] (target ${op.targetKey})`,
     );
   }
   return lines;
@@ -180,6 +216,9 @@ async function dispatch(argv: string[], deps: Deps, redactor: Redactor): Promise
   const [command, sub, arg] = positionals;
   if (flags.has("--version")) return { exitCode: EXIT_OK, stdout: `${deps.version}\n` };
   if (flags.has("--help") || command === undefined || command === "help") return { exitCode: EXIT_OK, stdout: HELP_TEXT };
+  const limit = positionalLimit(command, sub);
+  // The extra argument is never echoed: it might be a pasted secret.
+  if (limit !== undefined && positionals.length > limit) throw new UsageError("unexpected argument");
 
   switch (command) {
     case "init":
@@ -221,6 +260,15 @@ async function apply(deps: Deps, flags: Map<string, string>, redactor: Redactor)
   const policy = await loadPolicy(deps, flags.get("--policy"));
   const ops = planOperations(policy, selection(flags));
   if (ops.length === 0) return json(EXIT_OK, { ok: true, project: policy.project, results: [] });
+  if (ops.length > MAX_OPERATIONS_PER_APPROVAL) {
+    return json(EXIT_USAGE, {
+      ok: false,
+      error: {
+        code: "too_many_operations",
+        message: `${ops.length} writes do not fit in one approval dialog (max ${MAX_OPERATIONS_PER_APPROVAL}); narrow with --only or --target`,
+      },
+    });
+  }
 
   const agent = flags.get("--agent") ?? deps.agentId;
   const store = deps.openAudit();
@@ -250,64 +298,90 @@ async function apply(deps: Deps, flags: Map<string, string>, redactor: Redactor)
         const entry = record(op, "denied", { errorCode: "not_approved" });
         results.push(toResult(op, entry, "denied", undefined, { code: "not_approved", message: "denied or no answer in the approval dialog" }));
       }
+      const anchorError = await saveAnchor(deps, store);
       const mirror = await deps.mirror.sync(store);
-      return json(EXIT_DENIED, { ok: false, project: policy.project, results, mirror });
+      return json(EXIT_DENIED, { ok: false, project: policy.project, results, mirror, ...anchorError });
     }
 
     const byVariable = new Map<string, Operation[]>();
     for (const op of ops) byVariable.set(op.name, [...(byVariable.get(op.name) ?? []), op]);
 
-    for (const [name, variableOps] of byVariable) {
-      const variable = (variableOps[0] as Operation).variable;
-      let value: SecretBuffer | null = null;
-      try {
-        value = await resolveValue(name, variable, {
-          exec: deps.exec,
-          keychain: deps.keychain,
-          human: deps.human,
-          cwd: deps.cwd,
-          readFile: deps.readFile,
-          randomBytes: deps.randomBytes,
-        });
-        if (variable.sensitive) redactor.register(value);
-      } catch (error) {
-        const code = error instanceof SourceError ? error.code : "source_failed";
-        const message = redactor.scrub(error instanceof Error ? error.message : String(error));
-        for (const op of variableOps) {
-          const entry = record(op, "failed", { errorCode: code });
-          results.push(toResult(op, entry, "failed", undefined, { code, message }));
-        }
-        continue;
-      }
-      try {
-        for (const op of variableOps) {
-          try {
-            const sink = deps.sinks[op.target.provider];
-            const { version } = await sink.apply(op, value, {
-              fetch: deps.fetch,
-              exec: deps.exec,
-              keychain: deps.keychain,
-              aws: deps.aws,
-            });
-            const entry = record(op, "applied", { version });
-            results.push(toResult(op, entry, "applied", version));
-          } catch (error) {
-            const code = error instanceof SinkError ? error.code : "provider_error";
-            const message = redactor.scrub(error instanceof Error ? error.message : String(error)).slice(0, 300);
+    try {
+      for (const [name, variableOps] of byVariable) {
+        const variable = (variableOps[0] as Operation).variable;
+        let value: SecretBuffer | null = null;
+        try {
+          value = await resolveValue(name, variable, {
+            exec: deps.exec,
+            keychain: deps.keychain,
+            human: deps.human,
+            cwd: deps.cwd,
+            readFile: deps.readFile,
+            randomBytes: deps.randomBytes,
+          });
+          if (variable.sensitive) redactor.register(value);
+        } catch (error) {
+          const code = error instanceof SourceError ? error.code : "source_failed";
+          const message = redactor.scrub(error instanceof Error ? error.message : String(error));
+          for (const op of variableOps) {
             const entry = record(op, "failed", { errorCode: code });
             results.push(toResult(op, entry, "failed", undefined, { code, message }));
           }
+          continue;
         }
-      } finally {
-        value.dispose();
+        try {
+          for (const op of variableOps) {
+            let version: string | undefined;
+            try {
+              const sink = deps.sinks[op.target.provider];
+              ({ version } = await sink.apply(op, value, {
+                fetch: deps.fetch,
+                exec: deps.exec,
+                keychain: deps.keychain,
+                aws: deps.aws,
+              }));
+            } catch (error) {
+              const code = error instanceof SinkError ? error.code : "provider_error";
+              const message = redactor.scrub(error instanceof Error ? error.message : String(error)).slice(0, 300);
+              const entry = record(op, "failed", { errorCode: code });
+              results.push(toResult(op, entry, "failed", undefined, { code, message }));
+              continue;
+            }
+            let entry: AuditRecord;
+            try {
+              entry = record(op, "applied", { version });
+            } catch {
+              throw new AuditWriteError(op);
+            }
+            results.push(toResult(op, entry, "applied", version));
+          }
+        } finally {
+          value.dispose();
+        }
       }
+    } catch (error) {
+      if (!(error instanceof AuditWriteError)) throw error;
+      // Stop: further writes would go unaudited.
+      await saveAnchor(deps, store);
+      return json(EXIT_FAILED, { ok: false, error: { code: "audit_failed", message: error.message }, results });
     }
 
+    const anchorError = await saveAnchor(deps, store);
     const mirror: MirrorResult = await deps.mirror.sync(store);
     const ok = results.every((r) => r.result === "applied");
-    return json(ok ? EXIT_OK : EXIT_FAILED, { ok, project: policy.project, results, mirror });
+    return json(ok ? EXIT_OK : EXIT_FAILED, { ok, project: policy.project, results, mirror, ...anchorError });
   } finally {
     store.close();
+  }
+}
+
+/** Stores the audit head in the Keychain so `zks audit verify` detects a deleted tail. */
+async function saveAnchor(deps: Deps, store: AuditStore): Promise<{ anchorError?: string }> {
+  try {
+    await writeAuditAnchor(deps.keychain, store.head());
+    return {};
+  } catch {
+    return { anchorError: "could not store the audit anchor in the Keychain" };
   }
 }
 
@@ -399,8 +473,9 @@ async function audit(deps: Deps, sub: string | undefined, flags: Map<string, str
         return json(EXIT_OK, { ok: true, records: store.list({ limit, project: flags.get("--project") }) });
       }
       case "verify": {
-        const result = store.verify();
-        return json(result.ok ? EXIT_OK : EXIT_FAILED, { ...result });
+        const anchor = await readAuditAnchor(deps.keychain);
+        const result = store.verify(anchor ?? undefined);
+        return json(result.ok ? EXIT_OK : EXIT_FAILED, { ...result, anchored: anchor !== null });
       }
       case "sync": {
         const mirror = await deps.mirror.sync(store);
@@ -414,8 +489,6 @@ async function audit(deps: Deps, sub: string | undefined, flags: Map<string, str
   }
 }
 
-const SHEETS_WEBHOOK = /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/;
-
 async function config(deps: Deps, sub: string | undefined, key: string | undefined, value: string | undefined): Promise<RunOutput> {
   const current = await deps.readConfig();
   switch (sub) {
@@ -423,13 +496,19 @@ async function config(deps: Deps, sub: string | undefined, key: string | undefin
       return json(EXIT_OK, { ok: true, config: current });
     case "set": {
       if (key !== "sheets-webhook") throw new UsageError("usage: zks config set sheets-webhook <https://script.google.com/macros/s/.../exec>");
-      if (!value || !SHEETS_WEBHOOK.test(value)) throw new UsageError("sheets-webhook must be a deployed Apps Script URL ending in /exec");
+      if (!value || !SHEETS_WEBHOOK_URL.test(value)) throw new UsageError("sheets-webhook must be a deployed Apps Script URL ending in /exec");
+      if (!(await deps.human.approve("zks: approve config change", [`Mirror the audit log to ${value} (set sheets-webhook)?`]))) {
+        return configNotApproved();
+      }
       const next = { ...current, sheets: { ...current.sheets, webhookUrl: value } };
       await deps.writeConfig(next);
       return json(EXIT_OK, { ok: true, config: next });
     }
     case "unset": {
       if (key !== "sheets-webhook") throw new UsageError("usage: zks config unset sheets-webhook");
+      if (!(await deps.human.approve("zks: approve config change", ["Stop mirroring the audit log to Google Sheets (unset sheets-webhook)?"]))) {
+        return configNotApproved();
+      }
       const next = { ...current, sheets: {} };
       await deps.writeConfig(next);
       return json(EXIT_OK, { ok: true, config: next });
@@ -437,4 +516,8 @@ async function config(deps: Deps, sub: string | undefined, key: string | undefin
     default:
       throw new UsageError("usage: zks config show | zks config set sheets-webhook <url> | zks config unset sheets-webhook");
   }
+}
+
+function configNotApproved(): RunOutput {
+  return json(EXIT_DENIED, { ok: false, error: { code: "not_approved", message: "config change not approved" } });
 }
