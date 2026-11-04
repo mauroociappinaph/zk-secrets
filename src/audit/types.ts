@@ -61,7 +61,8 @@ export interface AuditStore {
    */
   lastCaptureOrigin(target: string): string | null;
   /** Origin and time of the last applied capture-read/capture-generate of target. */
-  lastCapture(target: string): { origin: string; ts: string } | null;
+  /** itemModified: the Keychain item's modification time recorded at capture (ISO), or "". */
+  lastCapture(target: string): { origin: string; ts: string; itemModified: string } | null;
   pendingMirror(limit: number): AuditRecord[];
   markMirrored(auditIds: string[], ts: string): void;
   close(): void;

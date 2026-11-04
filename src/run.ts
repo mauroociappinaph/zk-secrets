@@ -778,6 +778,12 @@ async function capture(deps: Deps, sub: string | undefined, flags: Map<string, s
       outcome: { code: CaptureErrorCode | "not_approved"; message?: string } | { length: number },
     ) => {
       const errorCode = "code" in outcome ? outcome.code : "";
+      // A successful read or generate records the stored item's modification time, which a later
+      // fill --from must match exactly to stay silent.
+      const itemModified =
+        result === "applied" && req.sourceKind !== "capture-from"
+          ? ((await deps.keychain.modifiedAt(req.service, req.account).catch(() => null))?.toISOString() ?? "")
+          : "";
       const entry = audit.append({
         ts: deps.now().toISOString(),
         actorHuman: deps.user,
@@ -791,7 +797,7 @@ async function capture(deps: Deps, sub: string | undefined, flags: Map<string, s
         sensitive: true,
         sourceKind: req.sourceKind,
         result,
-        providerVersion: "",
+        providerVersion: itemModified,
         errorCode,
         ...(approval ? { approval } : {}),
       });
@@ -820,7 +826,8 @@ async function capture(deps: Deps, sub: string | undefined, flags: Map<string, s
       // outside zks could be any secret).
       const recorded = audit.lastCapture(store);
       const modified = await deps.keychain.modifiedAt(req.service, req.account);
-      const unchanged = recorded !== null && modified !== null && modified.getTime() <= Date.parse(recorded.ts);
+      // The item must still carry exactly the modification time recorded by that capture.
+      const unchanged = recorded !== null && modified !== null && recorded.itemModified !== "" && modified.toISOString() === recorded.itemModified;
       if (recorded === null || recorded.origin !== req.origin || !unchanged) {
         approval = "dialog";
         const from = recorded?.origin || "unknown";

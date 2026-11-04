@@ -135,6 +135,28 @@ function preparePassword({ selector, expected }) {
   return document.activeElement === node ? { ok: true } : { ok: false, code: "not_password_field" };
 }
 
+/** Runs right before typing, without the secret: same origin, page focused, focus still on that input. */
+function focusStillOnPassword({ selector, expected }) {
+  if (document.location.origin !== expected || !document.hasFocus()) return { ok: false, code: "not_password_field" };
+  const nodes = document.querySelectorAll(selector);
+  const node = nodes.length === 1 ? nodes[0] : null;
+  if (!(node instanceof HTMLInputElement) || node.type !== "password" || document.activeElement !== node) {
+    return { ok: false, code: "not_password_field" };
+  }
+  return { ok: true };
+}
+
+/** After a failed confirmation: clear whatever received the text and the target input. */
+function clearAfterFailure(selector) {
+  const clear = (el) => {
+    if (el instanceof HTMLInputElement) Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(el, "");
+    else if (el instanceof HTMLTextAreaElement) Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(el, "");
+  };
+  clear(document.activeElement);
+  document.querySelectorAll(selector).forEach(clear);
+  return true;
+}
+
 /** Runs after typing, again without the secret: same origin, same focused password input, expected length. */
 function confirmPassword({ selector, expected, length }) {
   if (document.location.origin !== expected) return { ok: false, code: "origin_mismatch" };
@@ -175,13 +197,26 @@ async function fill(page) {
   bytes.fill(0);
   if (value.length === 0) return { ok: false, code: "not_found" };
   const length = value.length;
+  let typed = false;
+  let confirmed = { ok: false, code: "browser_failed" };
   try {
     if (!(await originMatches(page))) return { ok: false, code: "origin_mismatch" };
+    const focused = pageResult(await page.evaluate(focusStillOnPassword, { selector: spec.selector, expected: spec.origin }));
+    if (!focused.ok) return focused;
+    typed = true;
     await page.keyboard.insertText(value);
+    value = null;
+    confirmed = pageResult(await page.evaluate(confirmPassword, { selector: spec.selector, expected: spec.origin, length }));
+  } catch {
+    confirmed = { ok: false, code: "browser_failed" };
   } finally {
     value = null;
+    if (typed && !confirmed.ok) {
+      // The text may have landed somewhere else: wipe it and leave the page.
+      try { await page.evaluate(clearAfterFailure, spec.selector); } catch {}
+      try { await page.goto("about:blank"); } catch {}
+    }
   }
-  const confirmed = pageResult(await page.evaluate(confirmPassword, { selector: spec.selector, expected: spec.origin, length }));
   return confirmed.ok ? { ok: true, length } : confirmed;
 }
 

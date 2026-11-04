@@ -64,7 +64,8 @@ export function createKeychain(exec: Exec): Keychain {
 }
 
 export function parseKeychainDate(attributes: string): Date | null {
-  const m = /"mdat"<timedate>=\S+\s+"(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})Z/.exec(attributes);
+  // Anchored to the attribute's own line, so a label or comment that contains "mdat" cannot fake it.
+  const m = /^\s*"mdat"<timedate>=0x[0-9A-F]+\s+"(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})Z\\000"\s*$/m.exec(attributes);
   if (!m) return null;
   const [, y, mo, d, h, mi, s] = m;
   return new Date(Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s)));

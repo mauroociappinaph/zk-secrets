@@ -112,7 +112,7 @@ export function openAuditStore(dbPath: string): AuditStore {
   const lastHash = db.prepare("SELECT hash FROM audit ORDER BY seq DESC LIMIT 1");
   const countRows = db.prepare("SELECT COUNT(*) AS n FROM audit");
   const lastCapture = db.prepare(
-    "SELECT environment, ts FROM audit WHERE action = 'capture' AND result = 'applied' AND target = ? " +
+    "SELECT environment, ts, provider_version FROM audit WHERE action = 'capture' AND result = 'applied' AND target = ? " +
       "AND source_kind IN ('capture-read', 'capture-generate') ORDER BY seq DESC LIMIT 1",
   );
 
@@ -172,7 +172,9 @@ export function openAuditStore(dbPath: string): AuditStore {
     },
     lastCapture(target) {
       const row = lastCapture.get(target) as Row | undefined;
-      return row === undefined ? null : { origin: String(row.environment ?? ""), ts: String(row.ts ?? "") };
+      return row === undefined
+        ? null
+        : { origin: String(row.environment ?? ""), ts: String(row.ts ?? ""), itemModified: String(row.provider_version ?? "") };
     },
     pendingMirror(limit) {
       const rows = db.prepare("SELECT * FROM audit WHERE mirrored_at = '' ORDER BY seq ASC LIMIT ?").all(limit);

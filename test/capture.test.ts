@@ -126,6 +126,7 @@ function domPage(options: { nodes: FakeElement[]; origin?: string; url?: () => s
       g.document = {
         location: { origin: options.origin ?? ORIGIN },
         querySelectorAll: () => options.nodes,
+        hasFocus: () => true,
         get activeElement() {
           return g.__zksFocused;
         },
@@ -242,7 +243,7 @@ test("S11: fill sets one password input with the native setter and input/change 
   assert.equal(input.value, CANARY);
   assert.equal(input.nativeSets, 1, "only the clear goes through the setter");
   assert.deepEqual(input.events, [{ type: "input", bubbles: true }, { type: "change", bubbles: true }]);
-  assert.deepEqual(calls, ["wait", "evaluate", "insertText", "evaluate"]);
+  assert.deepEqual(calls, ["wait", "evaluate", "evaluate", "insertText", "evaluate"]);
 });
 
 test("S1 (N1): the secret is typed through the keyboard and never passed into the page's JavaScript", async () => {
@@ -250,7 +251,7 @@ test("S1 (N1): the secret is typed through the keyboard and never passed into th
   const { page, evaluateArgs } = domPage({ nodes: [input] });
   const { printed } = await runScript(buildCaptureScript(fillSpec(), fakeSecurity()), page);
   assert.deepEqual(printed, [`ZKS_RESULT {"ok":true,"length":${CANARY.length}}`]);
-  assert.equal(evaluateArgs.length, 2);
+  assert.equal(evaluateArgs.length, 3);
   assert.ok(!JSON.stringify(evaluateArgs).includes(CANARY), "evaluate received the secret");
 });
 
@@ -602,7 +603,8 @@ function capturedFrom(h: ReturnType<typeof harness>, origin: string, sourceKind:
       sensitive: true,
       sourceKind,
       result: "applied",
-      providerVersion: "",
+      // zks records the Keychain item's modification time; the fake keychain seeds items at epoch 0.
+      providerVersion: new Date(0).toISOString(),
       errorCode: "",
     });
   } finally {
@@ -862,4 +864,62 @@ test("S1 (N2): fill --from asks again when the Keychain item changed after its r
 test("S11 (N3): the capture process timeout covers every wait inside the script", async () => {
   const { CAPTURE_TIMEOUT_MS } = await import("../src/capture/run.ts");
   assert.ok(CAPTURE_TIMEOUT_MS >= 120_000);
+});
+
+test("S1 (B1): focus moved off the password input before typing leaves no secret anywhere", async () => {
+  const pw = Object.assign(new FakeInput(), { type: "password" });
+  const text = Object.assign(new FakeInput(), { type: "text" });
+  let n = 0;
+  const { page, calls } = domPage({
+    nodes: [pw],
+    url: () => {
+      if (++n === 3) (globalThis as Record<string, unknown>).__zksFocused = text;
+      return ORIGIN;
+    },
+  });
+  const { printed } = await runScript(buildCaptureScript(fillSpec(), fakeSecurity()), page);
+  assert.deepEqual(printed, ['ZKS_RESULT {"ok":false,"code":"not_password_field"}']);
+  assert.ok(!calls.includes("insertText"));
+  assert.ok(!text.value.includes(CANARY) && !pw.value.includes(CANARY));
+});
+
+test("S1 (B1): if the typed text lands anywhere else, zks clears it and leaves the page", async () => {
+  const pw = Object.assign(new FakeInput(), { type: "password" });
+  const text = Object.assign(new FakeInput(), { type: "text" });
+  const { page, calls } = domPage({ nodes: [pw] });
+  // The page steals focus exactly while the browser types.
+  page.keyboard = {
+    insertText: async (value: string) => {
+      calls.push("insertText");
+      (globalThis as Record<string, unknown>).__zksFocused = text;
+      text.value += value;
+    },
+  };
+  const { printed } = await runScript(buildCaptureScript(fillSpec(), fakeSecurity()), page);
+  assert.deepEqual(printed, ['ZKS_RESULT {"ok":false,"code":"browser_failed"}']);
+  assert.equal(text.value, "");
+  assert.ok(calls.includes("goto:about:blank"));
+});
+
+test("S1 (A1): a forged mdat inside another attribute is ignored", async () => {
+  const { parseKeychainDate } = await import("../src/platform/keychain.ts");
+  const attrs =
+    '    0x00000007 <blob>=""mdat"<timedate>=x "19700101000000Z"\n' +
+    '    "mdat"<timedate>=0x32303236313130343137353330325A00  "20261104175302Z\\000"\n';
+  assert.equal(parseKeychainDate(attrs)?.toISOString(), "2026-11-04T17:53:02.000Z");
+});
+
+test("S5 (A2): fill --from asks again when the item's modification time differs from the recorded one", async () => {
+  const h = harness({ exec: OK(14), keychain: { "app/password": "stored" }, approve: false });
+  capturedFrom(h, ORIGIN);
+  h.keychain.modified.set("app/password", new Date("2026-11-04T11:00:00.000Z"));
+  assert.equal((await run(FROM, h.deps)).exitCode, 3);
+});
+
+test("S5 (A2): a capture records the stored item's modification time as its version", async () => {
+  const h = harness({ exec: OK(32) });
+  const out = await run(["capture", "fill", "--space", "4", "--page", "p1", "--selector", "#pw", "--store", "app/new", "--generate", "24", "--origin", ORIGIN], h.deps);
+  assert.equal(out.exitCode, 0, out.stdout);
+  const [record] = records(h);
+  assert.equal(record!.providerVersion, h.keychain.modified.get("app/new")!.toISOString());
 });
