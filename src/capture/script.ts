@@ -135,9 +135,13 @@ function preparePassword({ selector, expected }) {
   return document.activeElement === node ? { ok: true } : { ok: false, code: "not_password_field" };
 }
 
-/** Runs right before typing, without the secret: same origin, page focused, focus still on that input. */
+/**
+ * Runs right before typing, without the secret: same origin, focus still on that input.
+ * document.hasFocus() is not required: an automated tab whose window lacks OS focus reports
+ * false, while the browser still types into the page's active element.
+ */
 function focusStillOnPassword({ selector, expected }) {
-  if (document.location.origin !== expected || !document.hasFocus()) return { ok: false, code: "not_password_field" };
+  if (document.location.origin !== expected) return { ok: false, code: "not_password_field" };
   const nodes = document.querySelectorAll(selector);
   const node = nodes.length === 1 ? nodes[0] : null;
   if (!(node instanceof HTMLInputElement) || node.type !== "password" || document.activeElement !== node) {

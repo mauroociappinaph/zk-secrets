@@ -126,7 +126,8 @@ function domPage(options: { nodes: FakeElement[]; origin?: string; url?: () => s
       g.document = {
         location: { origin: options.origin ?? ORIGIN },
         querySelectorAll: () => options.nodes,
-        hasFocus: () => true,
+        // Like a real automated ego tab without OS focus: fill must not depend on hasFocus().
+        hasFocus: () => false,
         get activeElement() {
           return g.__zksFocused;
         },
@@ -923,3 +924,4 @@ test("S5 (A2): a capture records the stored item's modification time as its vers
   const [record] = records(h);
   assert.equal(record!.providerVersion, h.keychain.modified.get("app/new")!.toISOString());
 });
+
