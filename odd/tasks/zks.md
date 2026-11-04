@@ -16,15 +16,16 @@ Repo: `mauroociappinaph/zk-secrets` (private), branches `main` and `develop`.
 
 ## Tasks
 
-- T1 [S1,S2,S5] core: policy schema, SecretBuffer, scrub, output, approval gate, sources, CLI `run` — inline — commit: pending
-- T2 [S3] provider sinks: vercel, aws-ssm, aws-sm, github, railway, supabase — commit: pending
-- T3 [S4] audit store, verify, Sheets mirror + Apps Script — commit: pending
-- T4 [S1] canary tests through `run` — commit: pending
-- T5 [S6,S8] install script, skill, docs, AGENTS.md rule, CI — commit: pending
-- T6 [S7] GitHub private repo, main + develop pushed — commit: pending
+- T1 [S1,S2,S5] core: policy, SecretBuffer, scrub, approval gate, sources, CLI `run` — inline — 67ff5c4 — done
+- T2 [S3] provider sinks: vercel, aws-ssm, aws-sm, github, railway, supabase — inline (worker launch refused by runtime) — 900b4e7 — done
+- T3 [S4] audit store, verify, Sheets mirror + Apps Script — inline — df94e23 — done
+- T4 [S1] canary tests through `run` — inline, mutation-checked (3 mutants killed) — 67ff5c4 — done
+- T5 [S6,S8] install script, skill, docs, AGENTS.md rule, CI — worker — eea3174 — done
+- T6 [S7] GitHub private repo, main + develop — inline — repo created; feature merge after verify
 
 ## Log
 
 - L1 (user, original request): "Actúa como arquitecto de software y experto en seguridad. Quiero diseñar y programar una Agent Skill orientada a la automatización de despliegues y configuración de infraestructura (Vercel, AWS). La skill debe cumplir estrictamente con un modelo de privacidad y conocimiento cero para el agente y la máquina local: el agente jamás debe ver, procesar ni almacenar los valores en texto plano de las claves secretas. [...] Inyección por referencia o tokens con ámbito [...] Capa de auditoría (Backend / Google Sheets) [...] nunca el valor del secreto. Estructura: Define la arquitectura de la Skill, los scripts seguros necesarios (Node.js/Python) y el flujo paso a paso [...] Opción 2: Enfoque como Aplicación / CLI de Utilidad [...] Vercel, AWS Parameter Store, etc. [...] Integración opcional por detrás con Google Sheets [...]"
 - L2 (user): "Decid todo vos. Debe funcionar en todas mis sesiones de gs para que lo haga solo. Debe incluir todas las plataformas incluyendo variables de entorno , etc . Crea el repo en maurociappinaph privado con rama main y develop"
 - L3 (decision): GitHub account is `mauroociappinaph` (active gh login); repo `zk-secrets`. Node 22 + TypeScript, node:test, node:sqlite (no native deps). Branch flow: work on `feature/zks-core`, merge to `develop`, fast-forward `main` for v0.1.0.
+- L4 (evidence): 40/40 tests + typecheck; install.sh ran, `zks doctor` install.status ok; real Keychain round-trip ok; repo mauroociappinaph/zk-secrets PRIVATE with main+develop; real smoke: human approved dialog, `ZKS_SMOKE_TEST` (generate) applied to GitHub Actions, audit result applied.
