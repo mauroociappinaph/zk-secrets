@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { accessSync, constants, readFileSync, statSync } from "node:fs";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,12 +11,33 @@ import { createExec } from "./platform/exec.ts";
 import { checkIntegrity } from "./platform/integrity.ts";
 import { ZKS_KEYCHAIN_SERVICE, createKeychain } from "./platform/keychain.ts";
 import { zksPaths } from "./platform/paths.ts";
+import { TOOLS_FILE, resolveTools, type ToolPaths } from "./platform/tools.ts";
 import { loadTrust, type TrustFile } from "./policy/trust.ts";
 import { TOKEN_ACCOUNTS, run, type Deps, type ZksConfig } from "./run.ts";
 import { createAwsClientFactory } from "./sinks/aws-clients.ts";
 import { createSinks } from "./sinks/index.ts";
 
 const appRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+function isExecutableFile(path: string): boolean {
+  try {
+    accessSync(path, constants.X_OK);
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/** <install>/tools.json from install.sh; a development checkout has none and looks on SAFE_PATH. */
+function loadTools(): { tools: ToolPaths; source: "tools.json" | "safe-path" } {
+  let text: string | null = null;
+  try {
+    text = readFileSync(join(appRoot, TOOLS_FILE), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") text = "";
+  }
+  return { tools: resolveTools(text, isExecutableFile), source: text === null ? "safe-path" : "tools.json" };
+}
 
 export interface Identity {
   /** Real home and user name from the OS user database, never from the environment. */
@@ -52,6 +74,7 @@ export async function main(identity: Identity): Promise<number> {
   };
   const exec = createExec({ home: identity.home, user: identity.user });
   const keychain = createKeychain(exec);
+  const { tools, source: toolsSource } = loadTools();
   const pkg = JSON.parse(await readFile(join(appRoot, "package.json"), "utf8")) as { version: string };
 
   const deps: Deps = {
@@ -61,6 +84,7 @@ export async function main(identity: Identity): Promise<number> {
     agentId: identity.agentId,
     now: () => new Date(),
     exec,
+    tools,
     keychain,
     human: createMacDialogs(exec),
     fetch: globalThis.fetch,
@@ -104,7 +128,13 @@ export async function main(identity: Identity): Promise<number> {
         node: process.versions.node,
         approvalDialog: process.platform === "darwin" ? "macOS osascript" : "unavailable: every apply is denied",
         install: { root: appRoot, ...checkIntegrity(paths.integrityFile, appRoot) },
-        tools: { op: await which("op"), gh: await which("gh"), aws: await which("aws") },
+        tools: {
+          source: toolsSource,
+          "ego-browser": tools.egoBrowser !== null && isExecutableFile(tools.egoBrowser),
+          op: tools.op !== null && isExecutableFile(tools.op),
+          gh: tools.gh !== null && isExecutableFile(tools.gh),
+          aws: await which("aws"),
+        },
         tokens,
         audit: { path: paths.auditDb, ...audit },
         mirror: { sheetsWebhook: Boolean((await readConfig()).sheets?.webhookUrl) },

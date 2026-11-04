@@ -1,6 +1,7 @@
 import type { AwsSmTarget, AwsSsmTarget, Operation } from "../policy/types.ts";
 import type { Exec } from "../platform/exec.ts";
 import type { Keychain } from "../platform/keychain.ts";
+import type { ToolPaths } from "../platform/tools.ts";
 import type { SecretBuffer } from "../secret/secret-buffer.ts";
 
 /** Minimal AWS SDK v3 client surface: `send(new XCommand(input))`. */
@@ -18,6 +19,7 @@ export interface SinkContext {
   exec: Exec;
   keychain: Keychain;
   aws: AwsClientFactory;
+  tools: ToolPaths;
 }
 
 export interface SinkResult {

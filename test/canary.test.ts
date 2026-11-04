@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { openAuditStore } from "../src/audit/store.ts";
 import { run } from "../src/run.ts";
-import { CANARY, GH_TOKEN, auditBytes, harness, openSealed, parse } from "./helpers.ts";
+import { CANARY, GH_TOKEN, TEST_TOOLS, auditBytes, harness, openSealed, parse } from "./helpers.ts";
 
 const allTargetsPolicy = {
   version: 1,
@@ -50,7 +50,7 @@ test("S1: a sensitive value reaches every provider but never stdout, argv or the
   assert.equal(openSealed(JSON.parse(github.body).encrypted_value), CANARY);
   assert.equal(h.aws.calls.length, 2);
   for (const call of h.aws.calls) assert.ok(JSON.stringify(call.input).includes(CANARY));
-  assert.deepEqual(h.exec.calls, [{ command: "gh", args: ["auth", "token", "--hostname", "github.com"], input: "" }]);
+  assert.deepEqual(h.exec.calls, [{ command: TEST_TOOLS.gh, args: ["auth", "token", "--hostname", "github.com"], input: "" }]);
   assert.ok(!out.stdout.includes(GH_TOKEN), "stdout leaked the GitHub token");
 
   const bytes = await auditBytes(h.auditDb);

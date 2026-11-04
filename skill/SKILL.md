@@ -1,43 +1,100 @@
 ---
 name: zks-secrets
-description: "Trigger: secretos, variables de entorno, env vars, Vercel env, AWS SSM, Parameter Store, Secrets Manager, GitHub secrets, Railway variables, Supabase secrets, rotar clave, deploy config. Set secrets with zks, never seeing values."
+description: "Trigger: secretos, variables de entorno, env vars, API key, token, crear token, Vercel env, AWS SSM, Parameter Store, Secrets Manager, GitHub secrets, Railway variables, Supabase secrets, rotar clave, deploy config. Do every secrets step yourself with zks and zks capture, never seeing values."
 ---
 
 # zks-secrets
 
-Set secrets and env vars on Vercel, AWS SSM, AWS Secrets Manager, GitHub Actions, Railway and Supabase through the `zks` CLI. You write names, targets and sources; zks moves the values; the human approves in a native macOS dialog. You never see a value.
+Set secrets and env vars on Vercel, AWS SSM, AWS Secrets Manager, GitHub Actions, Railway and Supabase through the `zks` CLI, and obtain the tokens and API keys they need yourself with `zks capture` in ego-browser. You write names, targets, sources and browser steps; zks moves the values; the human only approves a native macOS dialog for a new destination. You never see a value.
+
+## Do it yourself
+
+The human does not do setup steps. Never tell them to create, copy or paste a token, open a dashboard, or run `zks auth set`, `security add-generic-password` or any other setup command. Do it with ego-browser (their logged-in sessions are authorized) and `zks capture`.
+
+Ask the human **only** for:
+
+- a captcha;
+- 2FA, a passkey or a security key;
+- a browser-owned prompt (permissions, device chooser) — call `task.handOff()`, say what to do, resume after;
+- the zks approval dialog for a new destination or for replacing a Keychain item.
+
+### How `zks capture` keeps the value away from you
+
+You drive the non-secret steps in one ego-browser TaskSpace (print its `spaceId` and page label). zks then runs its own `ego-browser nodejs` script on that page for the secret step:
+
+- `zks capture read --space ID --page p1 --click <reveal button> --selector <token element> --store <service>/<account> --origin <origin>` — clicks the button, waits up to 15 s for the element to hold a value, moves it straight into the Keychain, blanks the element and navigates the page to `about:blank`.
+- `zks capture fill --space ID --page p1 --selector <input> --store <service>/<account> --generate 24` — zks generates a random password, stores it, and fills it into the input. `--from <service>/<account>` fills an existing item instead.
+- `--click` takes any ego selector (CSS, `text=Create`, `loc=role:button[name='Create token']`). `--selector` must be plain CSS (it is read with `document.querySelectorAll` and must match exactly one element).
+- Output is metadata: `{ok, command, mode, store, origin, length, auditId}`. Errors: `origin_mismatch`, `not_found`, `keychain_failed`, `browser_failed` (exit 1); usage errors exit 2; a denied replacement exits 3.
+- Always pass `--origin` (for example `https://api.example.com`); zks checks the page is on it before clicking, reading or filling.
+
+### Flow A — missing provider token (`missing_token` for Vercel, Railway or Supabase)
+
+| Provider | Token page | Store | `--origin` (pinned, mandatory) |
+|---|---|---|---|
+| Vercel | `https://vercel.com/account/settings/tokens` | `zks/vercel` | `https://vercel.com` |
+| Railway | `https://railway.com/account/tokens` | `zks/railway` | `https://railway.com` |
+| Supabase | `https://supabase.com/dashboard/account/tokens` | `zks/supabase` | `https://supabase.com` |
+
+1. Open the token page in your TaskSpace. Take a snapshot **before** creating anything (no secret is shown yet).
+2. Fill the form yourself: name `zks-<hostname>` (`hostname -s`), the shortest sensible expiry the provider offers (for example 30 or 90 days), scope limited to the team that owns the project.
+3. Do not click the final create button. Run `zks capture read --space ID --page p1 --click "<create button>" --selector "<element that will show the token>" --store zks/<provider> --origin <pinned origin>`. The element usually lives in the dialog that opens, for example `[role=dialog] input[readonly]` or `[role=dialog] code`.
+4. Check with `zks auth status`, then retry the apply.
+
+### Flow B — third-party API key (a public data API, a SaaS)
+
+1. Register in ego-browser with the user's logged-in identity (their e-mail, or "Sign in with Google" when offered).
+2. Password field: `zks capture fill --space ID --page p1 --selector "#password" --store <svc>/password --generate 24 --origin <site origin>`; for a confirmation field, `zks capture fill ... --from <svc>/password`. Log in later the same way with `--from`.
+3. Verification mail: open the user's Gmail in ego-browser, open the message and click its link with `page.click`; do not print the link or the message body. If the mail holds a code instead, `zks capture read --selector <code element> --store <svc>/verify-code --origin https://mail.google.com`, then `zks capture fill --from <svc>/verify-code` on the site.
+4. Generate the key on the site and `zks capture read --click "<generate button>" --selector "<key element>" --store <svc>/<account> --origin <site origin>`.
+5. Use it: a `{"kind":"keychain","service":"<svc>","account":"<account>"}` source in `zks.policy.json`, then `zks apply` to the trusted destinations.
+
+### Flow C — local-only tools (an app that reads the Keychain itself)
+
+Capture straight into the Keychain item the app expects. Example: a tool that reads `security find-generic-password -s mrm-indec -a indec -w` → register at the API site (Flow B), then `zks capture read --click "<generate>" --selector "<token>" --store mrm-indec/indec --origin https://api.indec.gob.ar`. No policy or apply is needed.
+
+### When a capture fails
+
+- `not_found` after the click revealed a token: do **not** snapshot or screenshot the page. Navigate it away (`page.goto` the token list), delete the orphan token by its name in the list, and retry with another `--selector`.
+- `origin_mismatch`: the page is not where you expect (redirect, phishing, login wall). Snapshot it (no secret shown), fix the navigation, retry.
+- `browser_failed`: check the TaskSpace id and page label; do not open a new TaskSpace to recover.
+- Exit 3 on a replacement: the human denied replacing an existing item. Ask before retrying.
 
 ## Hard rules
 
 - Never see, ask for, print or store a secret value. Every `zks` output is metadata only; keep it that way.
-- Call only `zks` (on PATH at `~/.local/bin/zks`). Do not call provider CLIs or APIs to read or write secrets.
+- Never snapshot, screenshot, `page.evaluate`, `page.fetch`, read or print a page while it shows a secret (a new token, an API key, a verification code). Let `zks capture --click` perform the reveal, every time.
+- Never print or read Keychain items (`security find-generic-password -w`, `security dump-keychain`). zks reads them itself.
+- Call only `zks` for secret values. Do not call provider CLIs or APIs to read or write secrets.
 - Never pass `--value`, `--secret`, `--token` or `--password`. zks rejects them; do not look for a workaround.
-- Never read `.env*` files, `auth.json`, the Keychain (`security find-generic-password`), `op read`, `vercel env pull`, `aws ... --with-decryption`, `aws secretsmanager get-secret-value` or provider dashboards.
-- Never edit, chmod or replace files under `~/.local/libexec/zks`, `~/.local/bin/zks` or `~/.config/zks/integrity.json`.
-- Never script, click, focus or dismiss the approval or prompt dialog (`osascript`, accessibility tools, `cliclick`, browser automation). The human answers it.
-- If the human pastes a secret in chat: do not use it, do not repeat it, do not write it anywhere. Say it is now exposed and recommend rotating it, then continue with a `prompt` or `op` source.
+- Never read `.env*` files, `auth.json`, `op read`, `vercel env pull`, `aws ... --with-decryption`, `aws secretsmanager get-secret-value` or the secret views of provider dashboards.
+- Never tell the human to run `zks auth set` or `security add-generic-password`; capture the token yourself (Flow A).
+- Never edit, chmod or replace files under `~/.local/libexec/zks` (including `tools.json`), `~/.local/bin/zks` or `~/.config/zks/integrity.json`.
+- Never script, click, focus or dismiss the zks approval or prompt dialog (`osascript`, accessibility tools, `cliclick`, browser automation). The human answers it.
+- If the human pastes a secret in chat: do not use it, do not repeat it, do not write it anywhere. Say it is now exposed and recommend rotating it, then capture a new one yourself.
 - Literal `value` is only for `sensitive: false` variables. Every `source` needs `"sensitive": true`; zks rejects a source on a non-sensitive variable. If in doubt, mark it sensitive.
-- Never use the Keychain service `zks` as a source: it holds zks's own tokens and is rejected.
+- Never use the Keychain service `zks` as a source: it holds zks's own tokens and is rejected. `zks capture` writes it only for `vercel`, `railway`, `supabase` and `sheets-hmac`, from their pinned origins, and never fills from it.
 - At most 20 writes per apply (`too_many_operations`), 300 characters per dialog line and 6000 per dialog (`dialog_too_long`); split with `--only` / `--target`.
 - Never edit `~/.config/zks/trust.json` or read the `zks`/`trust-hmac` Keychain item. Only the human adds trust, with **Always allow** in the dialog; you may run `zks trust list` and `zks trust remove <key>`.
 
 ## Workflow
 
-1. **Doctor, once per session.** Run `zks doctor`. If `install.status` is not `"ok"` (`mismatch`, `not-installed`), stop and tell the human to rerun `./install.sh` from the zk-secrets repo. Do not try to fix the install yourself.
+1. **Doctor, once per session.** Run `zks doctor`. If `install.status` is not `"ok"` (`mismatch`, `not-installed`), reinstall it yourself only from a clean checkout of the published code: `cd ~/dev/zk-secrets && git fetch origin && git status --porcelain` must be empty and `git rev-parse HEAD` must equal `git rev-parse origin/main`; then run `./install.sh`. Never edit the code to make doctor pass. If the checkout is not clean or HEAD differs, or status is `mismatch` right after a reinstall, stop and report it: that can mean tampering. `tools["ego-browser"]` must be `true` for `zks capture`.
 2. **Policy.** Look for `zks.policy.json` in the project root. If missing, run `zks init --project <name>`. Edit it with names, targets and sources only. Choose the source kind:
 
    | Situation | `source` |
    |---|---|
-   | Human keeps it in 1Password | `{"kind":"op","ref":"op://Vault/Item/field"}` — ask for the `op://` reference; it is not secret |
-   | Human will type it | `{"kind":"prompt"}` — zks opens a hidden dialog |
+   | The key comes from a website | capture it first (Flow B), then `{"kind":"keychain","service":"<svc>","account":"<account>"}` |
+   | Human keeps it in 1Password | `{"kind":"op","ref":"op://Vault/Item/field"}` — the `op://` reference is not secret |
    | New random key (signing key, webhook secret) | `{"kind":"generate","bytes":32}` — warn: a NEW value on every apply, so it rotates each time |
    | Already in the macOS Keychain | `{"kind":"keychain","service":"...","account":"..."}` |
    | Migrating an existing `.env` file | `{"kind":"dotenv","path":".env.production","key":"NAME"}` — pass the path, never open the file; it must be a relative `.env*` file inside the project (no `..`, no absolute path) |
+   | Only the human knows it and no site issues it | `{"kind":"prompt"}` — zks opens a hidden dialog |
    | Non-sensitive config (`sensitive: false`) | `"value": "..."` instead of `source` |
 
 3. **Validate.** `zks validate`. Fix every listed issue and rerun until `"ok": true`.
 4. **Plan.** `zks plan --only A,B --target t1,t2`. Show the human the list (name → `destination`, sensitive, source). The approval dialog shows the same destinations.
-5. **Apply.** `zks apply --only A,B --target t1,t2` with the narrowest selection. Before running it, tell the human: "a macOS dialog will ask you to approve these writes" (Deny / Approve once / Always allow; writes to destinations they already trusted open no dialog, `"approval": "trusted"`). Wait for the command; do not retry a denial on your own. If the output has `trust: "invalid"`, tell the human the trust file was altered.
+5. **Apply.** `zks apply --only A,B --target t1,t2` with the narrowest selection. Writes to destinations the human already trusted open no dialog (`"approval": "trusted"`). For a new destination, say "a macOS dialog will ask you to approve these writes" (Deny / Approve once / Always allow) and wait; do not retry a denial on your own. If the output has `trust: "invalid"`, tell the human the trust file was altered.
 6. **Report.** Show only the JSON `results`: `name`, `target`, `result`, `version`, `auditId` (plus `error.code` when failed). Exit codes:
 
    | Code | Meaning |
@@ -48,9 +105,9 @@ Set secrets and env vars on Vercel, AWS SSM, AWS Secrets Manager, GitHub Actions
    | 3 | not approved: denied, timed out or no GUI; nothing was written |
 
 7. **Credentials.**
-   - `missing_token` for Vercel, Railway or Supabase: tell the human to run `zks auth set <vercel|railway|supabase>` themselves (hidden dialog). Never ask them to paste a token in chat.
-   - AWS uses the existing AWS SSO or profile. If credentials are expired, tell the human to run `aws sso login` (add `--profile <name>` when the target sets `profile`).
-   - GitHub: zks reads the `gh auth login` token with `gh auth token` and calls `api.github.com` itself. If `missing_token` or `github_unavailable`, tell the human to run `gh auth login`; `github_failed` carries the HTTP status (for example 403: the login lacks write access to the repo).
+   - `missing_token` for Vercel, Railway or Supabase: Flow A. Never ask the human for the token.
+   - AWS uses the existing AWS SSO or profile. If credentials are expired, run `aws sso login` (add `--profile <name>` when the target sets `profile`) yourself; the human only completes the browser sign-in or 2FA step if one appears.
+   - GitHub: zks reads the `gh auth login` token with `gh auth token` and calls `api.github.com` itself. If `missing_token`, run `gh auth login --web` yourself and finish the device flow in ego-browser; `github_unavailable` means `gh` was not found at install time (install it with `brew install gh`, then reinstall zks as in step 1); `github_failed` carries the HTTP status (for example 403: the login lacks write access to the repo).
 
 ## Policy example
 
@@ -99,12 +156,13 @@ Names match `^[A-Za-z_][A-Za-z0-9_]{0,127}$`; target keys match `^[a-z0-9][a-z0-
 
 ## Audit
 
-- `zks audit list [--limit N] [--project P]` — metadata records (time, human, agent, project, provider, target, variable, result). Never values.
+- `zks audit list [--limit N] [--project P]` — metadata records (time, human, agent, project, provider, target, variable, result). Captures appear with `provider: "keychain"`, `action: "capture"`, `target: "<service>/<account>"` and the page origin. Never values.
 - `zks audit verify` — checks the hash chain and the Keychain anchor; exit 1 (`brokenAt` a record id or `"truncated"`) means the local log was altered. Tell the human.
 - `zks audit sync` — pushes pending records to the Google Sheets mirror, if configured.
 
 ## When to stop and ask the human
 
+- A captcha, 2FA/passkey, browser-owned prompt, or a zks approval dialog is waiting (see "Do it yourself").
 - `zks doctor` install status is not `ok`.
-- The human must choose a source, an `op://` reference, a target id or which environments get the value.
+- The human must choose between real options you cannot infer: which project, team or environment gets the value, or which existing account to use.
 - A dialog was denied (exit 3): ask whether to retry; never retry silently.

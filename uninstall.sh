@@ -53,4 +53,5 @@ Kept (delete by hand if you no longer need them):
   config:     $CONFIG_DIR (config.json, integrity.json)
   tokens:     macOS Keychain items with service "zks" (vercel, railway, supabase, sheets-hmac);
               remove one with: security delete-generic-password -s zks -a <provider>
+  captures:   Keychain items that zks capture stored under other services (see zks audit list)
 EOF

@@ -6,7 +6,7 @@ import { createKeychain } from "../src/platform/keychain.ts";
 import { Redactor } from "../src/secret/redactor.ts";
 import { SecretBuffer } from "../src/secret/secret-buffer.ts";
 import { findDotenvValue, resolveValue } from "../src/sources/resolve.ts";
-import { CANARY, fakeExec, fakeHuman, fakeKeychain } from "./helpers.ts";
+import { CANARY, TEST_TOOLS, fakeExec, fakeHuman, fakeKeychain } from "./helpers.ts";
 
 test("SecretBuffer never renders its value and zeroes on dispose", () => {
   const s = SecretBuffer.fromString(CANARY);
@@ -73,8 +73,8 @@ test("appleScriptString escapes quotes and backslashes", () => {
 });
 
 test("sources: op, generate and dotenv resolve without exposing values", async () => {
-  const exec = fakeExec((call) => ({ stdout: Buffer.from(call.command === "op" ? CANARY : "") }));
-  const deps = { exec: exec.exec, keychain: fakeKeychain().keychain, human: fakeHuman().human, cwd: "/w" };
+  const exec = fakeExec((call) => ({ stdout: Buffer.from(call.command === TEST_TOOLS.op ? CANARY : "") }));
+  const deps = { exec: exec.exec, tools: TEST_TOOLS, keychain: fakeKeychain().keychain, human: fakeHuman().human, cwd: "/w" };
 
   const fromOp = await resolveValue("A", { sensitive: true, targets: [], source: { kind: "op", ref: "op://v/i/f" } }, deps);
   assert.equal(fromOp.reveal(), CANARY);

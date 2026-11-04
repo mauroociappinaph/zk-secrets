@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { test } from "node:test";
 import { run } from "../src/run.ts";
 import { resolveValue } from "../src/sources/resolve.ts";
-import { fakeExec, fakeHuman, fakeKeychain, harness, parse } from "./helpers.ts";
+import { TEST_TOOLS, fakeExec, fakeHuman, fakeKeychain, harness, parse } from "./helpers.ts";
 
 const base = (targets: Record<string, unknown>, variables: Record<string, unknown>) => ({ version: 1, project: "p", targets, variables });
 const gh = { gh: { provider: "github", repo: "acme/web" } };
@@ -120,6 +120,7 @@ test("S1: dotenv reads the real path it checked, not the path it was given", asy
   const reads: string[] = [];
   const deps = {
     exec: fakeExec().exec,
+    tools: TEST_TOOLS,
     keychain: fakeKeychain().keychain,
     human: fakeHuman().human,
     cwd: "/w/project",

@@ -10,7 +10,8 @@ const KEY_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
 /** Reads the `gh auth login` token for github.com. Only `gh auth token` runs; gh never sees a value. */
 async function readToken(ctx: SinkContext): Promise<SecretBuffer> {
-  const res = await ctx.exec("gh", ["auth", "token", "--hostname", "github.com"], { timeoutMs: 30_000 }).catch(() => null);
+  const gh = ctx.tools.gh;
+  const res = gh ? await ctx.exec(gh, ["auth", "token", "--hostname", "github.com"], { timeoutMs: 30_000 }).catch(() => null) : null;
   if (!res) throw new SinkError("github_unavailable", "GitHub CLI (gh) is not available");
   let end = res.stdout.length;
   while (end > 0 && (res.stdout[end - 1] === 0x0a || res.stdout[end - 1] === 0x0d)) end--;

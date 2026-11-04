@@ -1,15 +1,19 @@
+import { randomBytes as nodeRandomBytes } from "node:crypto";
 import { readAuditAnchor, writeAuditAnchor } from "./audit/anchor.ts";
 import { SHEETS_WEBHOOK_URL } from "./audit/mirror.ts";
-import type { ApprovalMode, AuditRecord, AuditStore, Mirror, MirrorResult } from "./audit/types.ts";
+import type { ApprovalMode, AuditRecord, AuditResult, AuditStore, CaptureSourceKind, Mirror, MirrorResult } from "./audit/types.ts";
+import { runCapture } from "./capture/run.ts";
+import { CAPTURE_WAIT_MS, type CaptureErrorCode } from "./capture/script.ts";
 import type { HumanChannel } from "./gate/dialog.ts";
 import type { Exec } from "./platform/exec.ts";
 import { ZKS_KEYCHAIN_SERVICE, type Keychain } from "./platform/keychain.ts";
+import type { ToolPaths } from "./platform/tools.ts";
 import { describeDestination } from "./policy/describe.ts";
 import { describeTrustKey, loadTrust, saveTrust, trustKeyOf, type TrustFile, type TrustIo } from "./policy/trust.ts";
 import { PolicyError, describeSource, planOperations, validatePolicy } from "./policy/validate.ts";
 import type { Operation, Policy, Provider, TargetConfig } from "./policy/types.ts";
 import { Redactor } from "./secret/redactor.ts";
-import type { SecretBuffer } from "./secret/secret-buffer.ts";
+import { SecretBuffer } from "./secret/secret-buffer.ts";
 import { SinkError, type AwsClientFactory, type Sink } from "./sinks/types.ts";
 import { SourceError, resolveValue } from "./sources/resolve.ts";
 import { HELP_TEXT } from "./help.ts";
@@ -43,6 +47,8 @@ export interface Deps {
   agentId: string;
   now(): Date;
   exec: Exec;
+  /** Absolute paths of ego-browser, gh and op (tools.json of the install); never a PATH lookup. */
+  tools: ToolPaths;
   keychain: Keychain;
   human: HumanChannel;
   fetch: typeof fetch;
@@ -92,7 +98,22 @@ class AuditWriteError extends Error {
 }
 
 const FORBIDDEN_FLAGS = ["--value", "--secret", "--token", "--password"];
-const FLAGS_WITH_VALUE = ["--policy", "--only", "--target", "--agent", "--limit", "--project"];
+const FLAGS_WITH_VALUE = [
+  "--policy",
+  "--only",
+  "--target",
+  "--agent",
+  "--limit",
+  "--project",
+  "--space",
+  "--page",
+  "--selector",
+  "--store",
+  "--click",
+  "--origin",
+  "--generate",
+  "--from",
+];
 
 /** Options each command uses; any other option is refused. --help and --version are global. */
 const COMMAND_FLAGS: Record<string, string[]> = {
@@ -101,12 +122,15 @@ const COMMAND_FLAGS: Record<string, string[]> = {
   plan: ["--policy", "--only", "--target"],
   apply: ["--policy", "--only", "--target", "--agent"],
   "audit list": ["--limit", "--project"],
+  "capture read": ["--space", "--page", "--selector", "--store", "--click", "--origin"],
+  "capture fill": ["--space", "--page", "--selector", "--store", "--generate", "--from", "--origin"],
 };
 const SUBCOMMANDS: Record<string, string[]> = {
   auth: ["status", "set", "delete"],
   audit: ["list", "verify", "sync"],
   config: ["show", "set", "unset"],
   trust: ["list", "remove"],
+  capture: ["read", "fill"],
 };
 const COMMANDS = ["init", "validate", "plan", "apply", "doctor", ...Object.keys(SUBCOMMANDS)];
 
@@ -160,6 +184,8 @@ function positionalLimit(command: string, sub: string | undefined): number | und
       return sub === "show" ? 2 : sub === "set" ? 4 : sub === "unset" ? 3 : undefined;
     case "trust":
       return sub === "list" ? 2 : sub === "remove" ? 3 : undefined;
+    case "capture":
+      return sub === "read" || sub === "fill" ? 2 : undefined;
     default:
       return undefined;
   }
@@ -293,6 +319,8 @@ async function dispatch(argv: string[], deps: Deps, redactor: Redactor): Promise
       return config(deps, sub, arg, positionals[3]);
     case "trust":
       return trust(deps, sub, arg);
+    case "capture":
+      return capture(deps, sub, flags, redactor);
     case "doctor":
       return json(EXIT_OK, { ok: true, ...(await deps.doctor()) });
     default:
@@ -387,6 +415,7 @@ async function apply(deps: Deps, flags: Map<string, string>, redactor: Redactor)
         try {
           value = await resolveValue(name, variable, {
             exec: deps.exec,
+            tools: deps.tools,
             keychain: deps.keychain,
             human: deps.human,
             cwd: deps.cwd,
@@ -413,6 +442,7 @@ async function apply(deps: Deps, flags: Map<string, string>, redactor: Redactor)
                 exec: deps.exec,
                 keychain: deps.keychain,
                 aws: deps.aws,
+                tools: deps.tools,
               }));
             } catch (error) {
               const code = error instanceof SinkError ? error.code : "provider_error";
@@ -628,4 +658,189 @@ async function config(deps: Deps, sub: string | undefined, key: string | undefin
 
 function configNotApproved(): RunOutput {
   return json(EXIT_DENIED, { ok: false, error: { code: "not_approved", message: "config change not approved" } });
+}
+
+const CAPTURE_USAGE =
+  "usage: zks capture read --space ID --page LABEL --selector CSS --store SERVICE/ACCOUNT [--click SELECTOR] [--origin ORIGIN] | " +
+  "zks capture fill --space ID --page LABEL --selector CSS (--store SERVICE/ACCOUNT --generate BYTES | --from SERVICE/ACCOUNT) [--origin ORIGIN]";
+const CAPTURE_SPACE = /^[1-9][0-9]{0,9}$/;
+const CAPTURE_PAGE = /^[A-Za-z0-9_-]{1,32}$/;
+const CAPTURE_SELECTOR = /^[\x20-\x7E]{1,300}$/;
+const KEYCHAIN_ID = /^[A-Za-z0-9_.-]{1,128}$/;
+const CAPTURE_ORIGIN = /^(?:https:\/\/[a-z0-9.-]+|http:\/\/(?:127\.0\.0\.1|localhost))(?::\d{1,5})?$/;
+const MAX_CAPTURE_ORIGIN = 200;
+
+/** The only zks tokens a capture may write, each only from its provider's own site. */
+export const PINNED_CAPTURE_ORIGINS: Record<TokenAccount, string> = {
+  vercel: "https://vercel.com",
+  railway: "https://railway.com",
+  supabase: "https://supabase.com",
+  "sheets-hmac": "https://script.google.com",
+};
+
+const CAPTURE_ERRORS: Record<CaptureErrorCode | "not_approved", string> = {
+  origin_mismatch: "the page is not on --origin; nothing was read or filled",
+  not_found: "the element or the Keychain item was not found",
+  keychain_failed: "the macOS Keychain did not accept or return the item",
+  browser_failed: "ego-browser failed or returned no result",
+  not_approved: "replacing the Keychain item was not approved",
+};
+
+interface CaptureRequest {
+  mode: "read" | "fill";
+  sourceKind: CaptureSourceKind;
+  space: number;
+  page: string;
+  selector: string;
+  click: string | null;
+  origin: string | null;
+  /** The item written (read, fill --generate) or filled (fill --from). */
+  service: string;
+  account: string;
+  generateBytes: number | null;
+}
+
+/** Validates every capture option. Messages never echo a value: a selector could be a pasted secret. */
+function parseCapture(sub: string | undefined, flags: Map<string, string>): CaptureRequest {
+  if (sub !== "read" && sub !== "fill") throw new UsageError(CAPTURE_USAGE);
+  const space = flags.get("--space");
+  const page = flags.get("--page");
+  const selector = flags.get("--selector");
+  if (space === undefined || page === undefined || selector === undefined) throw new UsageError(CAPTURE_USAGE);
+  if (sub === "read" && !flags.has("--store")) throw new UsageError(CAPTURE_USAGE);
+  if (!CAPTURE_SPACE.test(space)) throw new UsageError("--space must be a positive integer (the TaskSpace id)");
+  if (!CAPTURE_PAGE.test(page)) throw new UsageError("--page must be an ego page label (letters, digits, _ or -, at most 32)");
+  if (!CAPTURE_SELECTOR.test(selector)) throw new UsageError("--selector must be 1-300 printable ASCII characters");
+  const click = flags.get("--click") ?? null;
+  if (click !== null && !CAPTURE_SELECTOR.test(click)) throw new UsageError("--click must be 1-300 printable ASCII characters");
+  const origin = flags.get("--origin") ?? null;
+  if (origin !== null && (origin.length > MAX_CAPTURE_ORIGIN || !CAPTURE_ORIGIN.test(origin))) {
+    throw new UsageError("--origin must be https://host[:port] or http://127.0.0.1|localhost[:port]");
+  }
+  const common = { space: Number(space), page, selector, click, origin };
+
+  if (sub === "read") {
+    const { service, account } = keychainRef(flags.get("--store") as string, "--store");
+    if (service.toLowerCase() === ZKS_KEYCHAIN_SERVICE) {
+      // Any other spelling of the service would store a token zks never reads.
+      if (service !== ZKS_KEYCHAIN_SERVICE || !(TOKEN_ACCOUNTS as readonly string[]).includes(account)) {
+        throw new UsageError(`the Keychain service zks only takes captured provider tokens: ${TOKEN_ACCOUNTS.join(", ")}`);
+      }
+      const pinned = PINNED_CAPTURE_ORIGINS[account as TokenAccount];
+      if (origin !== pinned) throw new UsageError(`zks/${account} can only be captured with --origin ${pinned}`);
+    }
+    return { mode: "read", sourceKind: "capture-read", service, account, generateBytes: null, ...common };
+  }
+
+  const store = flags.get("--store");
+  const generate = flags.get("--generate");
+  const from = flags.get("--from");
+  const generating = store !== undefined && generate !== undefined && from === undefined;
+  if (!generating && !(from !== undefined && store === undefined && generate === undefined)) {
+    throw new UsageError("capture fill takes --store with --generate, or --from alone");
+  }
+  const { service, account } = generating ? keychainRef(store as string, "--store") : keychainRef(from as string, "--from");
+  if (service.toLowerCase() === ZKS_KEYCHAIN_SERVICE) throw new UsageError("capture fill cannot use the Keychain service zks");
+  if (!generating) return { mode: "fill", sourceKind: "capture-from", service, account, generateBytes: null, ...common };
+  const bytes = Number(generate);
+  if (!/^[0-9]{1,3}$/.test(generate as string) || bytes < 16 || bytes > 128) {
+    throw new UsageError("--generate must be an integer between 16 and 128");
+  }
+  return { mode: "fill", sourceKind: "capture-generate", service, account, generateBytes: bytes, ...common };
+}
+
+function keychainRef(value: string, flag: string): { service: string; account: string } {
+  const parts = value.split("/");
+  if (parts.length !== 2 || !parts.every((part) => KEYCHAIN_ID.test(part))) {
+    throw new UsageError(`${flag} must be SERVICE/ACCOUNT, each matching ^[A-Za-z0-9_.-]{1,128}$`);
+  }
+  return { service: parts[0] as string, account: parts[1] as string };
+}
+
+/**
+ * Runs zks's own ego-browser script against the agent's TaskSpace page: the value goes from the
+ * page to the Keychain (read) or from the Keychain to the page (fill) inside that script, and zks
+ * reports only its length. Every capture is audited; replacing an existing item needs approval.
+ */
+async function capture(deps: Deps, sub: string | undefined, flags: Map<string, string>, redactor: Redactor): Promise<RunOutput> {
+  const req = parseCapture(sub, flags);
+  const store = `${req.service}/${req.account}`;
+  const base = { command: "capture", mode: req.mode, store, origin: req.origin };
+  const audit = deps.openAudit();
+  try {
+    let approval: ApprovalMode | undefined;
+    const finish = async (result: AuditResult, outcome: { code: CaptureErrorCode | "not_approved" } | { length: number }) => {
+      const errorCode = "code" in outcome ? outcome.code : "";
+      const entry = audit.append({
+        ts: deps.now().toISOString(),
+        actorHuman: deps.user,
+        actorAgent: deps.agentId,
+        project: req.service,
+        provider: "keychain",
+        target: store,
+        environment: req.origin ?? "",
+        variableName: req.account,
+        action: "capture",
+        sensitive: true,
+        sourceKind: req.sourceKind,
+        result,
+        providerVersion: "",
+        errorCode,
+        ...(approval ? { approval } : {}),
+      });
+      const anchorError = await saveAnchor(deps, audit);
+      if (!("code" in outcome)) return json(EXIT_OK, { ok: true, ...base, length: outcome.length, auditId: entry.auditId, ...anchorError });
+      return json(result === "denied" ? EXIT_DENIED : EXIT_FAILED, {
+        ok: false,
+        ...base,
+        error: { code: outcome.code, message: CAPTURE_ERRORS[outcome.code] },
+        auditId: entry.auditId,
+        ...anchorError,
+      });
+    };
+
+    const egoBrowser = deps.tools.egoBrowser;
+    if (!egoBrowser) return finish("failed", { code: "browser_failed" });
+
+    if (req.sourceKind === "capture-from") {
+      if (!(await deps.keychain.has(req.service, req.account))) return finish("failed", { code: "not_found" });
+    } else if (await deps.keychain.has(req.service, req.account)) {
+      approval = "dialog";
+      const where = `${req.origin ?? "the current page, origin not checked"} (TaskSpace ${req.space}, page ${req.page})`;
+      const lines = [
+        `Replace the Keychain item ${store}?`,
+        req.mode === "read" ? `New value: read from ${where}` : `New value: a random password zks generates, filled into ${where}`,
+      ];
+      if (!(await deps.human.approve("zks: replace Keychain item", lines))) return finish("denied", { code: "not_approved" });
+    }
+
+    if (req.generateBytes !== null) {
+      const random = (deps.randomBytes ?? nodeRandomBytes)(req.generateBytes);
+      const value = SecretBuffer.adopt(Buffer.from(random.toString("base64url"), "utf8"));
+      random.fill(0);
+      redactor.register(value);
+      try {
+        await deps.keychain.set(req.service, req.account, value);
+      } catch {
+        return finish("failed", { code: "keychain_failed" });
+      } finally {
+        value.dispose();
+      }
+    }
+
+    const outcome = await runCapture(deps.exec, egoBrowser, {
+      mode: req.mode,
+      space: req.space,
+      page: req.page,
+      selector: req.selector,
+      click: req.click,
+      origin: req.origin,
+      service: req.service,
+      account: req.account,
+      waitMs: CAPTURE_WAIT_MS,
+    });
+    return outcome.ok ? finish("applied", { length: outcome.length }) : finish("failed", { code: outcome.code });
+  } finally {
+    audit.close();
+  }
 }

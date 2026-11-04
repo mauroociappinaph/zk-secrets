@@ -16,6 +16,13 @@ Usage:
   zks auth set <vercel|railway|supabase|sheets-hmac>
                                               Store a token through a hidden dialog
   zks auth delete <vercel|railway|supabase|sheets-hmac>
+  zks capture read --space ID --page LABEL --selector CSS --store SERVICE/ACCOUNT [--click SELECTOR] [--origin ORIGIN]
+                                              In an ego-browser page: click, read the token element
+                                              into the Keychain, blank it (value never shown)
+  zks capture fill --space ID --page LABEL --selector CSS (--store SERVICE/ACCOUNT --generate BYTES
+                   | --from SERVICE/ACCOUNT) [--origin ORIGIN]
+                                              Fill a new random (16-128 bytes) or a stored password
+                                              into an ego-browser page field from the Keychain
   zks audit list [--limit N] [--project P]    Show audit records (metadata only)
   zks audit verify                            Check the audit hash chain
   zks audit sync                              Push pending audit records to Google Sheets
@@ -30,6 +37,8 @@ Usage:
 Sources (variables.<NAME>.source.kind): op, keychain, prompt, generate, dotenv.
 Non-sensitive env vars may use "value" instead of a source. Sensitive ones never can.
 Targets (targets.<key>.provider): vercel, aws-ssm, aws-sm, github, railway, supabase.
+Capture: zks/<vercel|railway|supabase|sheets-hmac> only from their own site (--origin https://vercel.com,
+https://railway.com, https://supabase.com, https://script.google.com); replacing an item asks first.
 
 Exit codes: 0 ok, 1 a write or check failed, 2 usage or policy error, 3 not approved.
 `;

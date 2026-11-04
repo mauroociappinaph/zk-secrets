@@ -1,6 +1,7 @@
 #!/bin/sh
 # Installs zks for the current macOS user:
-#   ~/.local/libexec/zks/<version>/   read-only app (dist, bin, production node_modules)
+#   ~/.local/libexec/zks/<version>/   read-only app (dist, bin, production node_modules) and
+#                                     tools.json: absolute paths of ego-browser, gh and op
 #   ~/.local/bin/zks                  launcher with node, home and install path baked in; runs
 #                                     node through `env -i` with a fixed PATH
 #   ~/.config/zks/integrity.json      digest of the install, checked by `zks doctor`
@@ -86,6 +87,24 @@ exec /usr/bin/env -i HOME="$USER_HOME" USER="$USER_NAME" LOGNAME="$USER_NAME" LA
 EOF
 chmod 555 "$LAUNCHER"
 
+# zks never looks these up on PATH at run time: their absolute paths are fixed now, inside the
+# install, before it turns read-only, so the integrity digest covers them. Missing tool: null.
+# The stable `command -v` path is kept (not the versioned realpath) so upgrades keep working.
+printf '==> Recording tool paths %s/tools.json\n' "$DEST"
+tool_path() {
+  found="$(command -v "$1" 2>/dev/null)" || found=""
+  case "$found" in
+    /*) node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$found" 2>/dev/null || printf 'null' ;;
+    *) printf 'null' ;;
+  esac
+}
+EGO_PATH="$(tool_path ego-browser)"
+GH_PATH="$(tool_path gh)"
+OP_PATH="$(tool_path op)"
+printf '{\n  "ego-browser": %s,\n  "gh": %s,\n  "op": %s\n}\n' "$EGO_PATH" "$GH_PATH" "$OP_PATH" >"$DEST/tools.json"
+chmod 444 "$DEST/tools.json"
+printf '    ego-browser: %s\n    gh: %s\n    op: %s\n' "$EGO_PATH" "$GH_PATH" "$OP_PATH"
+
 chmod -R a-w "$DEST"
 
 printf '==> Recording integrity manifest %s\n' "$INTEGRITY"
@@ -115,10 +134,11 @@ cat >"$BLOCK" <<'EOF'
 <!-- zks:begin -->
 ## Secrets and environment variables
 
-- Never ask for, read, print, or store secret values: no `.env` files, tokens, `vercel env pull`, `aws ... --with-decryption`, `op read`, or provider dashboards.
-- To set secrets or env vars on Vercel, AWS SSM/Secrets Manager, GitHub Actions, Railway or Supabase, use the `zks-secrets` skill and the `zks` CLI only.
+- Do every secrets step yourself through the `zks-secrets` skill (`zks` plus `zks capture` in ego-browser): accounts, verification mail, token creation, storage and distribution to Vercel, AWS SSM/Secrets Manager, GitHub Actions, Railway or Supabase, for every kind of project.
+- Never ask the human to create, copy or paste tokens, or to run setup commands (`zks auth set`, `security add-generic-password`). Ask only for a captcha, 2FA/passkey, browser-owned permission prompt or the zks approval dialog.
+- Never see secret values: no `.env` files, Keychain reads, `vercel env pull`, `aws ... --with-decryption`, `op read`, and no snapshot, screenshot or read of a page while it shows a secret; let `zks capture --click` reveal it.
 - If a user pastes a secret into the chat, do not use it and tell them to rotate it.
-- zks writes need the human's approval in a native dialog; never try to bypass or automate that dialog.
+- zks writes to a new destination need the human's approval in a native dialog; never try to bypass or automate that dialog.
 <!-- zks:end -->
 EOF
 if [ ! -e "$AGENTS" ]; then
@@ -161,5 +181,5 @@ case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *) printf '\nAdd %s to your PATH, for example in ~/.zshrc:\n  export PATH="%s:$PATH"\n' "$BIN_DIR" "$BIN_DIR" ;;
 esac
-printf '\nNext: zks auth set vercel|railway|supabase, aws sso login, gh auth login, then zks init in a project.\n'
+printf '\nNext: ask your agent to set up secrets; it creates and captures provider tokens itself with zks capture.\n'
 [ "$INSTALL_STATUS" = "ok" ] || die "install status is \"$INSTALL_STATUS\", expected \"ok\""

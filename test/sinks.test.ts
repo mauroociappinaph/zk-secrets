@@ -13,6 +13,7 @@ import {
   CANARY,
   GH_TOKEN,
   GITHUB_KEY_ID,
+  TEST_TOOLS,
   fakeAws,
   fakeExec,
   fakeFetch,
@@ -32,7 +33,7 @@ function ctx(parts: Partial<{ fetch: ReturnType<typeof fakeFetch>; exec: ReturnT
   const exec = parts.exec ?? fakeExec();
   const aws = parts.aws ?? fakeAws();
   const { keychain } = fakeKeychain(parts.tokens ?? { "zks/vercel": "tv", "zks/railway": "tr", "zks/supabase": "ts" });
-  const context: SinkContext = { fetch: fetch.fetch, exec: exec.exec, aws: aws.aws, keychain };
+  const context: SinkContext = { fetch: fetch.fetch, exec: exec.exec, aws: aws.aws, keychain, tools: TEST_TOOLS };
   return { context, fetch, exec, aws };
 }
 
@@ -173,7 +174,7 @@ test("github secret: gets the repo public key, seals the value and PUTs it with 
   const res = await githubSink.apply(op({ provider: "github", repo: "acme/web" }), secret(), c.context);
 
   assert.deepEqual(res, { version: GITHUB_KEY_ID });
-  assert.deepEqual(c.exec.calls, [{ command: "gh", args: ["auth", "token", "--hostname", "github.com"], input: "" }]);
+  assert.deepEqual(c.exec.calls, [{ command: TEST_TOOLS.gh, args: ["auth", "token", "--hostname", "github.com"], input: "" }]);
   assert.deepEqual(
     c.fetch.calls.map((call) => [call.init.method, call.url]),
     [

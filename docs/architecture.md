@@ -1,6 +1,6 @@
 # zks architecture
 
-zks splits the work between an **untrusted planner** (the AI agent, which only edits names, targets and sources) and a **trusted executor** (the installed `zks` binary, which resolves values and writes them after a human approves the write or has trusted its destination). The agent's view is metadata only.
+zks splits the work between an **untrusted planner** (the AI agent, which only edits names, targets and sources, and drives the non-secret browser steps) and a **trusted executor** (the installed `zks` binary, which resolves values and writes them after a human approves the write or has trusted its destination, and runs its own ego-browser script for the secret step of a web capture). The agent's view is metadata only.
 
 ## Components
 
@@ -23,7 +23,10 @@ zks splits the work between an **untrusted planner** (the AI agent, which only e
  │    ├─ sinks/*              vercel │ aws-ssm │ aws-sm │ github │ railway │ supabase   │
  │    ├─ audit/store.ts       SQLite append-only, SHA-256 hash chain                    │
  │    ├─ audit/mirror.ts      HMAC-signed push to Apps Script (optional)                │
- │    └─ platform/*           exec (no shell, fixed env), keychain, integrity, paths    │
+ │    ├─ capture/script.ts    builds the ego-browser script, parses its one marker line │
+ │    ├─ capture/run.ts       pipes the script to `ego-browser nodejs` (absolute path)  │
+ │    └─ platform/*           exec (no shell, fixed env), keychain, integrity, paths,   │
+ │                            tools (tools.json: ego-browser, gh, op real paths)        │
  └──────┬──────────────┬───────────────┬──────────────────┬───────────────────────────┘
         ▼              ▼               ▼                  ▼
   1Password CLI   macOS Keychain   Provider APIs        ~/.local/state/zks/audit.db
@@ -36,13 +39,14 @@ Files on disk:
 
 | Path | Content | Mode |
 |---|---|---|
-| `~/.local/libexec/zks/<version>/` | `dist/`, `bin/`, `package.json`, production `node_modules` | read-only (`a-w`) |
+| `~/.local/libexec/zks/<version>/` | `dist/`, `bin/`, `package.json`, production `node_modules`, `tools.json` (real paths of `ego-browser`, `gh`, `op` resolved at install time, `null` when missing; covered by the integrity digest) | read-only (`a-w`) |
 | `~/.local/bin/zks` | launcher: `ulimit -c 0`, then `/usr/bin/env -i HOME=… USER=… LOGNAME=… LANG=en_US.UTF-8 PATH=<SAFE_PATH> ZKS_AGENT_LABEL=… <node> <install>/dist/cli.js "$@"`; node's real path and your home are fixed at install time | `555` |
 | `~/.config/zks/integrity.json` | `{version, root, digest, files}` of the install | `600` in `700` dir |
 | `~/.config/zks/config.json` | Sheets webhook URL | `600` |
 | `~/.config/zks/trust.json` | trusted destination keys with `addedAt`/`addedBy`, HMAC-SHA256 `mac` | `600` in `700` dir |
 | `~/.local/state/zks/audit.db` | audit log | owner only (umask `077`) |
-| Keychain service `zks` | `vercel`, `railway`, `supabase`, `sheets-hmac` tokens; `audit-head` anchor (`<count>:<hash>`); `trust-hmac` key that signs `trust.json` | Keychain ACL |
+| Keychain service `zks` | `vercel`, `railway`, `supabase`, `sheets-hmac` tokens (stored by `zks capture` or `zks auth set`); `audit-head` anchor (`<count>:<hash>`); `trust-hmac` key that signs `trust.json` | Keychain ACL |
+| Other Keychain services | items `zks capture` stored (`<service>/<account>`), for policies' `keychain` sources or local tools | Keychain ACL |
 
 ## Trust boundaries
 
@@ -53,6 +57,8 @@ Files on disk:
 | zks ↔ sources | `op read` stdout, `security` stdout, dotenv file bytes | argv carrying a value |
 | zks ↔ providers | HTTPS body with the value (GitHub secrets as a libsodium sealed box); token in an HTTP header; `gh auth token` stdout (the GitHub token) | values in URLs, argv or env |
 | zks ↔ audit | metadata only | values or hashes of values |
+| zks ↔ ego-browser | the capture script on stdin (space id, page label, selectors, origin, Keychain service/account, all JSON-encoded); one `ZKS_RESULT` line back with `ok`, `length` or an error code | values: the script moves them page → `security -i` (stdin, hex) or `security find-generic-password` stdout → `page.fill`, inside the ego runtime |
+| agent ↔ ego-browser | the non-secret steps: navigation, forms, token names, expiry, scope | pages while they show a secret (the skill forbids snapshot, screenshot or evaluate then; zks clicks the reveal itself) |
 
 The policy file is written by the agent and is **not trusted**: it is validated field by field, and the human approval dialog is the gate that decides whether anything is written.
 
@@ -71,6 +77,19 @@ The policy file is written by the agent and is **not trusted**: it is validated 
 10. The audit head (`<count>:<hash>`) is stored in the Keychain item `zks`/`audit-head`; `zks audit verify` and `zks doctor` check the chain against it. The mirror pushes pending records to the Sheet (failures stay pending locally).
 11. stdout gets JSON results (with `approval` and, after "Always allow", `trusted`), passed through `Redactor.scrub`; exit 0 if every write applied, else 1.
 
+## Capture data flow
+
+1. The agent opens the provider or site page in one ego-browser TaskSpace and does every non-secret step (log in with the user's session, fill the token name and expiry). It stops before the click that reveals a value.
+2. `zks capture read|fill` validates every option (space id, page label, selectors as printable ASCII up to 300 characters, `SERVICE/ACCOUNT`, `--origin` as an https or loopback origin). Service `zks` (any case) is limited to `read` of `vercel`, `railway`, `supabase` and `sheets-hmac` from their pinned origin. Errors exit 2 without echoing a value.
+3. zks resolves `ego-browser` from `tools.json` (a development checkout looks on SAFE_PATH only); missing → `browser_failed`.
+4. `read` and `fill --generate` over an existing Keychain item ask "Replace the Keychain item <service>/<account>?" with the origin; denial exits 3 and runs nothing. `fill --from` needs the item to exist (`not_found`).
+5. `fill --generate`: zks generates base64url random bytes and stores them with `security -i` before the browser step.
+6. zks builds the script (inputs only through `JSON.stringify`) and runs `ego-browser nodejs` with it on stdin, a fixed environment and a 60 s timeout. Inside ego, the script resumes the TaskSpace and page, checks `new URL(page.url()).origin` against `--origin`, then:
+   - `read`: clicks `--click`, waits up to 15 s for `--selector` to match one element with a value, checks the origin again, takes the value and blanks the element in one `page.evaluate`, stores it with `security -i` (`add-generic-password -U … -X <hex>` on stdin) and navigates the page to `about:blank`;
+   - `fill`: waits for `--selector`, reads the item with `security find-generic-password -w` (stdout kept in memory, zeroed), and calls `page.fill`.
+7. The script prints one line, `ZKS_RESULT {"ok":true,"length":N}` or `{"ok":false,"code":"origin_mismatch|not_found|keychain_failed|browser_failed"}`; any thrown error becomes `browser_failed` without its message. ego prints it on stderr; zks reads exactly one marker line from stdout and stderr, zeroes both and relays nothing else.
+8. zks appends an audit record (`provider: "keychain"`, `action: "capture"`, `target: "<service>/<account>"`, `environment: <origin>`, `sourceKind: capture-read|capture-generate|capture-from`), stores the audit anchor and prints `{ok, command, mode, store, origin, length, auditId}`.
+
 ## Threat model
 
 | Vector | Mitigation | Residual risk |
@@ -88,6 +107,10 @@ The policy file is written by the agent and is **not trusted**: it is validated 
 | Trust store tampering | `trust.json` is HMAC-SHA256 signed with a Keychain key; unparsable, unsigned or mismatched files trust nothing and are reported `trust: "invalid"`; `zks trust remove` only reduces trust | A same-user process can read `trust-hmac` and forge the file; "Always allow" on one GitHub repo trusts its whole owner |
 | Audit tampering | `BEFORE UPDATE/DELETE` triggers, SHA-256 hash chain (`zks audit verify`), Keychain anchor `zks`/`audit-head` that detects a deleted tail, off-machine Sheet mirror with a `chainOk` column, provider audit logs; `zks config set/unset sheets-webhook` needs approval | Tamper-evident, not impossible: a same-user process can rewrite the SQLite file and the anchor; the mirror and provider logs reveal it |
 | Actor identity | `actorHuman` comes from the OS user database | `actorAgent` is a self-declared label (`--agent`, `ZKS_AGENT_LABEL` from `PI_SESSION_ID`/`AI_AGENT`); zks cannot authenticate it |
+| Capture script integrity | zks builds the whole script itself from a fixed body; every input is validated and enters only through `JSON.stringify` (a selector with quotes, backticks or `${}` stays a string); `ego-browser` runs from the real path recorded at install, never a `PATH` lookup; only the one `ZKS_RESULT` line is parsed, strictly (`ok` + integer `length`, or `ok` + a known code); errors inside the script are reported as codes, never messages | A same-user process can replace the ego-browser app or its runtime, which then sees every value the script handles; `tools.json` is tamper-evident through `zks doctor`, not tamper-proof |
+| ego runtime memory | The value lives only inside the ego `nodejs` process for one script: read from the page, sent to `security` on stdin as hex (buffer zeroed), or read from `security` stdout (zeroed) and passed to `page.fill` | JavaScript strings in the ego runtime and the page's own memory cannot be zeroed; the browser profile may keep form data per its own settings |
+| Revealed page | zks performs the reveal click itself, takes and blanks the element in one `page.evaluate` (`value = ""`, `textContent = "[captured by zks]"`) and navigates the page to `about:blank` | The agent's own ego session can still read a revealed page or a filled password field if it ignores the skill (same-user limit); a site may keep the token elsewhere in its DOM, history or clipboard buttons |
+| Phishing or redirected page | `--origin` is checked before the click and again before the read or fill; `zks/<provider>` tokens can only be captured with their pinned origin (`https://vercel.com`, `https://railway.com`, `https://supabase.com`, `https://script.google.com`); `fill` never uses service `zks`; replacing an existing item needs approval | Without `--origin`, any page can be read or filled (the agent is told to always pass it); an origin is not a path, so a malicious page on the same origin is not detected |
 | Token theft | Tokens in Keychain (service `zks`), read only for one request and zeroed; a policy cannot use service `zks` as a source; AWS uses short-lived SSO/role credentials with a session policy; scoped, expiring tokens recommended below | Any process of the same user can read Keychain items with `/usr/bin/security find-generic-password -w`; for a hard boundary run the agent as a dedicated macOS user |
 
 ## Least-privilege recipes
@@ -153,7 +176,7 @@ For `aws-sm` the first statement is `secretsmanager:PutSecretValue`, `secretsman
 
 ### Vercel
 
-Create a token with an **expiration** and scope it to the team that owns the project (Account Settings → Tokens). Store it with `zks auth set vercel`. zks writes sensitive variables as type `sensitive`, which Vercel never returns after creation.
+Create a token with an **expiration** and scope it to the team that owns the project (Account Settings → Tokens). The agent creates it at `vercel.com/account/settings/tokens` and stores it with `zks capture read --store zks/vercel --origin https://vercel.com` (or, by hand, `zks auth set vercel`). zks writes sensitive variables as type `sensitive`, which Vercel never returns after creation.
 
 ### GitHub
 
@@ -161,11 +184,11 @@ zks reads your `gh auth login` token with `gh auth token --hostname github.com` 
 
 ### Railway
 
-Prefer a **project token** (Project Settings → Tokens) scoped to one environment, with `"tokenType": "project"` on the target. Store it with `zks auth set railway`.
+Prefer a **project token** (Project Settings → Tokens) scoped to one environment, with `"tokenType": "project"` on the target. The agent captures it into `zks/railway` with `--origin https://railway.com` (or, by hand, `zks auth set railway`).
 
 ### Supabase
 
-Create a personal access token (Account → Access Tokens), store it with `zks auth set supabase`, and revoke it when no longer needed. It can manage every project you can access, so keep it in the Keychain only.
+Create a personal access token (Account → Access Tokens), captured into `zks/supabase` with `--origin https://supabase.com` (or `zks auth set supabase`), and revoke it when no longer needed. It can manage every project you can access, so keep it in the Keychain only.
 
 ## Data model
 
@@ -208,12 +231,12 @@ Variable
 | `ts` | ISO timestamp |
 | `actorHuman` | macOS user name |
 | `actorAgent` | self-declared: `--agent`, else `ZKS_AGENT_LABEL` (the launcher sets `pi:<PI_SESSION_ID>` or `AI_AGENT`), else `human` |
-| `project` | policy project |
-| `provider`, `target`, `environment` | where the write went |
-| `variableName` | name only |
-| `action` | `set` |
+| `project` | policy project; for a capture the Keychain service |
+| `provider`, `target`, `environment` | where the write went; for a capture `keychain`, `<service>/<account>` and the page origin (`""` without `--origin`) |
+| `variableName` | name only; for a capture the Keychain account |
+| `action` | `set` (apply) or `capture` |
 | `sensitive` | boolean |
-| `sourceKind` | `op`, `keychain`, `prompt`, `generate`, `dotenv` or `literal` |
+| `sourceKind` | `op`, `keychain`, `prompt`, `generate`, `dotenv` or `literal`; for a capture `capture-read`, `capture-generate` or `capture-from` |
 | `result` | `applied`, `denied` or `failed` |
 | `providerVersion` | version id returned by the provider, if any |
 | `errorCode` | short code, e.g. `not_approved`, `missing_token` |

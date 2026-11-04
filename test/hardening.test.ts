@@ -13,7 +13,7 @@ import { MAX_OPERATIONS_PER_APPROVAL, run } from "../src/run.ts";
 import { Redactor } from "../src/secret/redactor.ts";
 import { SecretBuffer } from "../src/secret/secret-buffer.ts";
 import { SourceError, resolveValue } from "../src/sources/resolve.ts";
-import { CANARY, fakeExec, fakeFetch, fakeHuman, fakeKeychain, harness, parse, tempDir } from "./helpers.ts";
+import { CANARY, TEST_TOOLS, fakeExec, fakeFetch, fakeHuman, fakeKeychain, harness, parse, tempDir } from "./helpers.ts";
 
 const BASE = { home: "/Users/real", user: "real" };
 const FIVE_KEYS = { PATH: SAFE_PATH, HOME: "/Users/real", USER: "real", LOGNAME: "real", LANG: "en_US.UTF-8" };
@@ -189,6 +189,7 @@ test("S1: dotenv resolution refuses a path that leaves the project", async () =>
   let reads = 0;
   const deps = {
     exec: fakeExec().exec,
+    tools: TEST_TOOLS,
     keychain: fakeKeychain().keychain,
     human: fakeHuman().human,
     cwd: "/w/project",
@@ -461,7 +462,7 @@ test("S1: a .env symlink pointing outside the project is refused", async () => {
   writeFileSync(join(outside, "credentials"), "K=outside-value\n");
   symlinkSync(join(outside, "credentials"), join(project, ".env"));
   writeFileSync(join(project, ".env.local"), "K=inside-value\n");
-  const deps = { exec: fakeExec().exec, keychain: fakeKeychain().keychain, human: fakeHuman().human, cwd: project };
+  const deps = { exec: fakeExec().exec, tools: TEST_TOOLS, keychain: fakeKeychain().keychain, human: fakeHuman().human, cwd: project };
   await assert.rejects(
     resolveValue("K", { sensitive: true, targets: [], source: { kind: "dotenv", path: ".env" } }, deps),
     (e: Error & { code?: string }) => e.code === "source_invalid",

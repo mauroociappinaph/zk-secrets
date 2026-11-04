@@ -5,10 +5,12 @@ import type { SourceSpec, VariableSpec } from "../policy/types.ts";
 import type { HumanChannel } from "../gate/dialog.ts";
 import type { Exec } from "../platform/exec.ts";
 import type { Keychain } from "../platform/keychain.ts";
+import type { ToolPaths } from "../platform/tools.ts";
 import { SecretBuffer } from "../secret/secret-buffer.ts";
 
 export interface SourceDeps {
   exec: Exec;
+  tools: ToolPaths;
   keychain: Keychain;
   human: HumanChannel;
   cwd: string;
@@ -34,7 +36,8 @@ export async function resolveValue(name: string, spec: VariableSpec, deps: Sourc
 async function resolveSource(name: string, source: SourceSpec, deps: SourceDeps): Promise<SecretBuffer> {
   switch (source.kind) {
     case "op": {
-      const res = await deps.exec("op", ["read", "--no-newline", source.ref], { timeoutMs: 120_000 }).catch(() => null);
+      const op = deps.tools.op;
+      const res = op ? await deps.exec(op, ["read", "--no-newline", source.ref], { timeoutMs: 120_000 }).catch(() => null) : null;
       if (!res) throw new SourceError("source_unavailable", "1Password CLI (op) is not available");
       if (res.code !== 0) {
         res.stdout.fill(0);

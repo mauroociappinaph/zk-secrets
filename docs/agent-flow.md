@@ -1,6 +1,6 @@
 # Agent flow
 
-How an agent sets a secret with zks, step by step. The agent handles names, targets and sources; the human handles values, tokens and approval. The skill in [`skill/SKILL.md`](../skill/SKILL.md) is the instruction set agents follow.
+How an agent sets a secret with zks, step by step. The agent handles names, targets, sources and every browser step (creating tokens and API keys, verification mail); zks handles values; the human only approves a dialog for a new destination and solves captchas or 2FA. The skill in [`skill/SKILL.md`](../skill/SKILL.md) is the instruction set agents follow.
 
 ## Sequence
 
@@ -50,17 +50,45 @@ Branches:
 
 - **Exit 2** (usage or policy): the agent fixes the policy or command and repeats from step 3. `too_many_operations` means more than 20 writes: split the apply with `--only` / `--target`.
 - **Exit 3** (not approved): nothing was written. The agent asks the human whether to retry; it never retries on its own.
-- **Exit 1 with `missing_token`**: the agent tells the human to run `zks auth set <vercel|railway|supabase>`; the token goes through a hidden dialog, never through chat.
+- **Exit 1 with `missing_token`**: the agent creates the token on the provider site in ego-browser and runs `zks capture read --store zks/<provider> --origin <pinned origin>` (see [Capture sequence](#capture-sequence)), then repeats the apply. It never asks the human for the token.
 - **Exit 2 with `dialog_too_long`**: a line over 300 characters or a dialog over 6000; narrow with `--only` / `--target`.
-- **AWS credentials expired**: the human runs `aws sso login`. **GitHub `missing_token`**: the human runs `gh auth login`; zks reads that session's token with `gh auth token` and calls `api.github.com` itself.
+- **AWS credentials expired**: the agent runs `aws sso login`; the human only completes a sign-in or 2FA step if the browser asks. **GitHub `missing_token`**: the agent runs `gh auth login --web` and finishes it in ego-browser; zks reads that session's token with `gh auth token` and calls `api.github.com` itself.
 - **`trust: "invalid"`** in the output: `~/.config/zks/trust.json` was altered or unsigned, so nothing is trusted and every write asks again. Tell the human.
 - **A secret pasted into chat**: the agent does not use it and recommends rotating it.
+
+## Capture sequence
+
+How the agent gets a token from a web page without seeing it (`zks capture read`). `fill` is the same with `page.fill` of a Keychain item instead of the read.
+
+```text
+Agent                      ego-browser page              zks                          macOS Keychain
+  │ open token page,         │                             │                              │
+  │ snapshot (no secret yet),│                             │                              │
+  │ fill name/expiry/scope   │                             │                              │
+  │─────────────────────────▶│                             │                              │
+  │ zks capture read --space 7 --page p1 --click <create> --selector <token> --store zks/vercel --origin https://vercel.com
+  │───────────────────────────────────────────────────────▶│ validate, pinned origin,     │
+  │                          │                             │ replace? ═ approval dialog ═ human
+  │                          │◀── own script on stdin of `ego-browser nodejs` ────────────│
+  │                          │  origin check               │                              │
+  │                          │  click <create> (reveal)    │                              │
+  │                          │  wait for <token>, re-check origin                         │
+  │                          │  take value + blank element │                              │
+  │                          │  security -i (stdin, hex) ─────────────────────────────────▶│
+  │                          │  goto about:blank           │                              │
+  │                          │── ZKS_RESULT {"ok":true,"length":N} ─▶│ parse one line only,  │
+  │                          │                             │ audit (keychain/capture)     │
+  │◀──────────── {ok, command, mode, store, origin, length, auditId} ─│                    │
+```
+
+The agent never snapshots, screenshots or evaluates the page between the reveal and `about:blank`; zks does the reveal click itself. On `not_found` after a reveal, the agent navigates away without looking, deletes the orphan token by name and retries with another selector.
 
 ## Which source kind
 
 | The human says… | Source | Policy snippet | Note |
 |---|---|---|---|
 | "It's in 1Password" | `op` | `{"kind":"op","ref":"op://Vault/Item/field"}` | Ask for the reference; it is not secret |
+| "Get a key from <site>" | capture, then `keychain` | `{"kind":"keychain","service":"svc","account":"key"}` | The agent registers and runs `zks capture read --store svc/key` first |
 | "I'll type it" / "I have it copied" | `prompt` | `{"kind":"prompt"}` | Hidden macOS dialog during apply |
 | "Make a new random key" | `generate` | `{"kind":"generate","bytes":32}` | New value on **every** apply: it rotates each time |
 | "It's in my Keychain" | `keychain` | `{"kind":"keychain","service":"svc","account":"acct"}` | Item must exist; service `zks` is reserved |

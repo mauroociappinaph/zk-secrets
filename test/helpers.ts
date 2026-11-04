@@ -8,6 +8,7 @@ import type { Mirror } from "../src/audit/types.ts";
 import type { HumanChannel, TrustDecision } from "../src/gate/dialog.ts";
 import type { Exec, ExecOptions, ExecResult } from "../src/platform/exec.ts";
 import type { Keychain } from "../src/platform/keychain.ts";
+import type { ToolPaths } from "../src/platform/tools.ts";
 import type { TrustFile } from "../src/policy/trust.ts";
 import type { Deps, ZksConfig } from "../src/run.ts";
 import { SecretBuffer } from "../src/secret/secret-buffer.ts";
@@ -22,6 +23,9 @@ export const GITHUB_KEYPAIR = sodium.crypto_box_keypair();
 export const GITHUB_KEY_ID = "568250167242549743";
 export const GITHUB_PUBLIC_KEY = sodium.to_base64(GITHUB_KEYPAIR.publicKey, sodium.base64_variants.ORIGINAL);
 export const GH_TOKEN = "gho_testtoken123";
+
+/** Absolute tool paths the harness resolves, as install.sh writes them to tools.json. */
+export const TEST_TOOLS: ToolPaths = { egoBrowser: "/test/bin/ego-browser", gh: "/test/bin/gh", op: "/test/bin/op" };
 
 /** Opens a GitHub sealed box with the test keypair. */
 export function openSealed(encryptedValue: string): string {
@@ -40,7 +44,7 @@ export function providerResponse(call: FetchCall): { status?: number; body?: unk
 
 /** `gh auth token` answers with a test token; every other command succeeds silently. */
 export function ghTokenExec(call: ExecCall): Partial<ExecResult> {
-  if (call.command === "gh" && call.args[0] === "auth" && call.args[1] === "token") return { stdout: Buffer.from(`${GH_TOKEN}\n`) };
+  if (call.command === TEST_TOOLS.gh && call.args[0] === "auth" && call.args[1] === "token") return { stdout: Buffer.from(`${GH_TOKEN}\n`) };
   return {};
 }
 
@@ -220,6 +224,7 @@ export function harness(
     agentId: "pi:test-session",
     now: () => new Date("2026-11-04T12:00:00.000Z"),
     exec: exec.exec,
+    tools: { ...TEST_TOOLS },
     keychain: keychain.keychain,
     human: human.human,
     fetch: fetch.fetch,
