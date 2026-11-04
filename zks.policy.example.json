@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "project": "acme-shop",
+  "targets": {
+    "vercel-prod": { "provider": "vercel", "projectId": "prj_REPLACE_ME", "teamId": "team_REPLACE_ME", "environments": ["production", "preview"] },
+    "ssm-prod": { "provider": "aws-ssm", "region": "us-east-1", "prefix": "/acme-shop/prod/", "roleArn": "arn:aws:iam::123456789012:role/zks-secret-writer" },
+    "sm-prod": { "provider": "aws-sm", "region": "us-east-1", "prefix": "acme-shop/prod/", "profile": "acme-prod" },
+    "github-prod": { "provider": "github", "repo": "acme/shop", "environment": "production" },
+    "railway-prod": { "provider": "railway", "projectId": "REPLACE_ME", "environmentId": "REPLACE_ME", "serviceId": "REPLACE_ME", "tokenType": "project" },
+    "supabase-prod": { "provider": "supabase", "projectRef": "abcdefghijklmnopqrst" }
+  },
+  "variables": {
+    "STRIPE_SECRET_KEY": {
+      "sensitive": true,
+      "description": "Stripe live secret key, kept in 1Password",
+      "source": { "kind": "op", "ref": "op://Production/Stripe/secret_key" },
+      "targets": ["vercel-prod", "ssm-prod", "sm-prod", "github-prod", "railway-prod", "supabase-prod"]
+    },
+    "LOG_LEVEL": {
+      "sensitive": false,
+      "value": "info",
+      "targets": ["vercel-prod", "ssm-prod", "github-prod", "railway-prod", "supabase-prod"]
+    }
+  }
+}
