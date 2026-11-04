@@ -26,7 +26,9 @@
 - The agent field of the audit log (`actorAgent`) is a **self-declared label** (`--agent`, `PI_SESSION_ID`, `AI_AGENT`); zks cannot authenticate who asked.
 - The local hash chain, the Keychain anchor (`audit-head`) and the Sheet mirror make tampering with the audit log **evident, not impossible**.
 - After the write, the provider's own access rules apply. Vercel `sensitive` variables and GitHub secrets cannot be read back; SSM SecureString and Secrets Manager values can be read by any principal with decrypt/read permission; Railway variables stay readable by every member of the Railway project.
-- `zks capture` trusts the same-user agent to follow the skill: while a page shows a revealed token, the agent's own ego-browser session could read it. zks shrinks that window (it clicks the reveal itself, blanks the element and leaves the page on `about:blank`), it cannot close it. The ego-browser runtime holds the value in memory while the script runs.
+- `zks capture` trusts the same-user agent to follow the skill: while a page shows a revealed token, or after a fill while the password field holds the value, the agent's own ego-browser session could read it. zks shrinks that window (it clicks the reveal itself, blanks the element, leaves the page on `about:blank` after every reveal click, and fills only password inputs), it cannot close it. The ego-browser runtime holds the value in memory while the script runs.
+- The first capture into a `zks/*` token (`zks/vercel`, `zks/railway`, `zks/supabase`, `zks/sheets-hmac`) needs no approval: only replacing an existing one does. The pinned origin limits it to the provider's own site, so an agent can only store a token that site issued to your logged-in session; a same-user agent could still store a token of its choosing there (same-user limit).
+- `fill --from` decides "same origin, no dialog" from the local audit log, which a same-user process can rewrite (tamper-evident through `zks audit verify`, not tamper-proof).
 - `tools.json` stores real paths, which include version directories (Homebrew `Cellar`/`Caskroom`, ego's `Versions/<n>`): after upgrading `gh`, `op` or ego-browser, rerun `./install.sh`, or zks reports the tool unavailable.
 - The Google Sheets audit is a **mirror**. The source of truth is the local log (`zks audit verify`) and the providers' own audit logs.
 
@@ -63,9 +65,10 @@ zks capture read --space ID --page LABEL --selector CSS --store SERVICE/ACCOUNT 
                                             In an ego-browser page: click, read the token element
                                             into the Keychain, blank it (value never shown)
 zks capture fill --space ID --page LABEL --selector CSS (--store SERVICE/ACCOUNT --generate BYTES
-                 | --from SERVICE/ACCOUNT) [--origin ORIGIN]
+                 | --from SERVICE/ACCOUNT) --origin ORIGIN
                                             Fill a new random (16-128 bytes) or a stored password
-                                            into an ego-browser page field from the Keychain
+                                            into one password input of an ego-browser page; --from
+                                            into another origin than the item came from asks first
 zks audit list [--limit N] [--project P]    Show audit records (metadata only)
 zks audit verify                            Check the audit hash chain
 zks audit sync                              Push pending audit records to Google Sheets
@@ -118,12 +121,12 @@ The first write to a destination opens the dialog with three buttons: **Deny** (
 | Destination key | Trusts |
 |---|---|
 | `github:<owner>` | every repository of that GitHub owner (lower case) |
-| `vercel:<teamId>` or `vercel:personal` | every project of that Vercel team or personal account |
+| `vercel:team:<teamId>` or `vercel:personal` | every project of that Vercel team, or of the personal account (no `teamId`) |
 | `aws:<profile or default>:<roleArn or no-role>:<region>` | SSM and Secrets Manager writes with that profile, role and region |
 | `railway:<projectId>` | that Railway project |
 | `supabase:<projectRef>` | that Supabase project |
 
-The keys live in `~/.config/zks/trust.json` (mode `600`), signed with HMAC-SHA256 by a key in the Keychain item `zks`/`trust-hmac`. A file that is unparsable or whose signature does not match trusts nothing: every write asks again and `apply` and `doctor` report `trust: "invalid"`. `zks trust list` shows the keys; `zks trust remove <key>` drops one without a dialog.
+Keys trusted before this format (`vercel:<teamId>`) no longer match any write; `zks trust list` describes them as an old Vercel key format and `zks trust remove <key>` drops them. The keys live in `~/.config/zks/trust.json` (mode `600`), signed with HMAC-SHA256 by a key in the Keychain item `zks`/`trust-hmac`. A file that is unparsable or whose signature does not match trusts nothing: every write asks again and `apply` and `doctor` report `trust: "invalid"`. `zks trust list` shows the keys; `zks trust remove <key>` drops one without a dialog.
 
 ## Web token capture
 
@@ -137,13 +140,15 @@ zks capture fill --space 7 --page p1 --selector "#password" --store indec/passwo
 zks capture fill --space 7 --page p1 --selector "#password" --from indec/password --origin https://api.indec.gob.ar
 ```
 
-- zks builds the script itself (every input embedded only through `JSON.stringify`) and pipes it to `ego-browser nodejs`. The script checks the page origin (`--origin`), optionally clicks `--click` (any ego selector), waits up to 15 s for `--selector` (plain CSS, exactly one element) to hold a value, takes `value` (inputs, textareas) or the trimmed text, blanks the element (`""` or `[captured by zks]`), stores it with `/usr/bin/security -i` (on stdin, hex) and navigates the page to `about:blank`.
-- `fill --generate BYTES` (16–128) makes a base64url password in zks, stores it, and the script reads it back inside ego (`security find-generic-password -w`, kept in memory) for `page.fill`. `fill --from SERVICE/ACCOUNT` fills an existing item. The value never appears in the script, argv or output.
+- zks builds the script itself (every input embedded only through `JSON.stringify`) and pipes it to `ego-browser nodejs`. The script checks the page origin (`--origin`), optionally clicks `--click` (any ego selector), waits up to 15 s for `--selector` (plain CSS, exactly one element) to hold a value, takes `value` (inputs, textareas) or the trimmed text, blanks the element (`""` or `[captured by zks]`), stores it with `/usr/bin/security -i` (on stdin, hex) and navigates the page to `about:blank`. Once a `--click` ran (or was attempted), the page goes to `about:blank` on every outcome, including `not_found`, `origin_mismatch`, `keychain_failed` and errors.
+- `fill` always needs `--origin`. `fill --generate BYTES` (16–128) makes a base64url password in zks, stores it, and the script reads it back inside ego (`security find-generic-password -w`, kept in memory). `fill --from SERVICE/ACCOUNT` fills an existing item. The script then runs one `page.evaluate` in the page's main frame that re-checks `document.location.origin`, requires `--selector` to match exactly one `<input type="password">` (otherwise `not_password_field`, nothing filled), sets it with the native value setter and fires `input` and `change`. It never uses `page.fill`, so it never reaches into iframes. The value never appears in the script, argv or output.
+- `fill --from` runs without a dialog only into the origin the item was last captured or generated from (the latest applied `capture-read` or `capture-generate` audit record of that item). Any other origin, or an item with no such record, asks "Fill <service>/<account> into <origin>?"; denial exits 3, is audited `denied` and runs nothing. An approved fill does not make the next one silent.
 - The script prints one line, `ZKS_RESULT {"ok":true,"length":N}` or `{"ok":false,"code":...}`; zks reads only that line and never relays any other ego output.
-- Output: `{ok, command: "capture", mode: "read"|"fill", store, origin, length, auditId}`. Errors (exit 1): `origin_mismatch` (nothing stored or filled), `not_found`, `keychain_failed`, `browser_failed`. Usage errors exit 2 and never echo a value.
+- Output: `{ok, command: "capture", mode: "read"|"fill", store, origin, length, auditId, mirror}`. Errors (exit 1): `origin_mismatch` (nothing stored or filled), `not_found`, `not_password_field`, `keychain_failed`, `browser_failed`. Usage errors exit 2 and never echo a value.
+- One-time codes that are not secrets worth keeping (an e-mail verification code) are not captured: the agent types them with normal ego actions.
 - Service `zks` (any case) is reserved: only `zks/vercel` (`--origin https://vercel.com`), `zks/railway` (`https://railway.com`), `zks/supabase` (`https://supabase.com`) and `zks/sheets-hmac` (`https://script.google.com`) can be captured, only with `read` and only from that origin. `fill` never uses service `zks`.
-- Replacing an existing Keychain item (`read`, `fill --generate`) opens an approval dialog first; denial exits 3 and runs nothing.
-- Every capture is audited: `provider: "keychain"`, `action: "capture"`, `target: "<service>/<account>"`, `environment: <origin>`, `sourceKind: capture-read|capture-generate|capture-from`, result `applied`, `failed` or `denied`. Captures do not push to the Sheets mirror themselves; the next `apply` or `zks audit sync` does.
+- Replacing an existing Keychain item (`read`, `fill --generate`) opens an approval dialog first; denial exits 3 and runs nothing. The first capture into a new item, `zks/*` included, needs no approval (see [What is guaranteed, and what is not](#what-is-guaranteed-and-what-is-not)).
+- Every capture is audited: `provider: "keychain"`, `action: "capture"`, `target: "<service>/<account>"`, `environment: <origin>`, `sourceKind: capture-read|capture-generate|capture-from`, result `applied`, `failed` or `denied`. Like `apply`, every capture then pushes pending records to the Sheets mirror (best effort) and reports it in `mirror`.
 
 ## Exit codes
 

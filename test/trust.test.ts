@@ -42,8 +42,10 @@ function records(h: TestHarness) {
 test("S10: trustKeyOf names the destination each provider trusts", () => {
   assert.equal(trustKeyOf(op({ provider: "github", repo: "Acme/Web" })), "github:acme");
   assert.equal(trustKeyOf(op({ provider: "github", repo: "acme/other", environment: "prod" })), "github:acme");
-  assert.equal(trustKeyOf(op({ provider: "vercel", projectId: "p", teamId: "team_1", environments: ["preview"] })), "vercel:team_1");
+  assert.equal(trustKeyOf(op({ provider: "vercel", projectId: "p", teamId: "team_1", environments: ["preview"] })), "vercel:team:team_1");
   assert.equal(trustKeyOf(op({ provider: "vercel", projectId: "p", environments: ["preview"] })), "vercel:personal");
+  // A team whose id is "personal" is not the personal account.
+  assert.equal(trustKeyOf(op({ provider: "vercel", projectId: "p", teamId: "personal", environments: ["preview"] })), "vercel:team:personal");
   assert.equal(trustKeyOf(op({ provider: "aws-ssm", region: "us-east-1", prefix: "/a/" })), "aws:default:no-role:us-east-1");
   assert.equal(
     trustKeyOf(op({ provider: "aws-sm", region: "sa-east-1", prefix: "a/", profile: "prod", roleArn: "arn:aws:iam::123456789012:role/w" })),
@@ -55,8 +57,11 @@ test("S10: trustKeyOf names the destination each provider trusts", () => {
 
 test("S10: describeTrustKey explains the scope of each key", () => {
   assert.equal(describeTrustKey("github:acme"), "GitHub owner acme (every repository)");
-  assert.equal(describeTrustKey("vercel:team_1"), "Vercel team team_1");
+  assert.equal(describeTrustKey("vercel:team:team_1"), "Vercel team team_1");
+  assert.equal(describeTrustKey("vercel:team:personal"), "Vercel team personal");
   assert.equal(describeTrustKey("vercel:personal"), "Vercel personal account");
+  assert.equal(describeTrustKey("vercel:team_1"), "old Vercel key format; it no longer matches any write (remove it)");
+  assert.equal(describeTrustKey("vercel:team:"), "unknown destination");
   assert.equal(describeTrustKey(SSM_KEY), "AWS profile prod, role arn:aws:iam::123456789012:role/w, region sa-east-1 (SSM and Secrets Manager)");
   assert.equal(describeTrustKey("aws:default:no-role:us-east-1"), "AWS profile default, no role, region us-east-1 (SSM and Secrets Manager)");
   assert.equal(describeTrustKey("railway:p1"), "Railway project p1");

@@ -58,7 +58,7 @@ Branches:
 
 ## Capture sequence
 
-How the agent gets a token from a web page without seeing it (`zks capture read`). `fill` is the same with `page.fill` of a Keychain item instead of the read.
+How the agent gets a token from a web page without seeing it (`zks capture read`). `fill` (always with `--origin`) reads the Keychain item inside the script instead, then sets one `<input type="password">` of the main frame in a single `page.evaluate` that re-checks the origin; anything else is `not_password_field`. `fill --from` is silent only into the origin the item was captured or generated from; any other origin opens a "Fill <service>/<account> into <origin>?" dialog.
 
 ```text
 Agent                      ego-browser page              zks                          macOS Keychain
@@ -81,7 +81,7 @@ Agent                      ego-browser page              zks                    
   │◀──────────── {ok, command, mode, store, origin, length, auditId} ─│                    │
 ```
 
-The agent never snapshots, screenshots or evaluates the page between the reveal and `about:blank`; zks does the reveal click itself. On `not_found` after a reveal, the agent navigates away without looking, deletes the orphan token by name and retries with another selector.
+The agent never snapshots, screenshots or evaluates the page between the reveal and `about:blank`, nor after a fill, while a secret may be shown; zks does the reveal click itself. Once the click was attempted, zks sends the page to `about:blank` on every outcome, so on `not_found` after a reveal the agent reopens the token list without looking, deletes the orphan token by name and retries with another selector. One-time e-mail verification codes are not captured: the agent types them with normal ego actions.
 
 ## Which source kind
 

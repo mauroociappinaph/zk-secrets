@@ -55,6 +55,11 @@ export interface AuditStore {
   head(): AuditAnchor;
   /** With an anchor, also fails with brokenAt "truncated" when records up to the anchor are missing. */
   verify(anchor?: AuditAnchor): AuditVerification;
+  /**
+   * The origin (environment) of the latest applied capture-read or capture-generate of a Keychain
+   * item "<service>/<account>"; "" when it was read without --origin, null when there is none.
+   */
+  lastCaptureOrigin(target: string): string | null;
   pendingMirror(limit: number): AuditRecord[];
   markMirrored(auditIds: string[], ts: string): void;
   close(): void;

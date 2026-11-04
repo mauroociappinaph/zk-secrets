@@ -662,7 +662,7 @@ function configNotApproved(): RunOutput {
 
 const CAPTURE_USAGE =
   "usage: zks capture read --space ID --page LABEL --selector CSS --store SERVICE/ACCOUNT [--click SELECTOR] [--origin ORIGIN] | " +
-  "zks capture fill --space ID --page LABEL --selector CSS (--store SERVICE/ACCOUNT --generate BYTES | --from SERVICE/ACCOUNT) [--origin ORIGIN]";
+  "zks capture fill --space ID --page LABEL --selector CSS (--store SERVICE/ACCOUNT --generate BYTES | --from SERVICE/ACCOUNT) --origin ORIGIN";
 const CAPTURE_SPACE = /^[1-9][0-9]{0,9}$/;
 const CAPTURE_PAGE = /^[A-Za-z0-9_-]{1,32}$/;
 const CAPTURE_SELECTOR = /^[\x20-\x7E]{1,300}$/;
@@ -681,6 +681,7 @@ export const PINNED_CAPTURE_ORIGINS: Record<TokenAccount, string> = {
 const CAPTURE_ERRORS: Record<CaptureErrorCode | "not_approved", string> = {
   origin_mismatch: "the page is not on --origin; nothing was read or filled",
   not_found: "the element or the Keychain item was not found",
+  not_password_field: "the selector does not match exactly one password input in the page's main frame; nothing was filled",
   keychain_failed: "the macOS Keychain did not accept or return the item",
   browser_failed: "ego-browser failed or returned no result",
   not_approved: "replacing the Keychain item was not approved",
@@ -739,6 +740,8 @@ function parseCapture(sub: string | undefined, flags: Map<string, string>): Capt
   if (!generating && !(from !== undefined && store === undefined && generate === undefined)) {
     throw new UsageError("capture fill takes --store with --generate, or --from alone");
   }
+  // The origin pins where a value may go: page JavaScript on any other site could read the field.
+  if (origin === null) throw new UsageError("capture fill needs --origin");
   const { service, account } = generating ? keychainRef(store as string, "--store") : keychainRef(from as string, "--from");
   if (service.toLowerCase() === ZKS_KEYCHAIN_SERVICE) throw new UsageError("capture fill cannot use the Keychain service zks");
   if (!generating) return { mode: "fill", sourceKind: "capture-from", service, account, generateBytes: null, ...common };
@@ -760,7 +763,8 @@ function keychainRef(value: string, flag: string): { service: string; account: s
 /**
  * Runs zks's own ego-browser script against the agent's TaskSpace page: the value goes from the
  * page to the Keychain (read) or from the Keychain to the page (fill) inside that script, and zks
- * reports only its length. Every capture is audited; replacing an existing item needs approval.
+ * reports only its length. Every capture is audited and mirrored; replacing an existing item needs
+ * approval, and so does filling a stored item into any origin other than the one it came from.
  */
 async function capture(deps: Deps, sub: string | undefined, flags: Map<string, string>, redactor: Redactor): Promise<RunOutput> {
   const req = parseCapture(sub, flags);
@@ -769,7 +773,10 @@ async function capture(deps: Deps, sub: string | undefined, flags: Map<string, s
   const audit = deps.openAudit();
   try {
     let approval: ApprovalMode | undefined;
-    const finish = async (result: AuditResult, outcome: { code: CaptureErrorCode | "not_approved" } | { length: number }) => {
+    const finish = async (
+      result: AuditResult,
+      outcome: { code: CaptureErrorCode | "not_approved"; message?: string } | { length: number },
+    ) => {
       const errorCode = "code" in outcome ? outcome.code : "";
       const entry = audit.append({
         ts: deps.now().toISOString(),
@@ -789,21 +796,34 @@ async function capture(deps: Deps, sub: string | undefined, flags: Map<string, s
         ...(approval ? { approval } : {}),
       });
       const anchorError = await saveAnchor(deps, audit);
-      if (!("code" in outcome)) return json(EXIT_OK, { ok: true, ...base, length: outcome.length, auditId: entry.auditId, ...anchorError });
+      const mirror = await deps.mirror.sync(audit);
+      if (!("code" in outcome)) {
+        return json(EXIT_OK, { ok: true, ...base, length: outcome.length, auditId: entry.auditId, mirror, ...anchorError });
+      }
       return json(result === "denied" ? EXIT_DENIED : EXIT_FAILED, {
         ok: false,
         ...base,
-        error: { code: outcome.code, message: CAPTURE_ERRORS[outcome.code] },
+        error: { code: outcome.code, message: outcome.message ?? CAPTURE_ERRORS[outcome.code] },
         auditId: entry.auditId,
+        mirror,
         ...anchorError,
       });
     };
 
     const egoBrowser = deps.tools.egoBrowser;
-    if (!egoBrowser) return finish("failed", { code: "browser_failed" });
+    if (!egoBrowser) return await finish("failed", { code: "browser_failed" });
 
     if (req.sourceKind === "capture-from") {
-      if (!(await deps.keychain.has(req.service, req.account))) return finish("failed", { code: "not_found" });
+      if (!(await deps.keychain.has(req.service, req.account))) return await finish("failed", { code: "not_found" });
+      // Silent only into the origin the item was last captured or generated from.
+      const recorded = audit.lastCaptureOrigin(store);
+      if (recorded !== req.origin) {
+        approval = "dialog";
+        const lines = [`Fill ${store} into ${req.origin}?`, `It was captured from ${recorded || "unknown"}.`];
+        if (!(await deps.human.approve("zks: fill a stored secret", lines))) {
+          return await finish("denied", { code: "not_approved", message: "filling the stored item into this origin was not approved" });
+        }
+      }
     } else if (await deps.keychain.has(req.service, req.account)) {
       approval = "dialog";
       const where = `${req.origin ?? "the current page, origin not checked"} (TaskSpace ${req.space}, page ${req.page})`;
@@ -811,7 +831,7 @@ async function capture(deps: Deps, sub: string | undefined, flags: Map<string, s
         `Replace the Keychain item ${store}?`,
         req.mode === "read" ? `New value: read from ${where}` : `New value: a random password zks generates, filled into ${where}`,
       ];
-      if (!(await deps.human.approve("zks: replace Keychain item", lines))) return finish("denied", { code: "not_approved" });
+      if (!(await deps.human.approve("zks: replace Keychain item", lines))) return await finish("denied", { code: "not_approved" });
     }
 
     if (req.generateBytes !== null) {
@@ -822,7 +842,7 @@ async function capture(deps: Deps, sub: string | undefined, flags: Map<string, s
       try {
         await deps.keychain.set(req.service, req.account, value);
       } catch {
-        return finish("failed", { code: "keychain_failed" });
+        return await finish("failed", { code: "keychain_failed" });
       } finally {
         value.dispose();
       }
@@ -839,7 +859,8 @@ async function capture(deps: Deps, sub: string | undefined, flags: Map<string, s
       account: req.account,
       waitMs: CAPTURE_WAIT_MS,
     });
-    return outcome.ok ? finish("applied", { length: outcome.length }) : finish("failed", { code: outcome.code });
+    // Awaited inside the try: the audit store must stay open until finish has synced the mirror.
+    return await finish(outcome.ok ? "applied" : "failed", outcome.ok ? { length: outcome.length } : { code: outcome.code });
   } finally {
     audit.close();
   }

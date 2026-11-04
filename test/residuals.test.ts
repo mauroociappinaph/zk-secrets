@@ -196,3 +196,19 @@ test("prototype-like variable names are reserved in any case", async () => {
     "variables.Constructor: name is reserved",
   ]);
 });
+
+// Round 3: GitHub path segments
+
+test("S1: GitHub repo owner or name and environment cannot be . or ..", async () => {
+  const repoIssue = (key: string) => `targets.${key}.repo: owner and name must not be "." or ".."`;
+  for (const repo of ["./web", "../web", "acme/.", "acme/..", "../.."]) {
+    assert.deepEqual(await issuesOf(base({ g: { provider: "github", repo } }, {})), [repoIssue("g")], repo);
+  }
+  for (const environment of [".", ".."]) {
+    assert.deepEqual(await issuesOf(base({ g: { provider: "github", repo: "acme/web", environment } }, {})), [
+      'targets.g.environment: must not be "." or ".."',
+    ]);
+  }
+  for (const repo of ["acme/.web", "acme/web..x", ".acme/web", "a.b/c.d"]) await validates(base({ g: { provider: "github", repo } }, {}));
+  await validates(base({ g: { provider: "github", repo: "acme/web", environment: ".prod" } }, {}));
+});

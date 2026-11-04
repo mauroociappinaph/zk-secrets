@@ -20,9 +20,10 @@ Usage:
                                               In an ego-browser page: click, read the token element
                                               into the Keychain, blank it (value never shown)
   zks capture fill --space ID --page LABEL --selector CSS (--store SERVICE/ACCOUNT --generate BYTES
-                   | --from SERVICE/ACCOUNT) [--origin ORIGIN]
+                   | --from SERVICE/ACCOUNT) --origin ORIGIN
                                               Fill a new random (16-128 bytes) or a stored password
-                                              into an ego-browser page field from the Keychain
+                                              into one password input of an ego-browser page; --from
+                                              into another origin than the item came from asks first
   zks audit list [--limit N] [--project P]    Show audit records (metadata only)
   zks audit verify                            Check the audit hash chain
   zks audit sync                              Push pending audit records to Google Sheets

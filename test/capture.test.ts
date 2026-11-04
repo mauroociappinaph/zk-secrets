@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { chmodSync, existsSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
 import { CAPTURE_WAIT_MS, buildCaptureScript, parseCaptureOutput, type CaptureScriptSpec } from "../src/capture/script.ts";
 import { HELP_TEXT } from "../src/help.ts";
 import { run } from "../src/run.ts";
-import { CANARY, TEST_TOOLS, auditBytes, harness, parse, type ExecCall } from "./helpers.ts";
+import { CANARY, TEST_TOOLS, auditBytes, harness, parse, tempDir, type ExecCall } from "./helpers.ts";
 
 const ORIGIN = "http://127.0.0.1:8123";
 const READ = ["capture", "read", "--space", "4", "--page", "p1", "--selector", "#tok", "--store", "app/key"];
-const GENERATE = ["capture", "fill", "--space", "4", "--page", "p1", "--selector", "#pw", "--store", "app/password", "--generate", "24"];
-const FROM = ["capture", "fill", "--space", "4", "--page", "p1", "--selector", "#pw", "--from", "app/password"];
+const GENERATE = ["capture", "fill", "--space", "4", "--page", "p1", "--selector", "#pw", "--store", "app/password", "--generate", "24", "--origin", ORIGIN];
+const FROM = ["capture", "fill", "--space", "4", "--page", "p1", "--selector", "#pw", "--from", "app/password", "--origin", ORIGIN];
+const NO_MIRROR = (pending: number) => ({ configured: false, pushed: 0, pending });
 
 /** ego-browser answers with noise around one marker line, like the real runtime can. */
 function ego(marker: string, code = 0) {
@@ -49,6 +51,75 @@ const spec = (over: Partial<CaptureScriptSpec> = {}): CaptureScriptSpec => ({
 });
 
 const AsyncFunction = Object.getPrototypeOf(async () => undefined).constructor as new (...args: string[]) => (...a: unknown[]) => Promise<void>;
+
+/** A stand-in for /usr/bin/security: `-i` swallows stdin, find-generic-password prints CANARY. */
+function fakeSecurity(exitCode = 0): string {
+  const path = join(tempDir(), "security");
+  writeFileSync(path, `#!/bin/sh\nif [ "$1" = "-i" ]; then cat >/dev/null; exit ${exitCode}; fi\nprintf '%s\\n' '${CANARY}'\nexit ${exitCode}\n`);
+  chmodSync(path, 0o700);
+  return path;
+}
+const MISSING_SECURITY = "/nonexistent/zks-test/security";
+
+/** Minimal DOM classes the in-page functions check with instanceof. */
+class FakeElement {
+  textContent = "";
+  events: Array<{ type: string; bubbles: boolean }> = [];
+  dispatchEvent(event: Event) {
+    this.events.push({ type: event.type, bubbles: event.bubbles });
+    return true;
+  }
+}
+class FakeInput extends FakeElement {
+  type = "text";
+  #value = "";
+  nativeSets = 0;
+  get value() {
+    return this.#value;
+  }
+  set value(v: string) {
+    this.#value = v;
+  }
+}
+// The native setter the fill uses; a page-level override on the instance would not be called.
+const nativeValue = Object.getOwnPropertyDescriptor(FakeInput.prototype, "value")!;
+Object.defineProperty(FakeInput.prototype, "value", {
+  get: nativeValue.get,
+  set(this: FakeInput, v: string) {
+    this.nativeSets++;
+    nativeValue.set!.call(this, v);
+  },
+});
+class FakeTextArea extends FakeElement {
+  value = "";
+}
+
+/** A fake page whose evaluate runs the real in-page function against a fake document. */
+function domPage(options: { nodes: FakeElement[]; origin?: string; url?: () => string; over?: Record<string, unknown> }) {
+  const calls: string[] = [];
+  const page: Record<string, unknown> = {
+    url: async () => (options.url ? options.url() : ORIGIN),
+    waitForSelector: async () => void calls.push("wait"),
+    click: async () => void calls.push("click"),
+    fill: async () => void calls.push("fill"),
+    goto: async (url: string) => void calls.push(`goto:${url}`),
+    evaluate: async (fn: (arg: unknown) => unknown, arg: unknown) => {
+      calls.push("evaluate");
+      const g = globalThis as Record<string, unknown>;
+      const saved = { document: g.document, HTMLInputElement: g.HTMLInputElement, HTMLTextAreaElement: g.HTMLTextAreaElement };
+      g.document = { location: { origin: options.origin ?? ORIGIN }, querySelectorAll: () => options.nodes };
+      g.HTMLInputElement = FakeInput;
+      g.HTMLTextAreaElement = FakeTextArea;
+      try {
+        return await fn(arg);
+      } finally {
+        Object.assign(g, saved);
+      }
+    },
+    ...options.over,
+  };
+  return { page, calls };
+}
 
 /** Runs a generated script against a fake ego API and returns what it printed and what the page saw. */
 async function runScript(script: string, page: Record<string, unknown>) {
@@ -131,8 +202,114 @@ test("S11: any ego error inside the script becomes browser_failed, never its mes
 test("S1: a fill script never contains the value it fills; it reads the Keychain inside ego", () => {
   const script = buildCaptureScript(spec({ mode: "fill", click: null, service: "app", account: "password" }));
   assert.ok(script.includes('"find-generic-password"'));
-  assert.ok(script.includes("page.fill(spec.selector"));
+  assert.ok(!script.includes("page.fill"), "page.fill can reach cross-origin frames");
+  assert.ok(script.includes('Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call('));
   assert.ok(!script.includes(CANARY));
+});
+
+// Script: fill only into one password input of the main frame, origin re-checked in the same evaluate
+
+const fillSpec = (over: Partial<CaptureScriptSpec> = {}) => spec({ mode: "fill", click: null, selector: "#pw", account: "password", ...over });
+
+test("S11: fill sets one password input with the native setter and input/change events, printing only the length", async () => {
+  const input = new FakeInput();
+  input.type = "password";
+  const { page, calls } = domPage({ nodes: [input] });
+  const { printed } = await runScript(buildCaptureScript(fillSpec(), fakeSecurity()), page);
+  assert.deepEqual(printed, [`ZKS_RESULT {"ok":true,"length":${CANARY.length}}`]);
+  assert.equal(input.value, CANARY);
+  assert.equal(input.nativeSets, 1);
+  assert.deepEqual(input.events, [{ type: "input", bubbles: true }, { type: "change", bubbles: true }]);
+  assert.deepEqual(calls, ["wait", "evaluate"]);
+});
+
+test("S11: fill refuses a textarea, a text input or several matches with not_password_field and sets nothing", async () => {
+  const text = new FakeInput();
+  const area = new FakeTextArea();
+  const pw1 = Object.assign(new FakeInput(), { type: "password" });
+  const pw2 = Object.assign(new FakeInput(), { type: "password" });
+  for (const nodes of [[area], [text], [pw1, pw2], []]) {
+    const { page, calls } = domPage({ nodes });
+    const { printed } = await runScript(buildCaptureScript(fillSpec(), fakeSecurity()), page);
+    assert.deepEqual(printed, ['ZKS_RESULT {"ok":false,"code":"not_password_field"}']);
+    assert.deepEqual(calls, ["wait", "evaluate"]);
+  }
+  for (const node of [text, area, pw1, pw2]) {
+    assert.equal(node.value, "");
+    assert.deepEqual(node.events, []);
+  }
+  assert.equal(pw1.nativeSets + pw2.nativeSets + text.nativeSets, 0);
+});
+
+test("S11: fill re-checks the document origin inside the evaluate that sets the value", async () => {
+  const input = Object.assign(new FakeInput(), { type: "password" });
+  // page.url() still says ORIGIN, but the document navigated during the wait.
+  const { page } = domPage({ nodes: [input], origin: "https://evil.example" });
+  const { printed } = await runScript(buildCaptureScript(fillSpec(), fakeSecurity()), page);
+  assert.deepEqual(printed, ['ZKS_RESULT {"ok":false,"code":"origin_mismatch"}']);
+  assert.equal(input.value, "");
+  assert.equal(input.nativeSets, 0);
+
+  // A fill spec without an origin never fills.
+  const { page: page2 } = domPage({ nodes: [input] });
+  const noOrigin = await runScript(buildCaptureScript(fillSpec({ origin: null }), fakeSecurity()), page2);
+  assert.deepEqual(noOrigin.printed, ['ZKS_RESULT {"ok":false,"code":"origin_mismatch"}']);
+  assert.equal(input.value, "");
+});
+
+test("S1: an evaluate that returns anything but the expected shape is browser_failed, never relayed", async () => {
+  const { page } = domPage({ nodes: [], over: { evaluate: async () => ({ ok: true, length: 3, value: CANARY }) } });
+  const { printed } = await runScript(buildCaptureScript(fillSpec(), fakeSecurity()), page);
+  assert.deepEqual(printed, [`ZKS_RESULT {"ok":true,"length":${CANARY.length}}`]);
+  const { page: weird } = domPage({ nodes: [], over: { evaluate: async () => ({ ok: false, code: CANARY }) } });
+  assert.deepEqual((await runScript(buildCaptureScript(fillSpec(), fakeSecurity()), weird)).printed, [
+    'ZKS_RESULT {"ok":false,"code":"browser_failed"}',
+  ]);
+});
+
+// Script: after a reveal click the page always leaves the token
+
+test("S11: read with --click navigates to about:blank on success and on every failure path", async () => {
+  const token = () => Object.assign(new FakeElement(), { textContent: CANARY });
+  let n = 0;
+  const cases: Array<[string, () => ReturnType<typeof domPage>, string]> = [
+    ["success", () => domPage({ nodes: [token()] }), fakeSecurity()],
+    ["click throws", () => domPage({ nodes: [token()], over: { click: async () => { throw new Error(CANARY); } } }), fakeSecurity()],
+    ["element never attached", () => domPage({ nodes: [], over: { waitForSelector: async () => { throw new Error("timeout"); } } }), fakeSecurity()],
+    ["element stays empty", () => domPage({ nodes: [new FakeElement()] }), fakeSecurity()],
+    ["origin changes after the click", () => { n = 0; return domPage({ nodes: [token()], url: () => (n++ === 0 ? ORIGIN : "https://evil.example") }); }, fakeSecurity()],
+    ["keychain missing", () => domPage({ nodes: [token()] }), MISSING_SECURITY],
+    ["keychain refuses", () => domPage({ nodes: [token()] }), fakeSecurity(1)],
+    ["evaluate throws", () => domPage({ nodes: [token()], over: { evaluate: async () => { throw new Error(CANARY); } } }), fakeSecurity()],
+  ];
+  const expected: Record<string, string> = {
+    success: `{"ok":true,"length":${CANARY.length}}`,
+    "click throws": '{"ok":false,"code":"browser_failed"}',
+    "element never attached": '{"ok":false,"code":"not_found"}',
+    "element stays empty": '{"ok":false,"code":"not_found"}',
+    "origin changes after the click": '{"ok":false,"code":"origin_mismatch"}',
+    "keychain missing": '{"ok":false,"code":"keychain_failed"}',
+    "keychain refuses": '{"ok":false,"code":"keychain_failed"}',
+    "evaluate throws": '{"ok":false,"code":"browser_failed"}',
+  };
+  for (const [name, make, security] of cases) {
+    const { page, calls } = make();
+    const { printed } = await runScript(buildCaptureScript(spec({ waitMs: 50 }), security), page);
+    assert.deepEqual(printed, [`ZKS_RESULT ${expected[name]}`], name);
+    assert.deepEqual(calls.filter((c) => c.startsWith("goto:")), ["goto:about:blank"], name);
+    assert.equal(calls[calls.length - 1], "goto:about:blank", `${name}: blanked last`);
+  }
+});
+
+test("S11: a read without --click still blanks after success; a failed goto is not an error", async () => {
+  const { page, calls } = domPage({ nodes: [Object.assign(new FakeElement(), { textContent: CANARY })] });
+  const { printed } = await runScript(buildCaptureScript(spec({ click: null }), fakeSecurity()), page);
+  assert.deepEqual(printed, [`ZKS_RESULT {"ok":true,"length":${CANARY.length}}`]);
+  assert.deepEqual(calls.filter((c) => c.startsWith("goto:")), ["goto:about:blank"]);
+
+  const failingGoto = domPage({ nodes: [], over: { goto: async () => { throw new Error("nav"); } } });
+  const blank = await runScript(buildCaptureScript(spec({ waitMs: 50 }), fakeSecurity()), failingGoto.page);
+  assert.deepEqual(blank.printed, ['ZKS_RESULT {"ok":false,"code":"not_found"}']);
 });
 
 // Output parser
@@ -141,6 +318,7 @@ test("S1: the parser accepts only the one marker line and ignores every other li
   const noise = `ghp_${"a".repeat(36)}\nZKS_RESULT_FAKE {"ok":true,"length":9}\n  ZKS_RESULT {"ok":true,"length":8}\n`;
   assert.deepEqual(parseCaptureOutput(`${noise}ZKS_RESULT {"ok":true,"length":40}\n${CANARY}\n`), { ok: true, length: 40 });
   assert.deepEqual(parseCaptureOutput('ZKS_RESULT {"ok":false,"code":"origin_mismatch"}\r\n'), { ok: false, code: "origin_mismatch" });
+  assert.deepEqual(parseCaptureOutput('ZKS_RESULT {"ok":false,"code":"not_password_field"}'), { ok: false, code: "not_password_field" });
   for (const bad of [
     "",
     noise,
@@ -151,6 +329,7 @@ test("S1: the parser accepts only the one marker line and ignores every other li
     'ZKS_RESULT {"ok":true,"length":1.5}',
     `ZKS_RESULT {"ok":true,"length":4,"value":"${CANARY}"}`,
     'ZKS_RESULT {"ok":false,"code":"something_else"}',
+    'ZKS_RESULT {"ok":false,"code":"not_approved"}',
     `ZKS_RESULT {"ok":false,"code":"not_found","detail":"${CANARY}"}`,
     'ZKS_RESULT ["ok"]',
   ]) {
@@ -165,7 +344,17 @@ test("S11: capture read runs its own script on ego-browser stdin and stores only
   const out = await run([...READ, "--click", "#gen", "--origin", ORIGIN], h.deps);
   assert.equal(out.exitCode, 0, out.stdout);
   const body = parse(out.stdout);
-  assert.deepEqual(body, { ok: true, command: "capture", mode: "read", store: "app/key", origin: ORIGIN, length: 40, auditId: body.auditId });
+  assert.deepEqual(body, {
+    ok: true,
+    command: "capture",
+    mode: "read",
+    store: "app/key",
+    origin: ORIGIN,
+    length: 40,
+    auditId: body.auditId,
+    mirror: NO_MIRROR(1),
+  });
+  assert.equal(h.mirrorCalls, 1, "a capture syncs the audit mirror like apply");
   assert.ok(!out.stdout.includes(CANARY));
 
   const calls = egoCalls(h);
@@ -226,6 +415,7 @@ test("S11: script results map to error codes with exit 1 and a failed audit reco
     [ego('ZKS_RESULT {"ok":false,"code":"origin_mismatch"}'), "origin_mismatch"],
     [ego('ZKS_RESULT {"ok":false,"code":"not_found"}'), "not_found"],
     [ego('ZKS_RESULT {"ok":false,"code":"keychain_failed"}'), "keychain_failed"],
+    [ego('ZKS_RESULT {"ok":false,"code":"not_password_field"}'), "not_password_field"],
     [ego('ZKS_RESULT {"ok":true,"length":4}', 1), "browser_failed"],
     [ego("no marker at all"), "browser_failed"],
   ];
@@ -241,6 +431,8 @@ test("S11: script results map to error codes with exit 1 and a failed audit reco
     assert.ok(!out.stdout.includes("ego-browser:notice"), "ego output was relayed");
     const [record] = records(h);
     assert.deepEqual([record!.result, record!.errorCode, record!.auditId], ["failed", code, body.auditId]);
+    assert.deepEqual(body.mirror, NO_MIRROR(1));
+    assert.equal(h.mirrorCalls, 1);
   }
 });
 
@@ -287,6 +479,7 @@ test("S5: replacing an existing Keychain item asks first; deny runs nothing and 
   assert.equal(h.keychain.store.get("app/key"), "old");
   const [record] = records(h);
   assert.deepEqual([record!.result, record!.errorCode, record!.approval], ["denied", "not_approved", "dialog"]);
+  assert.deepEqual(body.mirror, NO_MIRROR(1));
 });
 
 test("S5: an approved replacement runs the capture and records approval dialog", async () => {
@@ -306,13 +499,22 @@ test("S1: fill --generate stores a random password in zks, then ego fills it wit
   const out = await run(GENERATE, h.deps);
   assert.equal(out.exitCode, 0, out.stdout);
   const body = parse(out.stdout);
-  assert.deepEqual(body, { ok: true, command: "capture", mode: "fill", store: "app/password", origin: null, length: 32, auditId: body.auditId });
+  assert.deepEqual(body, {
+    ok: true,
+    command: "capture",
+    mode: "fill",
+    store: "app/password",
+    origin: ORIGIN,
+    length: 32,
+    auditId: body.auditId,
+    mirror: NO_MIRROR(1),
+  });
   const generated = Buffer.alloc(24, 7).toString("base64url");
   assert.equal(h.keychain.store.get("app/password"), generated);
   const [call] = egoCalls(h);
   assert.equal(
     call!.input,
-    buildCaptureScript({ mode: "fill", space: 4, page: "p1", selector: "#pw", click: null, origin: null, service: "app", account: "password", waitMs: CAPTURE_WAIT_MS }),
+    buildCaptureScript({ mode: "fill", space: 4, page: "p1", selector: "#pw", click: null, origin: ORIGIN, service: "app", account: "password", waitMs: CAPTURE_WAIT_MS }),
   );
   for (const form of [generated, Buffer.from(generated).toString("hex"), Buffer.alloc(24, 7).toString("hex")]) {
     assert.ok(!call!.input.includes(form));
@@ -324,7 +526,7 @@ test("S1: fill --generate stores a random password in zks, then ego fills it wit
 
 test("S5: fill --generate over an existing item needs approval", async () => {
   const h = harness({ exec: OK(32), keychain: { "app/password": "old" }, approve: false });
-  const out = await run([...GENERATE, "--origin", "https://example.com"], h.deps);
+  const out = await run(replace(GENERATE, "--origin", "https://example.com"), h.deps);
   assert.equal(out.exitCode, 3);
   assert.deepEqual(h.human.approvals, [
     ["Replace the Keychain item app/password?", "New value: a random password zks generates, filled into https://example.com (TaskSpace 4, page p1)"],
@@ -333,22 +535,114 @@ test("S5: fill --generate over an existing item needs approval", async () => {
   assert.equal(egoCalls(h).length, 0);
 });
 
-test("S11: fill --from fills an existing item without approval; a missing item is not_found and runs nothing", async () => {
+/** An audit record as a successful capture-read/capture-generate of app/password from `origin` leaves it. */
+function capturedFrom(h: ReturnType<typeof harness>, origin: string, sourceKind: "capture-read" | "capture-generate" | "capture-from" = "capture-generate") {
+  const store = h.deps.openAudit();
+  try {
+    store.append({
+      ts: "2026-11-04T11:00:00.000Z",
+      actorHuman: "tester",
+      actorAgent: "pi:earlier",
+      project: "app",
+      provider: "keychain",
+      target: "app/password",
+      environment: origin,
+      variableName: "password",
+      action: "capture",
+      sensitive: true,
+      sourceKind,
+      result: "applied",
+      providerVersion: "",
+      errorCode: "",
+    });
+  } finally {
+    store.close();
+  }
+}
+
+test("S11: fill --from is silent only into the origin the item was captured or generated from", async () => {
   const h = harness({ exec: OK(14), keychain: { "app/password": "stored" } });
-  const out = await run([...FROM, "--origin", "https://example.com"], h.deps);
+  capturedFrom(h, ORIGIN);
+  const out = await run(FROM, h.deps);
   assert.equal(out.exitCode, 0, out.stdout);
   const body = parse(out.stdout);
-  assert.deepEqual(body, { ok: true, command: "capture", mode: "fill", store: "app/password", origin: "https://example.com", length: 14, auditId: body.auditId });
+  assert.deepEqual(body, {
+    ok: true,
+    command: "capture",
+    mode: "fill",
+    store: "app/password",
+    origin: ORIGIN,
+    length: 14,
+    auditId: body.auditId,
+    mirror: NO_MIRROR(2),
+  });
   assert.equal(h.human.approvals.length, 0);
+  assert.equal(egoCalls(h).length, 1);
   assert.equal(h.keychain.store.get("app/password"), "stored");
-  assert.equal(records(h)[0]!.sourceKind, "capture-from");
+  const [record] = records(h);
+  assert.deepEqual([record!.sourceKind, record!.environment, record!.approval], ["capture-from", ORIGIN, ""]);
+});
 
+test("S11: fill --from into another origin asks first; deny is exit 3, audited, and runs no ego", async () => {
+  const other = "http://localhost:8123";
+  const h = harness({ exec: OK(14), keychain: { "app/password": "stored" }, approve: false });
+  capturedFrom(h, ORIGIN);
+  const out = await run(replace(FROM, "--origin", other), h.deps);
+  assert.equal(out.exitCode, 3, out.stdout);
+  const body = parse(out.stdout);
+  assert.deepEqual(body.error, { code: "not_approved", message: "filling the stored item into this origin was not approved" });
+  assert.deepEqual(h.human.approvals, [[`Fill app/password into ${other}?`, `It was captured from ${ORIGIN}.`]]);
+  assert.equal(egoCalls(h).length, 0);
+  const [record] = records(h);
+  assert.deepEqual([record!.result, record!.errorCode, record!.approval, record!.environment], ["denied", "not_approved", "dialog", other]);
+  assert.equal(h.mirrorCalls, 1);
+});
+
+test("S11: an approved fill --from runs, records approval dialog and does not make the next one silent", async () => {
+  const other = "https://example.com";
+  const h = harness({ exec: OK(14), keychain: { "app/password": "stored" } });
+  capturedFrom(h, ORIGIN);
+  for (let i = 0; i < 2; i++) {
+    const out = await run(replace(FROM, "--origin", other), h.deps);
+    assert.equal(out.exitCode, 0, out.stdout);
+    assert.equal(records(h)[0]!.approval, "dialog");
+  }
+  assert.equal(h.human.approvals.length, 2);
+  assert.equal(egoCalls(h).length, 2);
+  assert.ok(egoCalls(h)[0]!.input.includes(`"origin":"${other}"`));
+});
+
+test("S11: fill --from of an item with no capture record, or one read without --origin, asks with origin unknown", async () => {
+  const none = harness({ exec: OK(14), keychain: { "app/password": "stored" }, approve: false });
+  assert.equal((await run(FROM, none.deps)).exitCode, 3);
+  assert.deepEqual(none.human.approvals, [[`Fill app/password into ${ORIGIN}?`, "It was captured from unknown."]]);
+
+  const blank = harness({ exec: OK(14), keychain: { "app/password": "stored" }, approve: false });
+  capturedFrom(blank, "", "capture-read");
+  assert.equal((await run(FROM, blank.deps)).exitCode, 3);
+  assert.deepEqual(blank.human.approvals, [[`Fill app/password into ${ORIGIN}?`, "It was captured from unknown."]]);
+
+  // A previous fill of the item is not where it came from.
+  const filled = harness({ exec: OK(14), keychain: { "app/password": "stored" }, approve: false });
+  capturedFrom(filled, ORIGIN, "capture-from");
+  assert.equal((await run(FROM, filled.deps)).exitCode, 3);
+  assert.equal(egoCalls(filled).length, 0);
+});
+
+test("S11: fill --from of a missing item is not_found with no dialog and no ego", async () => {
   const missing = harness({ exec: OK(14) });
   const miss = await run(FROM, missing.deps);
   assert.equal(miss.exitCode, 1);
   assert.equal(parse(miss.stdout).error.code, "not_found");
   assert.equal(egoCalls(missing).length, 0);
+  assert.equal(missing.human.approvals.length, 0);
   assert.deepEqual([records(missing)[0]!.result, records(missing)[0]!.errorCode], ["failed", "not_found"]);
+});
+
+test("S11: capture fill needs --origin, with --generate and with --from", async () => {
+  const without = (argv: string[]) => argv.slice(0, argv.indexOf("--origin"));
+  await refused(without(GENERATE), "capture fill needs --origin");
+  await refused(without(FROM), "capture fill needs --origin", harness({ exec: OK(4), keychain: {} }));
 });
 
 // Validation
@@ -428,7 +722,7 @@ test("S11: fill takes --store with --generate 16-128, or --from alone", async ()
 test("S11: required options and per-command flags", async () => {
   const usageText =
     "usage: zks capture read --space ID --page LABEL --selector CSS --store SERVICE/ACCOUNT [--click SELECTOR] [--origin ORIGIN] | " +
-    "zks capture fill --space ID --page LABEL --selector CSS (--store SERVICE/ACCOUNT --generate BYTES | --from SERVICE/ACCOUNT) [--origin ORIGIN]";
+    "zks capture fill --space ID --page LABEL --selector CSS (--store SERVICE/ACCOUNT --generate BYTES | --from SERVICE/ACCOUNT) --origin ORIGIN";
   await refused(["capture"], usageText);
   await refused(["capture", "peek"], usageText);
   for (const flag of ["--space", "--page", "--selector", "--store"]) {
@@ -496,4 +790,6 @@ test("S11: other zks accounts and every zks fill are refused", async () => {
 test("S11: help lists both capture forms", () => {
   assert.ok(HELP_TEXT.includes("zks capture read --space ID --page LABEL --selector CSS --store SERVICE/ACCOUNT"));
   assert.ok(HELP_TEXT.includes("zks capture fill --space ID --page LABEL --selector CSS"));
+  assert.ok(HELP_TEXT.includes("| --from SERVICE/ACCOUNT) --origin ORIGIN"));
+  assert.ok(!HELP_TEXT.includes("--from SERVICE/ACCOUNT) [--origin ORIGIN]"));
 });

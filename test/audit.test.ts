@@ -208,3 +208,59 @@ test("S4: the approval mode is part of the hash", () => {
   assert.deepEqual(reopened.verify(), { ok: false, count: 0, brokenAt: record.auditId });
   reopened.close();
 });
+
+const captureEntry = (over: Partial<AuditEntryInput> = {}): AuditEntryInput => ({
+  ...entry("pw"),
+  project: "app",
+  provider: "keychain",
+  target: "app/pw",
+  environment: "https://a.example",
+  action: "capture",
+  sourceKind: "capture-generate",
+  providerVersion: "",
+  ...over,
+});
+
+test("S11: lastCaptureOrigin is the origin of the latest applied capture-read or capture-generate of that item", () => {
+  const { store } = freshStore();
+  assert.equal(store.lastCaptureOrigin("app/pw"), null);
+  store.append(captureEntry({ environment: "https://a.example" }));
+  assert.equal(store.lastCaptureOrigin("app/pw"), "https://a.example");
+  store.append(captureEntry({ environment: "https://b.example", sourceKind: "capture-read" }));
+  assert.equal(store.lastCaptureOrigin("app/pw"), "https://b.example");
+  // Neither a fill of the stored item, nor a failed or denied capture, nor a set, nor another item moves it.
+  store.append(captureEntry({ environment: "https://evil.example", sourceKind: "capture-from" }));
+  store.append(captureEntry({ environment: "https://evil.example", result: "failed" }));
+  store.append(captureEntry({ environment: "https://evil.example", result: "denied" }));
+  store.append(captureEntry({ environment: "https://evil.example", action: "set" }));
+  store.append(captureEntry({ environment: "https://evil.example", target: "app/other" }));
+  assert.equal(store.lastCaptureOrigin("app/pw"), "https://b.example");
+  assert.equal(store.lastCaptureOrigin("app/other"), "https://evil.example");
+  assert.equal(store.lastCaptureOrigin("APP/pw"), null);
+  // A read without --origin recorded "": known capture, unknown origin.
+  store.append(captureEntry({ environment: "", sourceKind: "capture-read" }));
+  assert.equal(store.lastCaptureOrigin("app/pw"), "");
+  store.close();
+});
+
+test("S11: lastCaptureOrigin works on a database created before the approval column", () => {
+  const path = join(tempDir(), "state", "audit.db");
+  mkdirSync(dirname(path), { recursive: true });
+  const columns = [
+    "audit_id", "ts", "actor_human", "actor_agent", "project", "provider", "target", "environment", "variable_name",
+    "action", "sensitive", "source_kind", "result", "provider_version", "error_code", "prev_hash", "hash", "mirrored_at",
+  ];
+  const old = new DatabaseSync(path);
+  old.exec(`CREATE TABLE audit (seq INTEGER PRIMARY KEY AUTOINCREMENT, ${columns.map((c) => `${c} ${c === "sensitive" ? "INTEGER" : "TEXT"} NOT NULL`).join(", ")});`);
+  const e = captureEntry({ environment: "https://old.example" });
+  old.prepare(`INSERT INTO audit (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`).run(
+    "01OLDCAPTURE0000000000000", e.ts, e.actorHuman, e.actorAgent, e.project, e.provider, e.target, e.environment, e.variableName,
+    e.action, 1, e.sourceKind, e.result, e.providerVersion, e.errorCode, GENESIS_HASH, "f".repeat(64), "",
+  );
+  old.close();
+  const store = openAuditStore(path);
+  assert.equal(store.lastCaptureOrigin("app/pw"), "https://old.example");
+  store.append(captureEntry({ environment: "https://new.example", approval: "dialog" }));
+  assert.equal(store.lastCaptureOrigin("app/pw"), "https://new.example");
+  store.close();
+});

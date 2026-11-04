@@ -29,6 +29,8 @@ const AWS_REGION = /^[a-z]{2}(-[a-z]+)+-\d$/;
 const SSM_PREFIX = /^(?=.{1,200}$)\/([A-Za-z0-9_.-]+\/)*$/;
 const SM_PREFIX = /^(?=.{0,200}$)([A-Za-z0-9_.+=@-]+\/)*$/;
 const GITHUB_REPO = /^(?=.{1,100}$)[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+/** Path segments GitHub would resolve as directories in an API URL. */
+const DOT_SEGMENTS = [".", ".."];
 /** Names that would collide with Object.prototype when used as keys, compared in lower case. */
 const RESERVED_VARIABLE_NAMES = ["__proto__", "constructor", "prototype"];
 const ROLE_ARN = /^arn:aws[a-z-]*:iam::\d{12}:role\/[A-Za-z0-9+=,.@_\/-]+$/;
@@ -123,7 +125,13 @@ function validateTarget(path: string, target: unknown, issues: string[]): void {
     }
     case "github":
       requireString(`${path}.repo`, target.repo, GITHUB_REPO, issues);
+      if (typeof target.repo === "string" && GITHUB_REPO.test(target.repo) && target.repo.split("/").some((s) => DOT_SEGMENTS.includes(s))) {
+        issues.push(`${path}.repo: owner and name must not be "." or ".."`);
+      }
       optionalString(`${path}.environment`, target.environment, GITHUB_ENVIRONMENT, issues);
+      if (typeof target.environment === "string" && DOT_SEGMENTS.includes(target.environment)) {
+        issues.push(`${path}.environment: must not be "." or ".."`);
+      }
       break;
     case "railway":
       requireString(`${path}.projectId`, target.projectId, RAILWAY_ID, issues);

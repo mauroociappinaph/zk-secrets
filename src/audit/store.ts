@@ -111,6 +111,10 @@ export function openAuditStore(dbPath: string): AuditStore {
   );
   const lastHash = db.prepare("SELECT hash FROM audit ORDER BY seq DESC LIMIT 1");
   const countRows = db.prepare("SELECT COUNT(*) AS n FROM audit");
+  const lastCapture = db.prepare(
+    "SELECT environment FROM audit WHERE action = 'capture' AND result = 'applied' AND target = ? " +
+      "AND source_kind IN ('capture-read', 'capture-generate') ORDER BY seq DESC LIMIT 1",
+  );
 
   return {
     append(entry: AuditEntryInput): AuditRecord {
@@ -161,6 +165,10 @@ export function openAuditStore(dbPath: string): AuditStore {
       }
       if (anchor && (count < anchor.count || hashAtAnchor !== anchor.hash)) return { ok: false, count, brokenAt: "truncated" };
       return { ok: true, count };
+    },
+    lastCaptureOrigin(target) {
+      const row = lastCapture.get(target) as Row | undefined;
+      return row === undefined ? null : String(row.environment ?? "");
     },
     pendingMirror(limit) {
       const rows = db.prepare("SELECT * FROM audit WHERE mirrored_at = '' ORDER BY seq ASC LIMIT ?").all(limit);

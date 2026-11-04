@@ -16,17 +16,20 @@ Ask the human **only** for:
 - a captcha;
 - 2FA, a passkey or a security key;
 - a browser-owned prompt (permissions, device chooser) — call `task.handOff()`, say what to do, resume after;
-- the zks approval dialog for a new destination or for replacing a Keychain item.
+- the zks approval dialog for a new destination, for replacing a Keychain item, or for filling a stored item into another origin than it came from.
 
 ### How `zks capture` keeps the value away from you
 
 You drive the non-secret steps in one ego-browser TaskSpace (print its `spaceId` and page label). zks then runs its own `ego-browser nodejs` script on that page for the secret step:
 
 - `zks capture read --space ID --page p1 --click <reveal button> --selector <token element> --store <service>/<account> --origin <origin>` — clicks the button, waits up to 15 s for the element to hold a value, moves it straight into the Keychain, blanks the element and navigates the page to `about:blank`.
-- `zks capture fill --space ID --page p1 --selector <input> --store <service>/<account> --generate 24` — zks generates a random password, stores it, and fills it into the input. `--from <service>/<account>` fills an existing item instead.
+- `zks capture fill --space ID --page p1 --selector <password input> --store <service>/<account> --generate 24 --origin <origin>` — zks generates a random password, stores it, and fills it into the input. `--from <service>/<account>` fills an existing item instead.
+- `fill` only fills a password field: `--selector` must match exactly one `<input type="password">` in the page's main frame (not an iframe, a textarea or a text input), else `not_password_field` and nothing is filled.
+- `fill --from` runs without a dialog only into the origin the item was captured or generated from. Any other origin (or an item zks never captured) opens "Fill <service>/<account> into <origin>?"; tell the human a dialog will ask and wait.
 - `--click` takes any ego selector (CSS, `text=Create`, `loc=role:button[name='Create token']`). `--selector` must be plain CSS (it is read with `document.querySelectorAll` and must match exactly one element).
-- Output is metadata: `{ok, command, mode, store, origin, length, auditId}`. Errors: `origin_mismatch`, `not_found`, `keychain_failed`, `browser_failed` (exit 1); usage errors exit 2; a denied replacement exits 3.
-- Always pass `--origin` (for example `https://api.example.com`); zks checks the page is on it before clicking, reading or filling.
+- Output is metadata: `{ok, command, mode, store, origin, length, auditId, mirror}`. Errors: `origin_mismatch`, `not_found`, `not_password_field`, `keychain_failed`, `browser_failed` (exit 1); usage errors exit 2; a denied replacement or fill exits 3.
+- `--origin` (for example `https://api.example.com`) is mandatory for `fill`; always pass it for `read` too. zks checks the page is on it before clicking or reading, and again inside the fill itself.
+- After a `--click`, zks leaves the page on `about:blank` whatever happens, success or failure.
 
 ### Flow A — missing provider token (`missing_token` for Vercel, Railway or Supabase)
 
@@ -44,8 +47,8 @@ You drive the non-secret steps in one ego-browser TaskSpace (print its `spaceId`
 ### Flow B — third-party API key (a public data API, a SaaS)
 
 1. Register in ego-browser with the user's logged-in identity (their e-mail, or "Sign in with Google" when offered).
-2. Password field: `zks capture fill --space ID --page p1 --selector "#password" --store <svc>/password --generate 24 --origin <site origin>`; for a confirmation field, `zks capture fill ... --from <svc>/password`. Log in later the same way with `--from`.
-3. Verification mail: open the user's Gmail in ego-browser, open the message and click its link with `page.click`; do not print the link or the message body. If the mail holds a code instead, `zks capture read --selector <code element> --store <svc>/verify-code --origin https://mail.google.com`, then `zks capture fill --from <svc>/verify-code` on the site.
+2. Password field: `zks capture fill --space ID --page p1 --selector "#password" --store <svc>/password --generate 24 --origin <site origin>`; for a confirmation field, `zks capture fill ... --from <svc>/password --origin <site origin>` (same origin: no dialog). Log in later the same way with `--from` on the same origin. Do not snapshot, screenshot or evaluate the page after a fill: the field holds the password.
+3. Verification mail: open the user's Gmail in ego-browser, open the message and click its link with `page.click`; do not print the link or the message body. If the mail holds a one-time verification code instead, it is not a secret to store: read it and type it into the site with normal ego actions (not with `zks capture`), then move on without repeating it.
 4. Generate the key on the site and `zks capture read --click "<generate button>" --selector "<key element>" --store <svc>/<account> --origin <site origin>`.
 5. Use it: a `{"kind":"keychain","service":"<svc>","account":"<account>"}` source in `zks.policy.json`, then `zks apply` to the trusted destinations.
 
@@ -57,13 +60,14 @@ Capture straight into the Keychain item the app expects. Example: a tool that re
 
 - `not_found` after the click revealed a token: do **not** snapshot or screenshot the page. Navigate it away (`page.goto` the token list), delete the orphan token by its name in the list, and retry with another `--selector`.
 - `origin_mismatch`: the page is not where you expect (redirect, phishing, login wall). Snapshot it (no secret shown), fix the navigation, retry.
+- `not_password_field`: nothing was filled. Snapshot the page, pick a selector for the one `<input type="password">` in the main frame, retry. Never fill a password into another kind of field.
 - `browser_failed`: check the TaskSpace id and page label; do not open a new TaskSpace to recover.
-- Exit 3 on a replacement: the human denied replacing an existing item. Ask before retrying.
+- Exit 3 on a replacement or a `fill --from`: the human denied replacing an existing item or filling it into that origin. Ask before retrying.
 
 ## Hard rules
 
 - Never see, ask for, print or store a secret value. Every `zks` output is metadata only; keep it that way.
-- Never snapshot, screenshot, `page.evaluate`, `page.fetch`, read or print a page while it shows a secret (a new token, an API key, a verification code). Let `zks capture --click` perform the reveal, every time.
+- Never snapshot, screenshot, `page.evaluate`, `page.fetch`, read or print a page while a secret may be shown (a new token, an API key) or after a `zks capture fill` (the password field holds it). Let `zks capture --click` perform the reveal, every time. One-time e-mail verification codes are the exception: type them yourself with normal ego actions.
 - Never print or read Keychain items (`security find-generic-password -w`, `security dump-keychain`). zks reads them itself.
 - Call only `zks` for secret values. Do not call provider CLIs or APIs to read or write secrets.
 - Never pass `--value`, `--secret`, `--token` or `--password`. zks rejects them; do not look for a workaround.

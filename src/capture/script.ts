@@ -3,7 +3,10 @@ export const CAPTURE_WAIT_MS = 15_000;
 /** The only line of ego-browser output zks reads. */
 export const CAPTURE_MARKER = "ZKS_RESULT ";
 
-export const CAPTURE_ERROR_CODES = ["origin_mismatch", "not_found", "keychain_failed", "browser_failed"] as const;
+/** The only binary the script moves a value through. */
+export const SECURITY_PATH = "/usr/bin/security";
+
+export const CAPTURE_ERROR_CODES = ["origin_mismatch", "not_found", "not_password_field", "keychain_failed", "browser_failed"] as const;
 export type CaptureErrorCode = (typeof CAPTURE_ERROR_CODES)[number];
 export type CaptureOutcome = { ok: true; length: number } | { ok: false; code: CaptureErrorCode };
 
@@ -17,6 +20,7 @@ export interface CaptureScriptSpec {
   selector: string;
   /** read only: clicked first, inside the script, so the agent never sees the revealed value. */
   click: string | null;
+  /** Required for fill: the script fills nothing when it is null. */
   origin: string | null;
   service: string;
   account: string;
@@ -27,6 +31,9 @@ export interface CaptureScriptSpec {
  * The body runs inside `ego-browser nodejs`. It never prints anything but the one marker line,
  * never prints an error message (it could quote a value) and moves the value only through
  * /usr/bin/security: on stdin as hex for a write, on spawnSync stdout (kept in memory) for a read.
+ * After a reveal click the page always navigates to about:blank, so a failure never leaves the
+ * token on screen. A fill only sets one password input of the main frame, in one evaluate that
+ * re-checks the document origin first.
  */
 const BODY = `
 const { spawnSync } = await import("node:child_process");
@@ -61,9 +68,27 @@ async function hasValue(page) {
   }, spec.selector);
 }
 
+async function blank(page) {
+  try {
+    await page.goto("about:blank");
+  } catch {}
+}
+
 async function read(page) {
   if (!(await originMatches(page))) return { ok: false, code: "origin_mismatch" };
-  if (spec.click !== null) await page.click(spec.click, { timeout: spec.waitMs });
+  const clicking = spec.click !== null;
+  let result = null;
+  try {
+    if (clicking) await page.click(spec.click, { timeout: spec.waitMs });
+    result = await readValue(page);
+    return result;
+  } finally {
+    // Once a reveal click was attempted the token may be on screen, whatever happened next.
+    if (clicking || (result !== null && result.ok)) await blank(page);
+  }
+}
+
+async function readValue(page) {
   if (!(await waitForElement(page))) return { ok: false, code: "not_found" };
   const deadline = Date.now() + spec.waitMs;
   while (!(await hasValue(page))) {
@@ -91,20 +116,32 @@ async function read(page) {
     "utf8",
   );
   value = null;
-  const stored = spawnSync("/usr/bin/security", ["-i"], { input: command, timeout: 15000 });
+  const stored = spawnSync(SECURITY, ["-i"], { input: command, timeout: 15000 });
   command.fill(0);
   if (stored.stdout) stored.stdout.fill(0);
   if (stored.status !== 0 || (stored.stderr && stored.stderr.length > 0)) return { ok: false, code: "keychain_failed" };
-  try {
-    await page.goto("about:blank");
-  } catch {}
   return { ok: true, length };
 }
+
+/** Runs in the page's main frame: one password input, same origin, native setter, then input/change. */
+function setPassword({ selector, expected, value }) {
+  if (expected === null || document.location.origin !== expected) return { ok: false, code: "origin_mismatch" };
+  const nodes = document.querySelectorAll(selector);
+  if (nodes.length !== 1) return { ok: false, code: "not_password_field" };
+  const node = nodes[0];
+  if (!(node instanceof HTMLInputElement) || node.type !== "password") return { ok: false, code: "not_password_field" };
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(node, value);
+  node.dispatchEvent(new Event("input", { bubbles: true }));
+  node.dispatchEvent(new Event("change", { bubbles: true }));
+  return { ok: true, length: value.length };
+}
+
+const FILL_CODES = ["origin_mismatch", "not_password_field"];
 
 async function fill(page) {
   if (!(await originMatches(page))) return { ok: false, code: "origin_mismatch" };
   if (!(await waitForElement(page))) return { ok: false, code: "not_found" };
-  const found = spawnSync("/usr/bin/security", ["find-generic-password", "-s", spec.service, "-a", spec.account, "-w"], { timeout: 15000 });
+  const found = spawnSync(SECURITY, ["find-generic-password", "-s", spec.service, "-a", spec.account, "-w"], { timeout: 15000 });
   if (found.status === 44) return { ok: false, code: "not_found" };
   if (found.status !== 0 || !found.stdout) return { ok: false, code: "keychain_failed" };
   const bytes = found.stdout;
@@ -113,12 +150,18 @@ async function fill(page) {
   bytes.fill(0);
   if (value.length === 0) return { ok: false, code: "not_found" };
   const length = value.length;
+  let filled;
   try {
-    await page.fill(spec.selector, value);
+    filled = await page.evaluate(setPassword, { selector: spec.selector, expected: spec.origin, value });
   } finally {
     value = null;
   }
-  return { ok: true, length };
+  // Only the shape zks expects leaves this function; the length is zks's own, not the page's.
+  if (filled !== null && typeof filled === "object" && filled.ok === true) return { ok: true, length };
+  if (filled !== null && typeof filled === "object" && filled.ok === false && FILL_CODES.includes(filled.code)) {
+    return { ok: false, code: filled.code };
+  }
+  return { ok: false, code: "browser_failed" };
 }
 
 let result;
@@ -132,8 +175,11 @@ try {
 console.log("ZKS_RESULT " + JSON.stringify(result));
 `;
 
-/** The script zks pipes to `ego-browser nodejs`. Every input enters it only through JSON.stringify. */
-export function buildCaptureScript(spec: CaptureScriptSpec): string {
+/**
+ * The script zks pipes to `ego-browser nodejs`. Every input enters it only through JSON.stringify.
+ * zks always uses SECURITY_PATH; tests pass a stand-in so they never touch the real Keychain.
+ */
+export function buildCaptureScript(spec: CaptureScriptSpec, security: string = SECURITY_PATH): string {
   const embedded = {
     mode: spec.mode,
     space: spec.space,
@@ -145,7 +191,10 @@ export function buildCaptureScript(spec: CaptureScriptSpec): string {
     account: spec.account,
     waitMs: spec.waitMs,
   };
-  return `// zks capture script (generated). Prints exactly one line: ZKS_RESULT <metadata json>.\nconst spec = ${JSON.stringify(embedded)};\n${BODY}`;
+  return (
+    "// zks capture script (generated). Prints exactly one line: ZKS_RESULT <metadata json>.\n" +
+    `const spec = ${JSON.stringify(embedded)};\nconst SECURITY = ${JSON.stringify(security)};\n${BODY}`
+  );
 }
 
 const FAILED: CaptureOutcome = { ok: false, code: "browser_failed" };

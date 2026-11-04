@@ -37,7 +37,8 @@ export interface TrustIo {
 
 /**
  * The scope "Always allow" trusts: a GitHub owner, a Vercel team (or the personal account),
- * an AWS profile + role + region, a Railway project or a Supabase project.
+ * an AWS profile + role + region, a Railway project or a Supabase project. Vercel keys are
+ * "vercel:team:<teamId>" or "vercel:personal", so a team named "personal" is not the account.
  */
 export function trustKeyOf(op: Operation): string {
   const target = op.target;
@@ -45,7 +46,7 @@ export function trustKeyOf(op: Operation): string {
     case "github":
       return `github:${(target.repo.split("/")[0] as string).toLowerCase()}`;
     case "vercel":
-      return `vercel:${target.teamId ?? "personal"}`;
+      return target.teamId === undefined ? "vercel:personal" : `vercel:team:${target.teamId}`;
     case "aws-ssm":
     case "aws-sm":
       return `aws:${target.profile ?? "default"}:${target.roleArn ?? "no-role"}:${target.region}`;
@@ -64,7 +65,9 @@ export function describeTrustKey(key: string): string {
     case "github":
       return `GitHub owner ${first} (every repository)`;
     case "vercel":
-      return first === "personal" ? "Vercel personal account" : `Vercel team ${first}`;
+      if (first === "personal" && parts.length === 2) return "Vercel personal account";
+      if (first === "team") return parts.length === 3 && parts[2] ? `Vercel team ${parts[2]}` : "unknown destination";
+      return parts.length === 2 ? "old Vercel key format; it no longer matches any write (remove it)" : "unknown destination";
     case "aws": {
       if (parts.length < 4) return "unknown destination";
       const role = parts.slice(2, -1).join(":");
