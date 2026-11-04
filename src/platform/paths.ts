@@ -4,6 +4,7 @@ export interface ZksPaths {
   configDir: string;
   configFile: string;
   integrityFile: string;
+  trustFile: string;
   stateDir: string;
   auditDb: string;
 }
@@ -16,6 +17,7 @@ export function zksPaths(home: string): ZksPaths {
     configDir,
     configFile: join(configDir, "config.json"),
     integrityFile: join(configDir, "integrity.json"),
+    trustFile: join(configDir, "trust.json"),
     stateDir,
     auditDb: join(stateDir, "audit.db"),
   };

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { statSync } from "node:fs";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { mkdirSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { MIRROR_BATCH, createSheetsMirror, signPayload } from "../src/audit/mirror.ts";
@@ -146,4 +147,64 @@ test("mirror: an unreachable webhook keeps records pending and never throws", as
     error: "mirror unreachable",
   });
   store.close();
+});
+
+test("S4: an audit DB created before the approval column still verifies and keeps chaining", () => {
+  const path = join(tempDir(), "state", "audit.db");
+  mkdirSync(dirname(path), { recursive: true });
+  const columns = [
+    "audit_id", "ts", "actor_human", "actor_agent", "project", "provider", "target", "environment", "variable_name",
+    "action", "sensitive", "source_kind", "result", "provider_version", "error_code", "prev_hash", "hash", "mirrored_at",
+  ];
+  const old = new DatabaseSync(path);
+  old.exec(`CREATE TABLE audit (seq INTEGER PRIMARY KEY AUTOINCREMENT, ${columns.map((c) => `${c} ${c === "sensitive" ? "INTEGER" : "TEXT"} NOT NULL`).join(", ")});
+CREATE UNIQUE INDEX audit_id_idx ON audit(audit_id);
+CREATE TRIGGER audit_no_delete BEFORE DELETE ON audit BEGIN SELECT RAISE(ABORT, 'audit log is append-only'); END;
+CREATE TRIGGER audit_no_update BEFORE UPDATE ON audit WHEN ${columns.filter((c) => c !== "mirrored_at").map((c) => `NEW.${c} IS NOT OLD.${c}`).concat("NEW.seq IS NOT OLD.seq").join(" OR ")}
+BEGIN SELECT RAISE(ABORT, 'audit log is append-only'); END;`);
+  // Records hashed exactly as the previous release did: sha256(prev + "\n" + sorted-key JSON).
+  let prev = GENESIS_HASH;
+  for (const [i, name] of ["OLD_A", "OLD_B"].entries()) {
+    const { ...fields } = entry(name);
+    const record: Record<string, unknown> = { ...fields, auditId: `01OLDRECORD00000000000000${i}`, prevHash: prev };
+    const sorted = Object.fromEntries(Object.keys(record).sort().map((k) => [k, record[k]]));
+    const hash = createHash("sha256").update(`${prev}\n${JSON.stringify(sorted)}`).digest("hex");
+    const row = { ...record, hash, mirroredAt: "" } as Record<string, unknown>;
+    const values = [row.auditId, row.ts, row.actorHuman, row.actorAgent, row.project, row.provider, row.target, row.environment,
+      row.variableName, row.action, row.sensitive ? 1 : 0, row.sourceKind, row.result, row.providerVersion, row.errorCode,
+      row.prevHash, row.hash, row.mirroredAt] as Array<string | number>;
+    old.prepare(`INSERT INTO audit (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`).run(...values);
+    prev = hash;
+  }
+  old.close();
+
+  const store = openAuditStore(path);
+  assert.deepEqual(store.verify(), { ok: true, count: 2 });
+  const added = store.append({ ...entry("NEW_C"), approval: "trusted" });
+  assert.equal(added.prevHash, prev);
+  assert.deepEqual(store.verify(), { ok: true, count: 3 });
+  assert.deepEqual(store.list().map((r) => [r.variableName, r.approval]), [["NEW_C", "trusted"], ["OLD_B", ""], ["OLD_A", ""]]);
+  store.close();
+
+  const db = new DatabaseSync(path);
+  assert.throws(() => db.exec("UPDATE audit SET approval = 'dialog'"), /audit log is append-only/);
+  db.close();
+  const reopened = openAuditStore(path);
+  assert.deepEqual(reopened.verify(), { ok: true, count: 3 });
+  reopened.close();
+});
+
+test("S4: the approval mode is part of the hash", () => {
+  const { path, store } = freshStore();
+  const record = store.append({ ...entry(), approval: "dialog" });
+  assert.equal(store.list()[0]!.approval, "dialog");
+  store.close();
+  const db = new DatabaseSync(path);
+  db.exec("DROP TRIGGER audit_no_update");
+  db.exec("DROP TRIGGER IF EXISTS audit_no_update_approval");
+  db.prepare("UPDATE audit SET approval = 'trusted' WHERE audit_id = ?").run(record.auditId);
+  db.close();
+  const reopened = openAuditStore(path);
+  assert.deepEqual(reopened.verify(), { ok: false, count: 0, brokenAt: record.auditId });
+  reopened.close();
 });

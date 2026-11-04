@@ -1,10 +1,11 @@
 import { readAuditAnchor, writeAuditAnchor } from "./audit/anchor.ts";
 import { SHEETS_WEBHOOK_URL } from "./audit/mirror.ts";
-import type { AuditRecord, AuditStore, Mirror, MirrorResult } from "./audit/types.ts";
+import type { ApprovalMode, AuditRecord, AuditStore, Mirror, MirrorResult } from "./audit/types.ts";
 import type { HumanChannel } from "./gate/dialog.ts";
 import type { Exec } from "./platform/exec.ts";
 import { ZKS_KEYCHAIN_SERVICE, type Keychain } from "./platform/keychain.ts";
 import { describeDestination } from "./policy/describe.ts";
+import { describeTrustKey, loadTrust, saveTrust, trustKeyOf, type TrustFile, type TrustIo } from "./policy/trust.ts";
 import { PolicyError, describeSource, planOperations, validatePolicy } from "./policy/validate.ts";
 import type { Operation, Policy, Provider, TargetConfig } from "./policy/types.ts";
 import { Redactor } from "./secret/redactor.ts";
@@ -21,6 +22,12 @@ export const EXIT_DENIED = 3;
 
 /** One dialog must show every write in full; larger applies are refused, never truncated. */
 export const MAX_OPERATIONS_PER_APPROVAL = 20;
+export const MAX_DIALOG_LINE = 300;
+export const MAX_DIALOG_TEXT = 6000;
+
+const NEW_DESTINATION = "[NEW destination]";
+const ALWAYS_ALLOW_NOTE =
+  "Always allow: trust every [NEW destination] (whole GitHub owner, Vercel team, AWS profile+role+region or project) for all projects.";
 
 export const TOKEN_ACCOUNTS = ["vercel", "railway", "supabase", "sheets-hmac"] as const;
 export type TokenAccount = (typeof TOKEN_ACCOUNTS)[number];
@@ -48,6 +55,9 @@ export interface Deps {
   createFile(path: string, data: string): Promise<boolean>;
   readConfig(): Promise<ZksConfig>;
   writeConfig(config: ZksConfig): Promise<void>;
+  /** ~/.config/zks/trust.json as stored, or null when it does not exist; verified by policy/trust.ts. */
+  readTrust(): Promise<TrustFile | null>;
+  writeTrust(file: TrustFile): Promise<void>;
   doctor(): Promise<Record<string, unknown>>;
   randomBytes?: (size: number) => Buffer;
 }
@@ -83,6 +93,22 @@ class AuditWriteError extends Error {
 
 const FORBIDDEN_FLAGS = ["--value", "--secret", "--token", "--password"];
 const FLAGS_WITH_VALUE = ["--policy", "--only", "--target", "--agent", "--limit", "--project"];
+
+/** Options each command uses; any other option is refused. --help and --version are global. */
+const COMMAND_FLAGS: Record<string, string[]> = {
+  init: ["--policy", "--project"],
+  validate: ["--policy"],
+  plan: ["--policy", "--only", "--target"],
+  apply: ["--policy", "--only", "--target", "--agent"],
+  "audit list": ["--limit", "--project"],
+};
+const SUBCOMMANDS: Record<string, string[]> = {
+  auth: ["status", "set", "delete"],
+  audit: ["list", "verify", "sync"],
+  config: ["show", "set", "unset"],
+  trust: ["list", "remove"],
+};
+const COMMANDS = ["init", "validate", "plan", "apply", "doctor", ...Object.keys(SUBCOMMANDS)];
 
 interface ParsedArgs {
   positionals: string[];
@@ -132,6 +158,8 @@ function positionalLimit(command: string, sub: string | undefined): number | und
       return sub === "status" ? 2 : sub === "set" || sub === "delete" ? 3 : undefined;
     case "config":
       return sub === "show" ? 2 : sub === "set" ? 4 : sub === "unset" ? 3 : undefined;
+    case "trust":
+      return sub === "list" ? 2 : sub === "remove" ? 3 : undefined;
     default:
       return undefined;
   }
@@ -171,7 +199,17 @@ async function loadPolicy(deps: Deps, path: string | undefined): Promise<Policy>
   return validatePolicy(parsed);
 }
 
-function describeOperation(op: Operation): Record<string, unknown> {
+/** Refuses any option the command does not use. Only known command names are echoed. */
+function checkFlags(command: string, sub: string | undefined, flags: Map<string, string>): void {
+  if (!COMMANDS.includes(command)) return;
+  const name = sub !== undefined && SUBCOMMANDS[command]?.includes(sub) ? `${command} ${sub}` : command;
+  const allowed = COMMAND_FLAGS[name] ?? [];
+  for (const flag of flags.keys()) {
+    if (!allowed.includes(flag)) throw new UsageError(`option ${flag} is not valid for ${name}`);
+  }
+}
+
+function describeOperation(op: Operation, cwd: string): Record<string, unknown> {
   return {
     name: op.name,
     target: op.targetKey,
@@ -179,19 +217,26 @@ function describeOperation(op: Operation): Record<string, unknown> {
     environment: environmentOf(op.target),
     destination: describeDestination(op),
     sensitive: op.variable.sensitive,
-    source: describeSource(op.variable.source),
+    source: describeSource(op.variable.source, cwd),
   };
 }
 
-function approvalLines(policy: Policy, ops: Operation[]): string[] {
+/** Every write in full; writes to a destination that is not trusted yet end with [NEW destination]. */
+function approvalLines(policy: Policy, ops: Operation[], cwd: string, newKeys: Set<string>): string[] {
   const lines = [`Project: ${policy.project}`, `Write ${ops.length} value(s):`, ""];
   for (const op of ops) {
     lines.push(
       `- ${op.name} -> ${describeDestination(op)} ` +
-        `[${op.variable.sensitive ? "secret" : "plain"}; ${describeSource(op.variable.source)}] (target ${op.targetKey})`,
+        `[${op.variable.sensitive ? "secret" : "plain"}; ${describeSource(op.variable.source, cwd)}] (target ${op.targetKey})` +
+        (newKeys.has(trustKeyOf(op)) ? ` ${NEW_DESTINATION}` : ""),
     );
   }
+  if (newKeys.size > 0) lines.push("", ALWAYS_ALLOW_NOTE);
   return lines;
+}
+
+function trustIo(deps: Deps): TrustIo {
+  return { keychain: deps.keychain, readTrust: deps.readTrust, writeTrust: deps.writeTrust, randomBytes: deps.randomBytes };
 }
 
 export async function run(argv: string[], deps: Deps): Promise<RunOutput> {
@@ -219,6 +264,7 @@ async function dispatch(argv: string[], deps: Deps, redactor: Redactor): Promise
   const limit = positionalLimit(command, sub);
   // The extra argument is never echoed: it might be a pasted secret.
   if (limit !== undefined && positionals.length > limit) throw new UsageError("unexpected argument");
+  checkFlags(command, sub, flags);
 
   switch (command) {
     case "init":
@@ -235,7 +281,7 @@ async function dispatch(argv: string[], deps: Deps, redactor: Redactor): Promise
     case "plan": {
       const policy = await loadPolicy(deps, flags.get("--policy"));
       const ops = planOperations(policy, selection(flags));
-      return json(EXIT_OK, { ok: true, project: policy.project, operations: ops.map(describeOperation) });
+      return json(EXIT_OK, { ok: true, project: policy.project, operations: ops.map((op) => describeOperation(op, deps.cwd)) });
     }
     case "apply":
       return apply(deps, flags, redactor);
@@ -245,6 +291,8 @@ async function dispatch(argv: string[], deps: Deps, redactor: Redactor): Promise
       return audit(deps, sub, flags);
     case "config":
       return config(deps, sub, arg, positionals[3]);
+    case "trust":
+      return trust(deps, sub, arg);
     case "doctor":
       return json(EXIT_OK, { ok: true, ...(await deps.doctor()) });
     default:
@@ -270,7 +318,21 @@ async function apply(deps: Deps, flags: Map<string, string>, redactor: Redactor)
     });
   }
 
+  const trustState = await loadTrust(trustIo(deps));
+  const trustedKeys = new Set(trustState.destinations.map((d) => d.key));
+  const newKeys = [...new Set(ops.map(trustKeyOf))].filter((key) => !trustedKeys.has(key));
+  const lines = approvalLines(policy, ops, deps.cwd, new Set(newKeys));
+  if (lines.some((line) => line.length > MAX_DIALOG_LINE) || lines.join("\n").length > MAX_DIALOG_TEXT) {
+    return json(EXIT_USAGE, {
+      ok: false,
+      error: { code: "dialog_too_long", message: "the approval text is too long for one dialog; narrow with --only or --target" },
+    });
+  }
+  const trustReport = trustState.valid ? {} : { trust: "invalid" as const };
+
   const agent = flags.get("--agent") ?? deps.agentId;
+  // Every destination already trusted: no dialog. Otherwise the human sees every write.
+  const approval: ApprovalMode = newKeys.length === 0 ? "trusted" : "dialog";
   const store = deps.openAudit();
   const results: OperationResult[] = [];
   try {
@@ -290,17 +352,29 @@ async function apply(deps: Deps, flags: Map<string, string>, redactor: Redactor)
         result,
         providerVersion: extra.version ?? "",
         errorCode: extra.errorCode ?? "",
+        approval,
       });
 
-    const approved = await deps.human.approve("zks: approve secret changes", approvalLines(policy, ops));
-    if (!approved) {
+    const decision = approval === "trusted" ? "once" : await deps.human.approveWithTrust("zks: approve secret changes", lines);
+    if (decision === "deny") {
       for (const op of ops) {
         const entry = record(op, "denied", { errorCode: "not_approved" });
         results.push(toResult(op, entry, "denied", undefined, { code: "not_approved", message: "denied or no answer in the approval dialog" }));
       }
       const anchorError = await saveAnchor(deps, store);
       const mirror = await deps.mirror.sync(store);
-      return json(EXIT_DENIED, { ok: false, project: policy.project, results, mirror, ...anchorError });
+      return json(EXIT_DENIED, { ok: false, project: policy.project, approval, results, mirror, ...trustReport, ...anchorError });
+    }
+
+    let trustChange: { trusted?: string[]; trustError?: string } = {};
+    if (decision === "always") {
+      const addedAt = deps.now().toISOString();
+      try {
+        await saveTrust(trustIo(deps), [...trustState.destinations, ...newKeys.map((key) => ({ key, addedAt, addedBy: agent }))]);
+        trustChange = { trusted: newKeys };
+      } catch {
+        trustChange = { trustError: "could not save the trusted destinations; this apply was still approved" };
+      }
     }
 
     const byVariable = new Map<string, Operation[]>();
@@ -363,13 +437,22 @@ async function apply(deps: Deps, flags: Map<string, string>, redactor: Redactor)
       if (!(error instanceof AuditWriteError)) throw error;
       // Stop: further writes would go unaudited.
       await saveAnchor(deps, store);
-      return json(EXIT_FAILED, { ok: false, error: { code: "audit_failed", message: error.message }, results });
+      return json(EXIT_FAILED, { ok: false, error: { code: "audit_failed", message: error.message }, approval, results, ...trustChange });
     }
 
     const anchorError = await saveAnchor(deps, store);
     const mirror: MirrorResult = await deps.mirror.sync(store);
     const ok = results.every((r) => r.result === "applied");
-    return json(ok ? EXIT_OK : EXIT_FAILED, { ok, project: policy.project, results, mirror, ...anchorError });
+    return json(ok ? EXIT_OK : EXIT_FAILED, {
+      ok,
+      project: policy.project,
+      approval,
+      results,
+      mirror,
+      ...trustChange,
+      ...trustReport,
+      ...anchorError,
+    });
   } finally {
     store.close();
   }
@@ -486,6 +569,31 @@ async function audit(deps: Deps, sub: string | undefined, flags: Map<string, str
     }
   } finally {
     store.close();
+  }
+}
+
+async function trust(deps: Deps, sub: string | undefined, key: string | undefined): Promise<RunOutput> {
+  const io = trustIo(deps);
+  switch (sub) {
+    case "list": {
+      const state = await loadTrust(io);
+      return json(EXIT_OK, {
+        ok: true,
+        valid: state.valid,
+        destinations: state.destinations.map((d) => ({ ...d, description: describeTrustKey(d.key) })),
+      });
+    }
+    case "remove": {
+      // Reducing trust is always safe, so it needs no dialog. The key is only echoed once it is known.
+      if (key === undefined) throw new UsageError("usage: zks trust remove <key>");
+      const state = await loadTrust(io);
+      const kept = state.destinations.filter((d) => d.key !== key);
+      if (kept.length === state.destinations.length) throw new UsageError("not a trusted destination; see `zks trust list`");
+      await saveTrust(io, kept);
+      return json(EXIT_OK, { ok: true, removed: key });
+    }
+    default:
+      throw new UsageError("usage: zks trust list | zks trust remove <key>");
   }
 }
 

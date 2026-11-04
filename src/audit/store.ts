@@ -23,6 +23,7 @@ const COLUMNS: Array<[keyof AuditRecord, string]> = [
   ["result", "result"],
   ["providerVersion", "provider_version"],
   ["errorCode", "error_code"],
+  ["approval", "approval"],
   ["prevHash", "prev_hash"],
   ["hash", "hash"],
   ["mirroredAt", "mirrored_at"],
@@ -31,7 +32,7 @@ const COLUMNS: Array<[keyof AuditRecord, string]> = [
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS audit (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
-  ${COLUMNS.map(([, col]) => `${col} ${col === "sensitive" ? "INTEGER" : "TEXT"} NOT NULL`).join(",\n  ")}
+  ${COLUMNS.map(([, col]) => `${col} ${col === "sensitive" ? "INTEGER" : "TEXT"} NOT NULL${col === "approval" ? " DEFAULT ''" : ""}`).join(",\n  ")}
 );
 CREATE UNIQUE INDEX IF NOT EXISTS audit_id_idx ON audit(audit_id);
 CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON audit
@@ -44,6 +45,17 @@ WHEN ${COLUMNS.filter(([, col]) => col !== "mirrored_at")
 BEGIN SELECT RAISE(ABORT, 'audit log is append-only'); END;
 `;
 
+/**
+ * Databases created before approval modes have no approval column and an update trigger that
+ * does not cover it: add both. Old rows get '' and keep their hashes (see computeHash).
+ */
+const APPROVAL_MIGRATION = "ALTER TABLE audit ADD COLUMN approval TEXT NOT NULL DEFAULT ''";
+const APPROVAL_TRIGGER = `
+CREATE TRIGGER IF NOT EXISTS audit_no_update_approval BEFORE UPDATE ON audit
+WHEN NEW.approval IS NOT OLD.approval
+BEGIN SELECT RAISE(ABORT, 'audit log is append-only'); END;
+`;
+
 /** JSON with sorted keys, so the hash does not depend on property order. */
 export function canonicalJson(value: Record<string, unknown>): string {
   const sorted: Record<string, unknown> = {};
@@ -51,8 +63,11 @@ export function canonicalJson(value: Record<string, unknown>): string {
   return JSON.stringify(sorted);
 }
 
+/** The approval field is hashed only when set, so records written before it existed still verify. */
 export function computeHash(prevHash: string, record: Omit<AuditRecord, "hash" | "mirroredAt">): string {
-  return createHash("sha256").update(`${prevHash}\n${canonicalJson({ ...record })}`).digest("hex");
+  const { approval, ...rest } = record;
+  const hashed: Record<string, unknown> = approval ? { ...rest, approval } : rest;
+  return createHash("sha256").update(`${prevHash}\n${canonicalJson(hashed)}`).digest("hex");
 }
 
 export function newAuditId(now = Date.now()): string {
@@ -87,6 +102,9 @@ export function openAuditStore(dbPath: string): AuditStore {
   chmodSync(dbPath, 0o600);
   db.exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
   db.exec(SCHEMA);
+  const columns = (db.prepare("PRAGMA table_info(audit)").all() as Row[]).map((c) => String(c.name));
+  if (!columns.includes("approval")) db.exec(APPROVAL_MIGRATION);
+  db.exec(APPROVAL_TRIGGER);
 
   const insert = db.prepare(
     `INSERT INTO audit (${COLUMNS.map(([, c]) => c).join(", ")}) VALUES (${COLUMNS.map(() => "?").join(", ")})`,
@@ -100,7 +118,7 @@ export function openAuditStore(dbPath: string): AuditStore {
       db.exec("BEGIN IMMEDIATE");
       try {
         const prevHash = String((lastHash.get() as Row | undefined)?.hash ?? GENESIS_HASH);
-        const base = { ...entry, auditId: newAuditId(), prevHash };
+        const base = { ...entry, approval: entry.approval ?? ("" as const), auditId: newAuditId(), prevHash };
         const record: AuditRecord = { ...base, hash: computeHash(prevHash, base), mirroredAt: "" };
         insert.run(
           ...COLUMNS.map(([field]) => {

@@ -18,7 +18,8 @@ Set secrets and env vars on Vercel, AWS SSM, AWS Secrets Manager, GitHub Actions
 - If the human pastes a secret in chat: do not use it, do not repeat it, do not write it anywhere. Say it is now exposed and recommend rotating it, then continue with a `prompt` or `op` source.
 - Literal `value` is only for `sensitive: false` variables. Every `source` needs `"sensitive": true`; zks rejects a source on a non-sensitive variable. If in doubt, mark it sensitive.
 - Never use the Keychain service `zks` as a source: it holds zks's own tokens and is rejected.
-- At most 20 writes per apply (`too_many_operations`); split with `--only` / `--target`.
+- At most 20 writes per apply (`too_many_operations`), 300 characters per dialog line and 6000 per dialog (`dialog_too_long`); split with `--only` / `--target`.
+- Never edit `~/.config/zks/trust.json` or read the `zks`/`trust-hmac` Keychain item. Only the human adds trust, with **Always allow** in the dialog; you may run `zks trust list` and `zks trust remove <key>`.
 
 ## Workflow
 
@@ -36,7 +37,7 @@ Set secrets and env vars on Vercel, AWS SSM, AWS Secrets Manager, GitHub Actions
 
 3. **Validate.** `zks validate`. Fix every listed issue and rerun until `"ok": true`.
 4. **Plan.** `zks plan --only A,B --target t1,t2`. Show the human the list (name → `destination`, sensitive, source). The approval dialog shows the same destinations.
-5. **Apply.** `zks apply --only A,B --target t1,t2` with the narrowest selection. Before running it, tell the human: "a macOS dialog will ask you to approve these writes". Wait for the command; do not retry a denial on your own.
+5. **Apply.** `zks apply --only A,B --target t1,t2` with the narrowest selection. Before running it, tell the human: "a macOS dialog will ask you to approve these writes" (Deny / Approve once / Always allow; writes to destinations they already trusted open no dialog, `"approval": "trusted"`). Wait for the command; do not retry a denial on your own. If the output has `trust: "invalid"`, tell the human the trust file was altered.
 6. **Report.** Show only the JSON `results`: `name`, `target`, `result`, `version`, `auditId` (plus `error.code` when failed). Exit codes:
 
    | Code | Meaning |
@@ -49,7 +50,7 @@ Set secrets and env vars on Vercel, AWS SSM, AWS Secrets Manager, GitHub Actions
 7. **Credentials.**
    - `missing_token` for Vercel, Railway or Supabase: tell the human to run `zks auth set <vercel|railway|supabase>` themselves (hidden dialog). Never ask them to paste a token in chat.
    - AWS uses the existing AWS SSO or profile. If credentials are expired, tell the human to run `aws sso login` (add `--profile <name>` when the target sets `profile`).
-   - GitHub uses `gh auth`. If `github_unavailable` or `github_failed`, tell the human to run `gh auth login` / `gh auth status`.
+   - GitHub: zks reads the `gh auth login` token with `gh auth token` and calls `api.github.com` itself. If `missing_token` or `github_unavailable`, tell the human to run `gh auth login`; `github_failed` carries the HTTP status (for example 403: the login lacks write access to the repo).
 
 ## Policy example
 
@@ -90,7 +91,7 @@ Names match `^[A-Za-z_][A-Za-z0-9_]{0,127}$`; target keys match `^[a-z0-9][a-z0-
 | `vercel` | `projectId`, `environments` (non-empty subset of `production`, `preview`, `development`) | `teamId`, `gitBranch` | Ids match `^[A-Za-z0-9_.-]{1,100}$`; `gitBranch` has no `..`. Sensitive variables cannot target `development`. Sensitive → Vercel type `sensitive`, plain → `plain`. |
 | `aws-ssm` | `region` (e.g. `us-east-1`), `prefix` | `profile`, `roleArn`, `kmsKeyId` | `prefix` starts and ends with `/` (e.g. `/app/prod/`). `kmsKeyId` is `alias/<name>`, a key UUID or a KMS ARN. Sensitive → `SecureString`, plain → `String`. |
 | `aws-sm` | `region`, `prefix` | `profile`, `roleArn`, `kmsKeyId` | `prefix` has no leading `/`; empty or segments ending in `/` (e.g. `app/prod/`). |
-| `github` | `repo` (`owner/name`) | `environment` (`^[A-Za-z0-9_.-]{1,255}$`) | Sensitive → Actions secret, plain → Actions variable. |
+| `github` | `repo` (`owner/name`, at most 100 characters) | `environment` (`^[A-Za-z0-9_.-]{1,255}$`) | Sensitive → Actions secret, plain → Actions variable. |
 | `railway` | `projectId`, `environmentId` | `serviceId`, `tokenType` (`account` or `project`), `skipDeploys` (boolean) | Ids match `^[A-Za-z0-9-]{1,64}$`. Without `serviceId` the variable is shared across the environment. |
 | `supabase` | `projectRef` (exactly 20 lowercase letters or digits) | — | Edge Functions secrets. Names must not start with `SUPABASE_`. |
 

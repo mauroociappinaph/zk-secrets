@@ -1,12 +1,14 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import sodium from "libsodium-wrappers";
 import { openAuditStore } from "../src/audit/store.ts";
 import type { Mirror } from "../src/audit/types.ts";
-import type { HumanChannel } from "../src/gate/dialog.ts";
+import type { HumanChannel, TrustDecision } from "../src/gate/dialog.ts";
 import type { Exec, ExecOptions, ExecResult } from "../src/platform/exec.ts";
 import type { Keychain } from "../src/platform/keychain.ts";
+import type { TrustFile } from "../src/policy/trust.ts";
 import type { Deps, ZksConfig } from "../src/run.ts";
 import { SecretBuffer } from "../src/secret/secret-buffer.ts";
 import { createSinks } from "../src/sinks/index.ts";
@@ -14,8 +16,44 @@ import type { AwsClient, AwsClientFactory } from "../src/sinks/types.ts";
 
 export const CANARY = "zks-canary-7f3a9c2e51d4";
 
+await sodium.ready;
+/** Test keypair standing in for a GitHub repository's Actions public key. */
+export const GITHUB_KEYPAIR = sodium.crypto_box_keypair();
+export const GITHUB_KEY_ID = "568250167242549743";
+export const GITHUB_PUBLIC_KEY = sodium.to_base64(GITHUB_KEYPAIR.publicKey, sodium.base64_variants.ORIGINAL);
+export const GH_TOKEN = "gho_testtoken123";
+
+/** Opens a GitHub sealed box with the test keypair. */
+export function openSealed(encryptedValue: string): string {
+  const sealed = sodium.from_base64(encryptedValue, sodium.base64_variants.ORIGINAL);
+  return sodium.to_string(sodium.crypto_box_seal_open(sealed, GITHUB_KEYPAIR.publicKey, GITHUB_KEYPAIR.privateKey));
+}
+
+/** What a healthy provider answers: GitHub public key, 201/204 on writes, 200 {} elsewhere. */
+export function providerResponse(call: FetchCall): { status?: number; body?: unknown } {
+  if (call.url.startsWith("https://api.github.com/")) {
+    if (call.url.endsWith("/public-key")) return { body: { key_id: GITHUB_KEY_ID, key: GITHUB_PUBLIC_KEY } };
+    return { status: call.init.method === "PUT" || call.init.method === "POST" ? 201 : 204 };
+  }
+  return {};
+}
+
+/** `gh auth token` answers with a test token; every other command succeeds silently. */
+export function ghTokenExec(call: ExecCall): Partial<ExecResult> {
+  if (call.command === "gh" && call.args[0] === "auth" && call.args[1] === "token") return { stdout: Buffer.from(`${GH_TOKEN}\n`) };
+  return {};
+}
+
+const tempDirs: string[] = [];
+process.on("exit", () => {
+  for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+});
+
+/** A fresh directory under the system temp dir, removed when the test process exits. */
 export function tempDir(): string {
-  return mkdtempSync(join(tmpdir(), "zks-test-"));
+  const dir = mkdtempSync(join(tmpdir(), "zks-test-"));
+  tempDirs.push(dir);
+  return dir;
 }
 
 export interface ExecCall {
@@ -68,8 +106,10 @@ export function fakeFetch(respond: (call: FetchCall) => { status?: number; body?
     const call = { url: String(url), init, body: typeof init.body === "string" ? init.body : "" };
     calls.push(call);
     const res = respond(call);
+    const status = res.status ?? 200;
     const text = res.body === undefined ? "{}" : typeof res.body === "string" ? res.body : JSON.stringify(res.body);
-    return new Response(text, { status: res.status ?? 200, headers: { "content-type": "application/json" } });
+    const nullBody = status === 204 || status === 205 || status === 304;
+    return new Response(nullBody ? null : text, { status, headers: { "content-type": "application/json" } });
   }) as typeof fetch;
   return { fetch: fetchFn, calls };
 }
@@ -94,13 +134,17 @@ export function fakeAws(respond: (call: AwsCall) => unknown = () => ({})) {
   return { aws, calls };
 }
 
-export function fakeHuman(options: { approve?: boolean; prompt?: string | null } = {}) {
+export function fakeHuman(options: { approve?: boolean; prompt?: string | null; decision?: TrustDecision } = {}) {
   const approvals: string[][] = [];
   const prompts: string[] = [];
   const human: HumanChannel = {
     async approve(_title, lines) {
       approvals.push(lines);
       return options.approve ?? true;
+    },
+    async approveWithTrust(_title, lines) {
+      approvals.push(lines);
+      return options.decision ?? ((options.approve ?? true) ? "once" : "deny");
     },
     async promptSecret(_title, message) {
       prompts.push(message);
@@ -123,6 +167,8 @@ export interface TestHarness {
   keychain: ReturnType<typeof fakeKeychain>;
   human: ReturnType<typeof fakeHuman>;
   mirrorCalls: number;
+  /** In-memory ~/.config/zks/trust.json; null when the file does not exist. */
+  trust: TrustFile | null;
 }
 
 export function harness(
@@ -132,6 +178,7 @@ export function harness(
     keychain?: Record<string, string>;
     approve?: boolean;
     prompt?: string | null;
+    decision?: TrustDecision;
     fetch?: Parameters<typeof fakeFetch>[0];
     exec?: Parameters<typeof fakeExec>[0];
     aws?: Parameters<typeof fakeAws>[0];
@@ -141,11 +188,11 @@ export function harness(
   const auditDb = join(dir, "state", "audit.db");
   const files = new Map(Object.entries(options.files ?? {}).map(([k, v]) => [join(dir, k), v]));
   if (options.policy !== undefined) files.set(join(dir, "zks.policy.json"), JSON.stringify(options.policy));
-  const exec = fakeExec(options.exec);
-  const fetch = fakeFetch(options.fetch);
+  const exec = fakeExec(options.exec ?? ghTokenExec);
+  const fetch = fakeFetch(options.fetch ?? providerResponse);
   const aws = fakeAws(options.aws);
   const keychain = fakeKeychain(options.keychain);
-  const human = fakeHuman({ approve: options.approve, prompt: options.prompt });
+  const human = fakeHuman({ approve: options.approve, prompt: options.prompt, decision: options.decision });
   const h: TestHarness = {
     dir,
     auditDb,
@@ -157,6 +204,7 @@ export function harness(
     keychain,
     human,
     mirrorCalls: 0,
+    trust: null,
     deps: undefined as unknown as Deps,
   };
   const mirror: Mirror = {
@@ -192,6 +240,10 @@ export function harness(
     readConfig: async () => h.config,
     writeConfig: async (config) => {
       h.config = config;
+    },
+    readTrust: async () => (h.trust === null ? null : structuredClone(h.trust)),
+    writeTrust: async (file) => {
+      h.trust = structuredClone(file);
     },
     doctor: async () => ({ doctor: "fake" }),
     randomBytes: (n) => Buffer.alloc(n, 7),

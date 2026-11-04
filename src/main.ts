@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readAuditAnchor } from "./audit/anchor.ts";
@@ -10,6 +10,7 @@ import { createExec } from "./platform/exec.ts";
 import { checkIntegrity } from "./platform/integrity.ts";
 import { ZKS_KEYCHAIN_SERVICE, createKeychain } from "./platform/keychain.ts";
 import { zksPaths } from "./platform/paths.ts";
+import { loadTrust, type TrustFile } from "./policy/trust.ts";
 import { TOKEN_ACCOUNTS, run, type Deps, type ZksConfig } from "./run.ts";
 import { createAwsClientFactory } from "./sinks/aws-clients.ts";
 import { createSinks } from "./sinks/index.ts";
@@ -32,6 +33,21 @@ export async function main(identity: Identity): Promise<number> {
       return JSON.parse(await readFile(paths.configFile, "utf8")) as ZksConfig;
     } catch {
       return {};
+    }
+  };
+  const readTrust = async (): Promise<TrustFile | null> => {
+    let text: string;
+    try {
+      text = await readFile(paths.trustFile, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+    try {
+      return JSON.parse(text) as TrustFile;
+    } catch {
+      // Unparsable: an unsigned empty file, which loadTrust reports as invalid.
+      return { version: 1, destinations: [], mac: "" };
     }
   };
   const exec = createExec({ home: identity.home, user: identity.user });
@@ -67,6 +83,12 @@ export async function main(identity: Identity): Promise<number> {
       await mkdir(paths.configDir, { recursive: true, mode: 0o700 });
       await writeFile(paths.configFile, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
     },
+    readTrust,
+    writeTrust: async (file) => {
+      await mkdir(paths.configDir, { recursive: true, mode: 0o700 });
+      await writeFile(paths.trustFile, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 });
+      await chmod(paths.trustFile, 0o600);
+    },
     doctor: async () => {
       const which = async (tool: string) => (await exec("/usr/bin/which", [tool]).catch(() => null))?.code === 0;
       const tokens: Record<string, boolean> = {};
@@ -75,6 +97,7 @@ export async function main(identity: Identity): Promise<number> {
       const store = openAuditStore(paths.auditDb);
       const audit = { ...store.verify(anchor ?? undefined), anchored: anchor !== null };
       store.close();
+      const trust = await loadTrust({ keychain, readTrust, writeTrust: async () => undefined }).catch(() => ({ valid: false, destinations: [] }));
       return {
         version: pkg.version,
         platform: process.platform,
@@ -85,6 +108,8 @@ export async function main(identity: Identity): Promise<number> {
         tokens,
         audit: { path: paths.auditDb, ...audit },
         mirror: { sheetsWebhook: Boolean((await readConfig()).sheets?.webhookUrl) },
+        trust: trust.valid ? "ok" : "invalid",
+        trustedDestinations: trust.destinations.length,
       };
     },
     randomBytes,

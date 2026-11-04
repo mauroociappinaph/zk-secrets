@@ -3,13 +3,25 @@ import { test } from "node:test";
 import type { Operation, TargetConfig } from "../src/policy/types.ts";
 import { SecretBuffer } from "../src/secret/secret-buffer.ts";
 import { awsSmSink, awsSsmSink } from "../src/sinks/aws.ts";
-import { sessionPolicyFor } from "../src/sinks/aws-clients.ts";
+import { createAwsClientFactory, sessionPolicyFor } from "../src/sinks/aws-clients.ts";
 import { githubSink } from "../src/sinks/github.ts";
 import { railwaySink } from "../src/sinks/railway.ts";
 import { supabaseSink } from "../src/sinks/supabase.ts";
 import { SinkError, type SinkContext } from "../src/sinks/types.ts";
 import { vercelSink } from "../src/sinks/vercel.ts";
-import { CANARY, fakeAws, fakeExec, fakeFetch, fakeKeychain } from "./helpers.ts";
+import {
+  CANARY,
+  GH_TOKEN,
+  GITHUB_KEY_ID,
+  fakeAws,
+  fakeExec,
+  fakeFetch,
+  fakeKeychain,
+  ghTokenExec,
+  openSealed,
+  providerResponse,
+  type FetchCall,
+} from "./helpers.ts";
 
 function op(target: TargetConfig, sensitive = true, name = "API_KEY"): Operation {
   return { name, targetKey: "t", target, variable: { sensitive, targets: ["t"], source: { kind: "prompt" } }, sourceKind: "prompt" };
@@ -123,14 +135,124 @@ test("aws session policy only allows writes under the prefix", () => {
   assert.ok(!JSON.stringify([ssm, sm]).includes("Get"), "no read actions");
 });
 
-test("github secrets go on stdin; failures do not echo stderr", async () => {
-  const ok = ctx();
-  await githubSink.apply(op({ provider: "github", repo: "acme/web", environment: "prod" }), secret(), ok.context);
-  assert.deepEqual(ok.exec.calls, [{ command: "gh", args: ["secret", "set", "API_KEY", "--repo", "acme/web", "--env", "prod"], input: CANARY }]);
+test("aws clients ignore endpoint URLs configured in ~/.aws/config", async () => {
+  const factory = createAwsClientFactory();
+  const ssm = factory.ssm({ provider: "aws-ssm", region: "us-east-1", prefix: "/a/" }) as unknown as { config: Record<string, unknown> };
+  const sm = factory.secretsManager({ provider: "aws-sm", region: "us-east-1", prefix: "a/" }) as unknown as { config: Record<string, unknown> };
+  for (const client of [ssm, sm]) {
+    const setting = client.config.ignoreConfiguredEndpointUrls;
+    assert.equal(typeof setting === "function" ? await (setting as () => Promise<boolean>)() : setting, true);
+  }
+});
 
-  const failing = ctx({ exec: fakeExec(() => ({ code: 1, stderr: Buffer.from(`bad ${CANARY}`) })) });
-  const err = await rejects(githubSink.apply(op({ provider: "github", repo: "acme/web" }), secret(), failing.context), "github_failed");
-  assert.equal(err.message, "gh secret set exited 1");
+const GH_HEADERS = {
+  authorization: `Bearer ${GH_TOKEN}`,
+  accept: "application/vnd.github+json",
+  "x-github-api-version": "2022-11-28",
+  "user-agent": "zks",
+};
+
+function headersOf(call: FetchCall): Record<string, string> {
+  const headers = call.init.headers as Record<string, string>;
+  const { "content-type": _contentType, ...rest } = headers;
+  return rest;
+}
+
+function assertNoCanary(c: { fetch: ReturnType<typeof fakeFetch>; exec: ReturnType<typeof fakeExec> }) {
+  for (const call of c.fetch.calls) {
+    assert.ok(!call.url.includes(CANARY), call.url);
+    assert.ok(!call.body.includes(CANARY), "GitHub body carries the plaintext");
+    assert.ok(!JSON.stringify(call.init.headers).includes(CANARY));
+  }
+  for (const call of c.exec.calls) assert.ok(!`${call.args.join(" ")} ${call.input}`.includes(CANARY));
+}
+
+test("github secret: gets the repo public key, seals the value and PUTs it with the key id", async () => {
+  const c = ctx({ exec: fakeExec(ghTokenExec), fetch: fakeFetch(providerResponse) });
+
+  const res = await githubSink.apply(op({ provider: "github", repo: "acme/web" }), secret(), c.context);
+
+  assert.deepEqual(res, { version: GITHUB_KEY_ID });
+  assert.deepEqual(c.exec.calls, [{ command: "gh", args: ["auth", "token", "--hostname", "github.com"], input: "" }]);
+  assert.deepEqual(
+    c.fetch.calls.map((call) => [call.init.method, call.url]),
+    [
+      ["GET", "https://api.github.com/repos/acme/web/actions/secrets/public-key"],
+      ["PUT", "https://api.github.com/repos/acme/web/actions/secrets/API_KEY"],
+    ],
+  );
+  for (const call of c.fetch.calls) assert.deepEqual(headersOf(call), GH_HEADERS);
+  const body = JSON.parse(c.fetch.calls[1]!.body) as { encrypted_value: string; key_id: string };
+  assert.deepEqual(Object.keys(body).sort(), ["encrypted_value", "key_id"]);
+  assert.equal(body.key_id, GITHUB_KEY_ID);
+  assert.equal(openSealed(body.encrypted_value), CANARY);
+  assertNoCanary(c);
+});
+
+test("github environment secret uses the environment public key and path", async () => {
+  const c = ctx({ exec: fakeExec(ghTokenExec), fetch: fakeFetch(providerResponse) });
+  await githubSink.apply(op({ provider: "github", repo: "acme/web", environment: "prod" }), secret(), c.context);
+  assert.deepEqual(
+    c.fetch.calls.map((call) => [call.init.method, call.url]),
+    [
+      ["GET", "https://api.github.com/repos/acme/web/environments/prod/secrets/public-key"],
+      ["PUT", "https://api.github.com/repos/acme/web/environments/prod/secrets/API_KEY"],
+    ],
+  );
+  assert.equal(openSealed(JSON.parse(c.fetch.calls[1]!.body).encrypted_value), CANARY);
+});
+
+test("github variable: PATCH updates an existing one; 404 falls back to POST", async () => {
+  const existing = ctx({ exec: fakeExec(ghTokenExec), fetch: fakeFetch(providerResponse) });
+  assert.deepEqual(await githubSink.apply(op({ provider: "github", repo: "acme/web" }, false, "LOG_LEVEL"), SecretBuffer.fromString("info"), existing.context), {});
+  assert.deepEqual(
+    existing.fetch.calls.map((call) => [call.init.method, call.url, JSON.parse(call.body)]),
+    [["PATCH", "https://api.github.com/repos/acme/web/actions/variables/LOG_LEVEL", { name: "LOG_LEVEL", value: "info" }]],
+  );
+  assert.deepEqual(headersOf(existing.fetch.calls[0]!), GH_HEADERS);
+
+  const missing = ctx({
+    exec: fakeExec(ghTokenExec),
+    fetch: fakeFetch((call) => (call.init.method === "PATCH" ? { status: 404, body: { message: "Not Found" } } : { status: 201 })),
+  });
+  await githubSink.apply(op({ provider: "github", repo: "acme/web", environment: "prod" }, false, "LOG_LEVEL"), SecretBuffer.fromString("info"), missing.context);
+  assert.deepEqual(
+    missing.fetch.calls.map((call) => [call.init.method, call.url, JSON.parse(call.body)]),
+    [
+      ["PATCH", "https://api.github.com/repos/acme/web/environments/prod/variables/LOG_LEVEL", { name: "LOG_LEVEL", value: "info" }],
+      ["POST", "https://api.github.com/repos/acme/web/environments/prod/variables", { name: "LOG_LEVEL", value: "info" }],
+    ],
+  );
+});
+
+test("github without a gh login fails with missing_token before any request", async () => {
+  for (const answer of [{ code: 1 }, { stdout: Buffer.from("\n") }, {}]) {
+    const c = ctx({ exec: fakeExec(() => answer), fetch: fakeFetch(providerResponse) });
+    const err = await rejects(githubSink.apply(op({ provider: "github", repo: "acme/web" }), secret(), c.context), "missing_token");
+    assert.equal(err.message, "no GitHub login; run `gh auth login`");
+    assert.equal(c.fetch.calls.length, 0);
+  }
+});
+
+test("github HTTP errors report only the status, never the body", async () => {
+  const keyFails = ctx({ exec: fakeExec(ghTokenExec), fetch: fakeFetch(() => ({ status: 403, body: { message: `nope ${CANARY} ${GH_TOKEN}` } })) });
+  const err = await rejects(githubSink.apply(op({ provider: "github", repo: "acme/web" }), secret(), keyFails.context), "github_failed");
+  assert.equal(err.message, "GitHub HTTP 403");
+  assert.equal(err.status, 403);
+  assert.equal(keyFails.fetch.calls.length, 1);
+
+  const putFails = ctx({
+    exec: fakeExec(ghTokenExec),
+    fetch: fakeFetch((call) => (call.init.method === "GET" ? providerResponse(call) : { status: 422, body: `bad ${CANARY}` })),
+  });
+  const putErr = await rejects(githubSink.apply(op({ provider: "github", repo: "acme/web" }), secret(), putFails.context), "github_failed");
+  assert.equal(putErr.message, "GitHub HTTP 422");
+  assert.ok(!putErr.message.includes(GH_TOKEN));
+
+  const patchFails = ctx({ exec: fakeExec(ghTokenExec), fetch: fakeFetch(() => ({ status: 500 })) });
+  const patchErr = await rejects(githubSink.apply(op({ provider: "github", repo: "acme/web" }, false), secret(), patchFails.context), "github_failed");
+  assert.equal(patchErr.message, "GitHub HTTP 500");
+  assertNoCanary(keyFails);
 });
 
 test("railway upserts through GraphQL with an account or project token", async () => {

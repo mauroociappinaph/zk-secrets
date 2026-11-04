@@ -70,11 +70,13 @@ async function resolveSource(name: string, source: SourceSpec, deps: SourceDeps)
       // Symlinks are resolved too: a .env link to ~/.aws/credentials stays outside the project.
       const real = deps.realpath ?? nodeRealpath;
       const realOrSelf = (path: string) => real(path).catch(() => path);
-      const realInside = relative(await realOrSelf(resolvePath(deps.cwd)), await realOrSelf(fullPath));
+      const realPath = await realOrSelf(fullPath);
+      const realInside = relative(await realOrSelf(resolvePath(deps.cwd)), realPath);
       if (realInside === "" || realInside.startsWith("..") || isAbsolute(realInside)) {
         throw new SourceError("source_invalid", `dotenv path for ${name} must stay inside the project`);
       }
-      const file = await read(fullPath).catch(() => null);
+      // Read the path that was checked, so a link swapped in between cannot redirect the read.
+      const file = await read(realPath).catch(() => null);
       if (!file) throw new SourceError("source_missing", `dotenv file ${source.path} not readable`);
       const value = findDotenvValue(file.toString("utf8"), source.key ?? name);
       file.fill(0);

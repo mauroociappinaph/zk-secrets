@@ -40,16 +40,20 @@ function credentialsFor(target: AwsSsmTarget | AwsSmTarget) {
       Policy: sessionPolicyFor(target),
     },
     masterCredentials: base,
-    clientConfig: { region: target.region },
+    clientConfig: { region: target.region, ignoreConfiguredEndpointUrls: true },
   });
 }
 
-/** Uses the credentials already on the machine (SSO, profile, env) - zks never stores AWS keys. */
+/**
+ * Uses the credentials already on the machine (SSO, profile, env) - zks never stores AWS keys.
+ * `endpoint_url` in ~/.aws/config is ignored, so a same-user edit cannot redirect a write.
+ */
 export function createAwsClientFactory(): AwsClientFactory {
   const config = (target: AwsTargetBase & (AwsSsmTarget | AwsSmTarget)) => ({
     region: target.region,
     credentials: credentialsFor(target),
     maxAttempts: 3,
+    ignoreConfiguredEndpointUrls: true,
   });
   return {
     ssm: (target) => new SSMClient(config(target)),

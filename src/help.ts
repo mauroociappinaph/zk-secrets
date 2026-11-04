@@ -2,7 +2,8 @@ export const HELP_TEXT = `zks - zero-knowledge secrets and env vars for Vercel, 
 
 Secret values never pass through argv, stdout, logs or the agent. zks reads them from a
 source (1Password, Keychain, hidden dialog, generator or dotenv file) and writes them straight
-to the provider after you approve a native dialog. Output is JSON with metadata only.
+to the provider after you approve a native dialog (Deny / Approve once / Always allow); writes to
+a destination you chose "Always allow" for skip the dialog. Output is JSON with metadata only.
 
 Usage:
   zks init [--policy FILE] [--project NAME]   Create a zks.policy.json template
@@ -18,6 +19,8 @@ Usage:
   zks audit list [--limit N] [--project P]    Show audit records (metadata only)
   zks audit verify                            Check the audit hash chain
   zks audit sync                              Push pending audit records to Google Sheets
+  zks trust list                              Show trusted destinations (writes there need no dialog)
+  zks trust remove <key>                      Stop trusting a destination (no dialog needed)
   zks config show
   zks config set sheets-webhook <url>         Apps Script /exec URL for the audit mirror
   zks config unset sheets-webhook

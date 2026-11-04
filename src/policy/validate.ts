@@ -1,3 +1,4 @@
+import { resolve as resolvePath } from "node:path";
 import {
   PROVIDERS,
   VERCEL_ENVIRONMENTS,
@@ -19,14 +20,17 @@ const RAILWAY_ID = /^[A-Za-z0-9-]{1,64}$/;
 const AWS_PROFILE = /^[A-Za-z0-9_.-]{1,64}$/;
 const KMS_KEY_ID = /^(alias\/[A-Za-z0-9\/_-]{1,250}|[0-9a-f-]{36}|arn:aws[a-z-]*:kms:[a-z0-9-]+:\d{12}:(key|alias)\/[A-Za-z0-9\/_-]+)$/;
 const KEYCHAIN_ID = /^[A-Za-z0-9_.-]{1,128}$/;
-const OP_REF = /^op:\/\/[\x21-\x7E]{1,512}$/;
-const DOTENV_PATH = /^(?:[A-Za-z0-9_-][A-Za-z0-9_.-]*\/)*\.env[A-Za-z0-9_.-]*$/;
+/** At most 200 characters in total, so every approval line stays readable. */
+const OP_REF = /^op:\/\/[\x21-\x7E]{1,195}$/;
+const DOTENV_PATH = /^(?=.{1,200}$)(?:[A-Za-z0-9_-][A-Za-z0-9_.-]*\/)*\.env[A-Za-z0-9_.-]*$/;
 /** Keychain service holding zks's own provider tokens and audit anchor; never a policy source. */
 const RESERVED_KEYCHAIN_SERVICE = "zks";
 const AWS_REGION = /^[a-z]{2}(-[a-z]+)+-\d$/;
-const SSM_PREFIX = /^\/([A-Za-z0-9_.-]+\/)*$/;
-const SM_PREFIX = /^([A-Za-z0-9_.+=@-]+\/)*$/;
-const GITHUB_REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const SSM_PREFIX = /^(?=.{1,200}$)\/([A-Za-z0-9_.-]+\/)*$/;
+const SM_PREFIX = /^(?=.{0,200}$)([A-Za-z0-9_.+=@-]+\/)*$/;
+const GITHUB_REPO = /^(?=.{1,100}$)[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+/** Names that would collide with Object.prototype when used as keys, compared in lower case. */
+const RESERVED_VARIABLE_NAMES = ["__proto__", "constructor", "prototype"];
 const ROLE_ARN = /^arn:aws[a-z-]*:iam::\d{12}:role\/[A-Za-z0-9+=,.@_\/-]+$/;
 const GENERATE_MIN_BYTES = 16;
 const GENERATE_MAX_BYTES = 512;
@@ -150,7 +154,7 @@ function validateSource(path: string, source: unknown, issues: string[]): void {
       }
       break;
     case "keychain":
-      if (source.service === RESERVED_KEYCHAIN_SERVICE) {
+      if (typeof source.service === "string" && source.service.toLowerCase() === RESERVED_KEYCHAIN_SERVICE) {
         issues.push(`${path}.service: "${RESERVED_KEYCHAIN_SERVICE}" is reserved for zks provider tokens`);
       } else {
         requireString(`${path}.service`, source.service, KEYCHAIN_ID, issues);
@@ -182,7 +186,8 @@ function validateSource(path: string, source: unknown, issues: string[]): void {
 
 function validateVariable(name: string, spec: unknown, targets: Json, issues: string[]): void {
   const path = `variables.${name}`;
-  if (!VARIABLE_NAME.test(name)) issues.push(`${path}: name must match ${VARIABLE_NAME}`);
+  if (RESERVED_VARIABLE_NAMES.includes(name.toLowerCase())) issues.push(`${path}: name is reserved`);
+  else if (!VARIABLE_NAME.test(name)) issues.push(`${path}: name must match ${VARIABLE_NAME}`);
   if (!isObject(spec)) {
     issues.push(`${path}: must be an object`);
     return;
@@ -258,7 +263,8 @@ export function planOperations(policy: Policy, selection: Selection = {}): Opera
   return ops;
 }
 
-export function describeSource(source: SourceSpec | undefined): string {
+/** Human text for a source; dotenv paths are shown resolved against cwd, as zks will read them. */
+export function describeSource(source: SourceSpec | undefined, cwd: string): string {
   if (!source) return "literal";
   switch (source.kind) {
     case "op":
@@ -270,6 +276,6 @@ export function describeSource(source: SourceSpec | undefined): string {
     case "generate":
       return `NEW random value (${source.bytes ?? 32} bytes) - rotates on every apply`;
     case "dotenv":
-      return `dotenv ${source.path}${source.key ? `#${source.key}` : ""}`;
+      return `dotenv ${resolvePath(cwd, source.path)}${source.key ? `#${source.key}` : ""}`;
   }
 }

@@ -1,6 +1,6 @@
 # zks — zero-knowledge secrets for AI agents
 
-`zks` is a macOS CLI that writes secrets and env vars to Vercel, AWS SSM Parameter Store, AWS Secrets Manager, GitHub Actions, Railway and Supabase **without the agent ever seeing a value**. The agent edits a policy file with names, targets and *sources* (1Password, Keychain, hidden dialog, generator, dotenv file). zks resolves each value itself, shows you one native approval dialog, writes straight to the provider, and records metadata only in a hash-chained audit log.
+`zks` is a macOS CLI that writes secrets and env vars to Vercel, AWS SSM Parameter Store, AWS Secrets Manager, GitHub Actions, Railway and Supabase **without the agent ever seeing a value**. The agent edits a policy file with names, targets and *sources* (1Password, Keychain, hidden dialog, generator, dotenv file). zks resolves each value itself, shows you one native approval dialog (or none, for a destination you already chose "Always allow" for), writes straight to the provider, and records metadata only in a hash-chained audit log.
 
 ## What is guaranteed, and what is not
 
@@ -8,8 +8,9 @@
 
 - Secret values never appear in zks argv, environment, stdout, stderr, temp files or the audit log. Output is JSON metadata; any echoed secret is scrubbed.
 - zks rejects secret values on the command line (`--value`, `--secret`, `--token`, `--password`) and in the policy (`value` is only allowed when `sensitive: false`). Any `source` requires `sensitive: true`, so a resolved value can never go out as a readable plain variable.
-- Nothing is written until you click **Approve** in a macOS dialog. The dialog lists every write with its real destination (Vercel project/team, AWS region/name/role/profile/KMS key, GitHub repo/environment, Railway ids, Supabase project), at most 20 writes per apply. Denial, timeout or no GUI writes nothing and is audited as `denied`.
-- zks ignores the caller's environment: the launcher runs node through `env -i` with only `HOME`, `USER`, `LOGNAME`, `LANG`, a fixed `PATH` and the agent label, and zks empties `process.env` again before loading anything else. Variables such as `AWS_ENDPOINT_URL`, `HTTPS_PROXY`, `NODE_EXTRA_CA_CERTS`, `GH_HOST` or `XDG_CONFIG_HOME` cannot redirect a write.
+- Nothing is written to a new destination until you click **Approve once** or **Always allow** in a macOS dialog. The dialog lists every write with its real destination (Vercel project/team, AWS region/name/role/profile/KMS key, GitHub repo/environment, Railway ids, Supabase project, the absolute path of a dotenv file), marks writes to a destination you have not trusted yet with `[NEW destination]`, and is never truncated: at most 20 writes, 300 characters per line and 6000 in total per apply (`too_many_operations` / `dialog_too_long` otherwise). Denial, timeout or no GUI writes nothing and is audited as `denied`. See [Trusted destinations](#trusted-destinations).
+- zks ignores the caller's environment: the launcher runs node through `env -i` with only `HOME`, `USER`, `LOGNAME`, `LANG`, a fixed `PATH` and the agent label, and zks empties `process.env` again before loading anything else. Variables such as `AWS_ENDPOINT_URL`, `HTTPS_PROXY`, `NODE_EXTRA_CA_CERTS`, `GH_HOST` or `XDG_CONFIG_HOME` cannot redirect a write, and `endpoint_url` in `~/.aws/config` is ignored.
+- GitHub writes go from zks straight to `https://api.github.com` (secrets sealed with the repository's libsodium public key). The `gh` CLI is only asked for your login token (`gh auth token --hostname github.com`), so its config (hosts, `http_unix_socket`) cannot redirect a write.
 - Provider tokens live in the macOS Keychain; AWS uses your existing SSO or profile credentials.
 
 **Honest limits**
@@ -18,7 +19,8 @@
 - An agent running as the **same macOS user** has the same file and Keychain access as you:
   - the install integrity check (`zks doctor`) is **tamper-evident, not tamper-proof**: it detects a modified install, it cannot prevent one;
   - Keychain items (provider tokens, the audit anchor) can be read with `/usr/bin/security find-generic-password -w` by any process of the same user. The skill and `~/AGENTS.md` rule forbid this; they cannot enforce it. For a hard boundary, run the agent as a dedicated macOS user;
-  - it can edit the files zks trusts after `env -i`: `~/.aws/config` (endpoints, `credential_process`), `~/.config/gh` and the Homebrew binaries on the fixed `PATH` (`/opt/homebrew/bin/gh`, `op`).
+  - it can edit the files zks trusts after `env -i`: `~/.aws/config` (`credential_process`), `~/.config/gh` (the login token zks reads) and the Homebrew binaries on the fixed `PATH` (`/opt/homebrew/bin/gh`, `op`);
+  - it can read the `trust-hmac` Keychain item and forge `~/.config/zks/trust.json`, so trusted destinations stop a confused or prompt-injected agent, not a same-user agent that attacks zks itself.
 - The agent field of the audit log (`actorAgent`) is a **self-declared label** (`--agent`, `PI_SESSION_ID`, `AI_AGENT`); zks cannot authenticate who asked.
 - The local hash chain, the Keychain anchor (`audit-head`) and the Sheet mirror make tampering with the audit log **evident, not impossible**.
 - After the write, the provider's own access rules apply. Vercel `sensitive` variables and GitHub secrets cannot be read back; SSM SecureString and Secrets Manager values can be read by any principal with decrypt/read permission; Railway variables stay readable by every member of the Railway project.
@@ -30,7 +32,7 @@
 ./install.sh                     # macOS, node >= 22.18; builds, tests and installs ~/.local/bin/zks
 zks auth set vercel              # hidden dialog; repeat for railway and supabase as needed
 aws sso login                    # AWS uses your SSO/profile credentials
-gh auth login                    # GitHub uses the gh CLI session
+gh auth login                    # GitHub: zks reads this session's token and calls the API itself
 cd my-app && zks init --project my-app
 $EDITOR zks.policy.json          # names, targets, sources — never values
 zks validate && zks plan
@@ -55,6 +57,8 @@ zks auth delete <vercel|railway|supabase|sheets-hmac>
 zks audit list [--limit N] [--project P]    Show audit records (metadata only)
 zks audit verify                            Check the audit hash chain
 zks audit sync                              Push pending audit records to Google Sheets
+zks trust list                              Show trusted destinations (writes there need no dialog)
+zks trust remove <key>                      Stop trusting a destination (no dialog needed)
 zks config show
 zks config set sheets-webhook <url>         Apps Script /exec URL for the audit mirror
 zks config unset sheets-webhook
@@ -67,13 +71,13 @@ zks --version | zks help
 | `provider` | Writes | Credentials | Required fields | Optional fields |
 |---|---|---|---|---|
 | `vercel` | project env var, type `sensitive` or `plain` | `zks auth set vercel` | `projectId`, `environments` | `teamId`, `gitBranch` |
-| `aws-ssm` | parameter `<prefix><NAME>`, `SecureString` or `String` | AWS SSO / profile, optional `roleArn` | `region`, `prefix` (`/a/b/`) | `profile`, `roleArn`, `kmsKeyId` |
-| `aws-sm` | secret `<prefix><NAME>` (new version or create) | AWS SSO / profile, optional `roleArn` | `region`, `prefix` (`a/b/`) | `profile`, `roleArn`, `kmsKeyId` |
-| `github` | Actions secret (sensitive) or variable (plain) | `gh auth login` | `repo` | `environment` |
+| `aws-ssm` | parameter `<prefix><NAME>`, `SecureString` or `String` | AWS SSO / profile, optional `roleArn` | `region`, `prefix` (`/a/b/`, at most 200 characters) | `profile`, `roleArn`, `kmsKeyId` |
+| `aws-sm` | secret `<prefix><NAME>` (new version or create) | AWS SSO / profile, optional `roleArn` | `region`, `prefix` (`a/b/`, at most 200 characters) | `profile`, `roleArn`, `kmsKeyId` |
+| `github` | Actions secret (sensitive, sealed-box encrypted) or variable (plain), through `api.github.com` | `gh auth login` (zks reads the token with `gh auth token`) | `repo` (at most 100 characters) | `environment` |
 | `railway` | service or shared variable | `zks auth set railway` | `projectId`, `environmentId` | `serviceId`, `tokenType`, `skipDeploys` |
 | `supabase` | Edge Functions secret | `zks auth set supabase` | `projectRef` (20 lowercase alphanumerics) | — |
 
-Rules: Vercel sensitive variables cannot target `development`; Supabase rejects names starting with `SUPABASE_`.
+Rules: Vercel sensitive variables cannot target `development`; Supabase rejects names starting with `SUPABASE_`. Variable names `__proto__`, `constructor` and `prototype` (any case) are reserved.
 
 ## Sources
 
@@ -89,9 +93,25 @@ Rules: Vercel sensitive variables cannot target `development`; Supabase rejects 
 Source rules:
 
 - Every `source` needs `"sensitive": true`. Only a literal `value` can be non-sensitive.
-- `keychain`: `service` and `account` match `^[A-Za-z0-9_.-]{1,128}$`; the service `zks` is reserved for zks's own tokens.
-- `dotenv`: `path` is a relative `.env*` file inside the project (for example `.env.production` or `apps/web/.env.local`): ASCII, no `..`, no absolute path.
-- `op`: `ref` is `op://` followed by printable ASCII without spaces, at most 512 characters.
+- `keychain`: `service` and `account` match `^[A-Za-z0-9_.-]{1,128}$`; the service `zks` (in any case) is reserved for zks's own tokens.
+- `dotenv`: `path` is a relative `.env*` file inside the project (for example `.env.production` or `apps/web/.env.local`): ASCII, no `..`, no absolute path, at most 200 characters. `plan` and the dialog show it resolved to an absolute path; zks reads the resolved real path it checked.
+- `op`: `ref` is `op://` followed by printable ASCII without spaces, at most 200 characters.
+
+Each command refuses options it does not use (`option --X is not valid for <command>`, exit 2).
+
+## Trusted destinations
+
+The first write to a destination opens the dialog with three buttons: **Deny** (default), **Approve once** and **Always allow**. "Always allow" trusts each `[NEW destination]` of that apply, from any project, from then on; an apply whose destinations are all trusted opens no dialog and is audited with `approval: "trusted"`.
+
+| Destination key | Trusts |
+|---|---|
+| `github:<owner>` | every repository of that GitHub owner (lower case) |
+| `vercel:<teamId>` or `vercel:personal` | every project of that Vercel team or personal account |
+| `aws:<profile or default>:<roleArn or no-role>:<region>` | SSM and Secrets Manager writes with that profile, role and region |
+| `railway:<projectId>` | that Railway project |
+| `supabase:<projectRef>` | that Supabase project |
+
+The keys live in `~/.config/zks/trust.json` (mode `600`), signed with HMAC-SHA256 by a key in the Keychain item `zks`/`trust-hmac`. A file that is unparsable or whose signature does not match trusts nothing: every write asks again and `apply` and `doctor` report `trust: "invalid"`. `zks trust list` shows the keys; `zks trust remove <key>` drops one without a dialog.
 
 ## Exit codes
 
@@ -104,7 +124,7 @@ Source rules:
 
 ## Audit
 
-Every apply appends one record per variable × target to `~/.local/state/zks/audit.db` (SQLite, append-only triggers, SHA-256 hash chain): time, human, agent, project, provider, target, environment, variable name, sensitive flag, source kind, result, provider version, error code. There is no field for a value or a hash of a value.
+Every apply appends one record per variable × target to `~/.local/state/zks/audit.db` (SQLite, append-only triggers, SHA-256 hash chain): time, human, agent, project, provider, target, environment, variable name, sensitive flag, source kind, result, provider version, error code, approval mode (`dialog` or `trusted`). There is no field for a value or a hash of a value.
 
 - `zks audit list` — read records.
 - `zks audit verify` — check the chain, and check it against the anchor (record count and last hash) that every apply stores in the Keychain item `zks`/`audit-head`; a deleted tail fails with `brokenAt: "truncated"`.

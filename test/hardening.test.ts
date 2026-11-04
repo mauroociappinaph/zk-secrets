@@ -104,12 +104,14 @@ test("S5: the approval dialog shows the real destination of every write", async 
     "Project: hismia-web",
     "Write 6 value(s):",
     "",
-    "- STRIPE_SECRET_KEY -> vercel project prj_1 team team_1 env production+preview branch main [secret; Keychain hismia/stripe] (target vercel-prod)",
-    "- STRIPE_SECRET_KEY -> aws-ssm sa-east-1 /hismia/prod/STRIPE_SECRET_KEY role arn:aws:iam::123456789012:role/w profile prod kms alias/hismia [secret; Keychain hismia/stripe] (target ssm)",
-    "- STRIPE_SECRET_KEY -> aws-sm sa-east-1 hismia/prod/STRIPE_SECRET_KEY [secret; Keychain hismia/stripe] (target sm)",
-    "- STRIPE_SECRET_KEY -> github acme/web env production secret [secret; Keychain hismia/stripe] (target gh)",
-    "- STRIPE_SECRET_KEY -> railway project p1 env e1 service s1 [secret; Keychain hismia/stripe] (target railway)",
-    "- STRIPE_SECRET_KEY -> supabase project abcdefghijklmnopqrst [secret; Keychain hismia/stripe] (target supa)",
+    "- STRIPE_SECRET_KEY -> vercel project prj_1 team team_1 env production+preview branch main [secret; Keychain hismia/stripe] (target vercel-prod) [NEW destination]",
+    "- STRIPE_SECRET_KEY -> aws-ssm sa-east-1 /hismia/prod/STRIPE_SECRET_KEY role arn:aws:iam::123456789012:role/w profile prod kms alias/hismia [secret; Keychain hismia/stripe] (target ssm) [NEW destination]",
+    "- STRIPE_SECRET_KEY -> aws-sm sa-east-1 hismia/prod/STRIPE_SECRET_KEY [secret; Keychain hismia/stripe] (target sm) [NEW destination]",
+    "- STRIPE_SECRET_KEY -> github acme/web env production secret [secret; Keychain hismia/stripe] (target gh) [NEW destination]",
+    "- STRIPE_SECRET_KEY -> railway project p1 env e1 service s1 [secret; Keychain hismia/stripe] (target railway) [NEW destination]",
+    "- STRIPE_SECRET_KEY -> supabase project abcdefghijklmnopqrst [secret; Keychain hismia/stripe] (target supa) [NEW destination]",
+    "",
+    "Always allow: trust every [NEW destination] (whole GitHub owner, Vercel team, AWS profile+role+region or project) for all projects.",
   ]);
 });
 
@@ -453,13 +455,9 @@ test("S1: the Redactor also removes the base64url form", () => {
 });
 
 test("S1: a .env symlink pointing outside the project is refused", async () => {
-  const { mkdtempSync, writeFileSync, symlinkSync } = await import("node:fs");
-  const { tmpdir } = await import("node:os");
-  const { join } = await import("node:path");
-  const { resolveValue } = await import("../src/sources/resolve.ts");
-  const { fakeExec, fakeHuman, fakeKeychain } = await import("./helpers.ts");
-  const outside = mkdtempSync(join(tmpdir(), "zks-test-out-"));
-  const project = mkdtempSync(join(tmpdir(), "zks-test-proj-"));
+  const { writeFileSync, symlinkSync } = await import("node:fs");
+  const outside = tempDir();
+  const project = tempDir();
   writeFileSync(join(outside, "credentials"), "K=outside-value\n");
   symlinkSync(join(outside, "credentials"), join(project, ".env"));
   writeFileSync(join(project, ".env.local"), "K=inside-value\n");

@@ -28,11 +28,11 @@ Human                    Agent                         zks                      
   │                       │    you to approve"          │                              │
   │                       │    zks apply --only --target│                              │
   │                       │────────────────────────────▶│                              │
-  │◀════════ native dialog: NAME -> destination … [Approve / Deny] ═════│               │
-  │═════════ Approve ══════════════════════════════════▶│                              │
+  │◀════════ native dialog: NAME -> destination … [Deny/Once/Always] ═══│               │
+  │═════════ Approve once ═════════════════════════════▶│                              │
   │                       │                             │ resolve value (op/keychain/  │
   │                       │                             │ prompt/generate/dotenv)      │
-  │                       │                             │── value over HTTPS / stdin ─▶│
+  │                       │                             │── value over HTTPS ─────────▶│
   │                       │                             │◀── version / status ─────────│
   │                       │                             │ audit append, zero buffer,   │
   │                       │                             │ mirror sync                  │
@@ -42,7 +42,8 @@ Human                    Agent                         zks                      
   │  auditId              │                             │                              │
   │◀──────────────────────│                             │                              │
 
-═══ = human-only channel the agent cannot read or drive.
+═══ = human-only channel the agent cannot read or drive. When every destination of the apply is
+already trusted ("Always allow" earlier), there is no dialog and the result says `"approval": "trusted"`.
 ```
 
 Branches:
@@ -50,7 +51,9 @@ Branches:
 - **Exit 2** (usage or policy): the agent fixes the policy or command and repeats from step 3. `too_many_operations` means more than 20 writes: split the apply with `--only` / `--target`.
 - **Exit 3** (not approved): nothing was written. The agent asks the human whether to retry; it never retries on its own.
 - **Exit 1 with `missing_token`**: the agent tells the human to run `zks auth set <vercel|railway|supabase>`; the token goes through a hidden dialog, never through chat.
-- **AWS credentials expired**: the human runs `aws sso login`. **GitHub failures**: the human runs `gh auth login`.
+- **Exit 2 with `dialog_too_long`**: a line over 300 characters or a dialog over 6000; narrow with `--only` / `--target`.
+- **AWS credentials expired**: the human runs `aws sso login`. **GitHub `missing_token`**: the human runs `gh auth login`; zks reads that session's token with `gh auth token` and calls `api.github.com` itself.
+- **`trust: "invalid"`** in the output: `~/.config/zks/trust.json` was altered or unsigned, so nothing is trusted and every write asks again. Tell the human.
 - **A secret pasted into chat**: the agent does not use it and recommends rotating it.
 
 ## Which source kind
@@ -67,4 +70,4 @@ Branches:
 
 Every row with a `source` needs `"sensitive": true`; zks rejects a source on a non-sensitive variable. Only a literal `value` can be `sensitive: false`.
 
-The approval dialog and `zks plan` show each write's real destination (`destination`), for example `github acme/shop env production secret` or `aws-ssm us-east-1 /acme-shop/prod/NAME role arn:…`. `zks config set|unset sheets-webhook` also opens an approval dialog.
+The approval dialog and `zks plan` show each write's real destination (`destination`), for example `github acme/shop env production secret` or `aws-ssm us-east-1 /acme-shop/prod/NAME role arn:…`. `zks config set|unset sheets-webhook` also opens an approval dialog. The apply dialog marks writes to destinations that are not trusted yet with `[NEW destination]` and offers **Deny**, **Approve once** and **Always allow**; `zks trust list` shows what is trusted and `zks trust remove <key>` drops a destination.

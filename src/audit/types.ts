@@ -2,6 +2,9 @@ import type { Provider, SourceKind } from "../policy/types.ts";
 
 export type AuditResult = "applied" | "denied" | "failed";
 
+/** How a write was approved: in the dialog, or without one because every destination was trusted. */
+export type ApprovalMode = "dialog" | "trusted";
+
 /** Metadata only. There is deliberately no field that could hold a value or a hash of one. */
 export interface AuditEntryInput {
   ts: string;
@@ -18,9 +21,12 @@ export interface AuditEntryInput {
   result: AuditResult;
   providerVersion: string;
   errorCode: string;
+  approval?: ApprovalMode;
 }
 
-export interface AuditRecord extends AuditEntryInput {
+export interface AuditRecord extends Omit<AuditEntryInput, "approval"> {
+  /** "" for records written before approval modes existed. */
+  approval: ApprovalMode | "";
   auditId: string;
   prevHash: string;
   hash: string;

@@ -27,20 +27,21 @@ export interface JsonResponse {
   body: unknown;
 }
 
-/** POSTs JSON and parses the response. Network errors become SinkError without details. */
-export async function postJson(
+/** Sends a JSON request (no body when body is undefined) and parses the response. Network errors become SinkError without details. */
+export async function requestJson(
   fetchFn: typeof fetch,
   provider: string,
+  method: string,
   url: string,
   headers: Record<string, string>,
-  body: unknown,
+  body?: unknown,
 ): Promise<JsonResponse> {
   let response: Response;
   try {
     response = await fetchFn(url, {
-      method: "POST",
-      headers: { "content-type": "application/json", ...headers },
-      body: JSON.stringify(body),
+      method,
+      headers: body === undefined ? headers : { "content-type": "application/json", ...headers },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch {
@@ -54,6 +55,17 @@ export async function postJson(
     parsed = null;
   }
   return { status: response.status, ok: response.ok, body: parsed };
+}
+
+/** POSTs JSON and parses the response. */
+export function postJson(
+  fetchFn: typeof fetch,
+  provider: string,
+  url: string,
+  headers: Record<string, string>,
+  body: unknown,
+): Promise<JsonResponse> {
+  return requestJson(fetchFn, provider, "POST", url, headers, body);
 }
 
 /** Provider error codes are short identifiers; anything else is dropped. */

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { openAuditStore } from "../src/audit/store.ts";
 import { run } from "../src/run.ts";
-import { CANARY, auditBytes, harness, parse } from "./helpers.ts";
+import { CANARY, GH_TOKEN, auditBytes, harness, openSealed, parse } from "./helpers.ts";
 
 const allTargetsPolicy = {
   version: 1,
@@ -40,17 +40,18 @@ test("S1: a sensitive value reaches every provider but never stdout, argv or the
     [["vercel-prod", "applied"], ["ssm", "applied"], ["sm", "applied"], ["gh", "applied"], ["railway", "applied"], ["supa", "applied"]],
   );
 
-  // Delivered to each provider through body, stdin or SDK input only.
-  assert.equal(h.fetch.calls.length, 3);
-  for (const call of h.fetch.calls) {
-    assert.ok(call.body.includes(CANARY));
-    assert.ok(!call.url.includes(CANARY));
-  }
+  // Delivered to each provider through body or SDK input only; GitHub gets a sealed box.
+  const writes = h.fetch.calls.filter((call) => call.init.method !== "GET");
+  assert.equal(writes.length, 4);
+  for (const call of h.fetch.calls) assert.ok(!call.url.includes(CANARY));
+  for (const call of writes.filter((c) => !c.url.startsWith("https://api.github.com/"))) assert.ok(call.body.includes(CANARY));
+  const github = writes.find((c) => c.url.startsWith("https://api.github.com/"))!;
+  assert.ok(!github.body.includes(CANARY));
+  assert.equal(openSealed(JSON.parse(github.body).encrypted_value), CANARY);
   assert.equal(h.aws.calls.length, 2);
   for (const call of h.aws.calls) assert.ok(JSON.stringify(call.input).includes(CANARY));
-  assert.equal(h.exec.calls.length, 1);
-  assert.equal(h.exec.calls[0]?.input, CANARY);
-  for (const call of h.exec.calls) assert.ok(!call.args.join(" ").includes(CANARY), "argv leaked the value");
+  assert.deepEqual(h.exec.calls, [{ command: "gh", args: ["auth", "token", "--hostname", "github.com"], input: "" }]);
+  assert.ok(!out.stdout.includes(GH_TOKEN), "stdout leaked the GitHub token");
 
   const bytes = await auditBytes(h.auditDb);
   assert.ok(bytes.length > 0);
@@ -86,6 +87,7 @@ test("S4: each write leaves one metadata-only audit record with project, name, a
     result: "applied",
     providerVersion: "",
     errorCode: "",
+    approval: "dialog",
     mirroredAt: "",
   });
 });
@@ -121,7 +123,7 @@ test("S5: denying the dialog writes nothing, audits denied and exits 3", async (
   assert.equal(h.aws.calls.length, 0);
   assert.equal(h.exec.calls.length, 0);
   assert.equal(h.human.approvals.length, 1);
-  assert.ok(h.human.approvals[0]!.some((l) => l === "- STRIPE_SECRET_KEY -> vercel project prj_1 team team_1 env production+preview [secret; Keychain hismia/stripe] (target vercel-prod)"));
+  assert.ok(h.human.approvals[0]!.some((l) => l === "- STRIPE_SECRET_KEY -> vercel project prj_1 team team_1 env production+preview [secret; Keychain hismia/stripe] (target vercel-prod) [NEW destination]"));
   const store = openAuditStore(h.auditDb);
   assert.deepEqual(store.list().map((r) => r.result), Array(6).fill("denied"));
   store.close();
@@ -186,7 +188,10 @@ test("S3: a non-sensitive env var with a literal value goes out as plain", async
     type: "plain",
     target: ["production", "preview"],
   });
-  assert.deepEqual(h.exec.calls[0]?.args, ["variable", "set", "NEXT_PUBLIC_SITE_URL", "--repo", "acme/web", "--env", "production"]);
+  const variable = h.fetch.calls.find((c) => c.url.startsWith("https://api.github.com/"))!;
+  assert.equal(variable.init.method, "PATCH");
+  assert.equal(variable.url, "https://api.github.com/repos/acme/web/environments/production/variables/NEXT_PUBLIC_SITE_URL");
+  assert.deepEqual(JSON.parse(variable.body), { name: "NEXT_PUBLIC_SITE_URL", value: "https://hismia.app" });
   assert.equal(h.aws.calls[0]?.input.Type, "String");
 });
 
