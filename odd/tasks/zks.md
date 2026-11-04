@@ -26,10 +26,10 @@ Repo: `mauroociappinaph/zk-secrets` (private), branches `main` and `develop`.
 - T5 [S6,S8] install script, skill, docs, AGENTS.md rule, CI — worker — eea3174 — done
 - T6 [S7] GitHub private repo, main + develop — inline — repo created; feature merge after verify
 - T7 [S1,S4,S5] verify round 1 corrections (L5, L6) — worker — 74d1ebb — done (round 2: all 7 fixed)
-- T7b [S1,S5] round 2 residuals (L11) — worker — commit: pending
-- T8 [S10] trusted destinations — worker — commit: pending
-- T9 [S11] zks capture via ego-browser — worker — commit: pending
-- T10 [S9] skill + AGENTS.md autonomy rules, docs — worker — commit: pending
+- T7b [S1,S5] round 2 residuals (L11) — worker — 23eba13 — done
+- T8 [S10] trusted destinations — worker — 23eba13 — done
+- T9 [S11] zks capture via ego-browser — worker — def689c — done (real ego e2e ok)
+- T10 [S9] skill + AGENTS.md autonomy rules, docs — worker — def689c — done
 
 ## Log
 
@@ -44,3 +44,4 @@ Repo: `mauroociappinaph/zk-secrets` (private), branches `main` and `develop`.
 - L9 (user): "La idea es q yo no haga ningun pasoi sino que hagas todo vos y que gs no me diga que tengo que hacer eso sino que lo haga siempre para todo tipo de proyecto"
 - L10 (user decisions): approval "Por destino de confianza (Recomendado)"; ego-browser logged-in sessions "Sí, autorizado" (Gmail verification and token sites).
 - L11 (verify round 2): L5 findings 1-7 fixed. New: (M1) ~/.aws/config endpoint_url redirects SSM/SM writes (fix: ignoreConfiguredEndpointUrls: true); ~/.config/gh/config.yml http_unix_socket redirects gh writes (decision: stop using gh for writes; get the token with `gh auth token` and call the GitHub REST API directly with libsodium sealed-box encryption); (M2) unbounded dialog line length; (L3) dotenv resolved against agent-chosen cwd: show absolute resolved path in dialog; (L4) realpath-then-read race: read the resolved path; (L5) reserved keychain service check case-insensitive; (L6) stale architecture.md lines 76/83; (L7) flags a command does not use are ignored; (L8) __proto__/constructor/prototype accepted as variable names.
+- L12 (evidence): 125/125 tests; reinstalled; doctor install ok, tools from tools.json (command -v paths, chosen over versioned realpaths so upgrades keep working), trust ok, audit count 6 anchored; ~/AGENTS.md block updated for autonomy. Verify round for T7b-T10 running.
