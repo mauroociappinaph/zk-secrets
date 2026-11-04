@@ -13,6 +13,9 @@ Repo: `mauroociappinaph/zk-secrets` (private), branches `main` and `develop`.
 - S6 — Works in every Gentle Shell session on its own: "Debe funcionar en todas mis sesiones de gs para que lo haga solo." Global skill at `~/.agents/skills/zks-secrets/`, installed binary at `~/.local/bin/zks`, rule in `~/AGENTS.md`.
 - S7 — Repo: "Crea el repo en maurociappinaph privado con rama main y develop".
 - S8 — Structure: architecture doc, secure scripts, step-by-step agent flow (`README.md`, `docs/`, `skill/SKILL.md`).
+- S9 — Full autonomy: "La idea es q yo no haga ningun pasoi sino que hagas todo vos y que gs no me diga que tengo que hacer eso sino que lo haga siempre para todo tipo de proyecto". The skill and global rule make the agent perform every step itself (accounts, verification mail, token generation, storage, distribution) and ask the human only for a captcha/2FA/browser-owned prompt or an approval dialog for a new destination.
+- S10 — Trusted destinations (user choice "Por destino de confianza"): the first write to a new destination asks once with "Deny / Approve once / Always allow"; after "Always allow" every later write to that destination, from any project, runs without a dialog. Destination keys: github owner, vercel team (or personal), aws profile+role+region, railway project, supabase project. Trust store HMAC-signed; `zks trust list|remove`.
+- S11 — Web token capture (user authorized ego-browser logged-in sessions): `zks capture` builds and runs its own `ego-browser nodejs` script against an agent-opened TaskSpace page; it reads a token element (optionally clicking a generate button first) or fills a generated/stored password, stores it straight into the Keychain from inside that script, blanks the element and returns only metadata. zks provider tokens (service "zks") can only be captured from pinned provider origins; replacing an existing Keychain item needs approval.
 
 ## Tasks
 
@@ -22,7 +25,11 @@ Repo: `mauroociappinaph/zk-secrets` (private), branches `main` and `develop`.
 - T4 [S1] canary tests through `run` — inline, mutation-checked (3 mutants killed) — 67ff5c4 — done
 - T5 [S6,S8] install script, skill, docs, AGENTS.md rule, CI — worker — eea3174 — done
 - T6 [S7] GitHub private repo, main + develop — inline — repo created; feature merge after verify
-- T7 [S1,S4,S5] verify round 1 corrections (L5, L6) — worker — commit: pending
+- T7 [S1,S4,S5] verify round 1 corrections (L5, L6) — worker — 74d1ebb — done (round 2: all 7 fixed)
+- T7b [S1,S5] round 2 residuals (L11) — worker — commit: pending
+- T8 [S10] trusted destinations — worker — commit: pending
+- T9 [S11] zks capture via ego-browser — worker — commit: pending
+- T10 [S9] skill + AGENTS.md autonomy rules, docs — worker — commit: pending
 
 ## Log
 
@@ -33,3 +40,7 @@ Repo: `mauroociappinaph/zk-secrets` (private), branches `main` and `develop`.
 - L5 (verify round 1, gentle-ai-verify): S1 partial, S5 partial. Findings: (1 critical) agent-controlled env (AWS_ENDPOINT_URL, PATH, GH_HOST, XDG_*, OP_CONNECT_HOST, proxies, HOME) can redirect plaintext after approval; (2 high) dialog truncates at 25 lines and never shows real destinations (repo, projectId/teamId, region/prefix/roleArn, Railway ids, Supabase ref); (3 high) a source can be marked sensitive:false and exfiltrated to a readable target (e.g. gh variable); keychain source can read zks's own tokens; dotenv path unrestricted (~/.aws/credentials); (4 medium) dotenv path / op ref can inject lines or bidi chars into the dialog; (5 medium) tail deletion undetected by verify; HOME override relocates audit; config unset disables mirror without approval; (6 medium) audit append failure after a successful write is recorded as failed; (7 low) prototype keys (__proto__, --only toString), loose SAFE_ID fields, webhook URL not validated on read, base64url missing in Redactor, ROLLBACK after failed BEGIN, unknown short flags and extra positionals silently ignored, actor label forgeable (document only), Keychain items readable by same-user `security` (document only).
 - L6 (decision): fix 1-7 in one correction round (T7). Keychain `-T ""` ACL and actor authentication stay documented residual risks (same-user agent limit).
 - L7 (evidence): T7 commit 74d1ebb (+ dotenv symlink realpath fix, RED observed then GREEN); 64/64 tests; reinstalled, doctor ok under hostile AWS_ENDPOINT_URL/HTTPS_PROXY/NODE_OPTIONS; real smoke with GH_HOST=evil.example: human approved, ZKS_SMOKE_TEST applied to github.com, audit verify ok count 2 anchored true. Re-verify round 2 running.
+- L8 (user): "Podemos probar despues la herraminta esta nueva con esto: [INDEC token: crear cuenta en https://api.indec.gob.ar/register, generar token en https://api.indec.gob.ar/account, security add-generic-password -U -s mrm-indec -a indec -w]"
+- L9 (user): "La idea es q yo no haga ningun pasoi sino que hagas todo vos y que gs no me diga que tengo que hacer eso sino que lo haga siempre para todo tipo de proyecto"
+- L10 (user decisions): approval "Por destino de confianza (Recomendado)"; ego-browser logged-in sessions "Sí, autorizado" (Gmail verification and token sites).
+- L11 (verify round 2): L5 findings 1-7 fixed. New: (M1) ~/.aws/config endpoint_url redirects SSM/SM writes (fix: ignoreConfiguredEndpointUrls: true); ~/.config/gh/config.yml http_unix_socket redirects gh writes (decision: stop using gh for writes; get the token with `gh auth token` and call the GitHub REST API directly with libsodium sealed-box encryption); (M2) unbounded dialog line length; (L3) dotenv resolved against agent-chosen cwd: show absolute resolved path in dialog; (L4) realpath-then-read race: read the resolved path; (L5) reserved keychain service check case-insensitive; (L6) stale architecture.md lines 76/83; (L7) flags a command does not use are ignored; (L8) __proto__/constructor/prototype accepted as variable names.
