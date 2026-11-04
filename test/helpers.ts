@@ -80,13 +80,19 @@ export function fakeExec(handler: (call: ExecCall) => Partial<ExecResult> = () =
 
 export function fakeKeychain(items: Record<string, string> = {}) {
   const store = new Map(Object.entries(items));
+  // Pre-seeded items count as created long ago; set() stamps the current time.
+  const modified = new Map<string, Date>([...store.keys()].map((k) => [k, new Date(0)]));
   const keychain: Keychain = {
+    async modifiedAt(service, account) {
+      return store.has(`${service}/${account}`) ? (modified.get(`${service}/${account}`) ?? null) : null;
+    },
     async get(service, account) {
       const v = store.get(`${service}/${account}`);
       return v === undefined ? null : SecretBuffer.fromString(v);
     },
     async set(service, account, value) {
       store.set(`${service}/${account}`, value.reveal());
+      modified.set(`${service}/${account}`, new Date());
     },
     async remove(service, account) {
       return store.delete(`${service}/${account}`);
@@ -95,7 +101,7 @@ export function fakeKeychain(items: Record<string, string> = {}) {
       return store.has(`${service}/${account}`);
     },
   };
-  return { keychain, store };
+  return { keychain, store, modified };
 }
 
 export interface FetchCall {

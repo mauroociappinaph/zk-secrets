@@ -102,3 +102,13 @@ test("findDotenvValue handles quotes, comments and missing keys", () => {
   assert.equal(findDotenvValue(text, "C"), "x\ny");
   assert.equal(findDotenvValue(text, "D"), null);
 });
+
+test("keychain modifiedAt parses mdat from attributes only", async () => {
+  const { parseKeychainDate } = await import("../src/platform/keychain.ts");
+  const attrs = '    "mdat"<timedate>=0x32303236313130343137353330325A00  "20261104175302Z\\000"\n';
+  assert.equal(parseKeychainDate(attrs)?.toISOString(), "2026-11-04T17:53:02.000Z");
+  assert.equal(parseKeychainDate("no dates here"), null);
+  const f = fakeExec(() => ({ stdout: Buffer.from(attrs) }));
+  assert.equal((await createKeychain(f.exec).modifiedAt("svc", "acct"))?.toISOString(), "2026-11-04T17:53:02.000Z");
+  assert.deepEqual(f.calls[0]?.args, ["find-generic-password", "-s", "svc", "-a", "acct"]);
+});

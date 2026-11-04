@@ -816,10 +816,19 @@ async function capture(deps: Deps, sub: string | undefined, flags: Map<string, s
     if (req.sourceKind === "capture-from") {
       if (!(await deps.keychain.has(req.service, req.account))) return await finish("failed", { code: "not_found" });
       // Silent only into the origin the item was last captured or generated from.
-      const recorded = audit.lastCaptureOrigin(store);
-      if (recorded !== req.origin) {
+      // ...and only while the item is unchanged since that capture (a later replacement
+      // outside zks could be any secret).
+      const recorded = audit.lastCapture(store);
+      const modified = await deps.keychain.modifiedAt(req.service, req.account);
+      const unchanged = recorded !== null && modified !== null && modified.getTime() <= Date.parse(recorded.ts);
+      if (recorded === null || recorded.origin !== req.origin || !unchanged) {
         approval = "dialog";
-        const lines = [`Fill ${store} into ${req.origin}?`, `It was captured from ${recorded || "unknown"}.`];
+        const from = recorded?.origin || "unknown";
+        const changed = recorded !== null && recorded.origin === req.origin && !unchanged;
+        const lines = [
+          `Fill ${store} into ${req.origin}?`,
+          changed ? `It was captured from ${from}, but the item changed after that capture.` : `It was captured from ${from}.`,
+        ];
         if (!(await deps.human.approve("zks: fill a stored secret", lines))) {
           return await finish("denied", { code: "not_approved", message: "filling the stored item into this origin was not approved" });
         }

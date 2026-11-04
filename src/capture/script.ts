@@ -123,24 +123,49 @@ async function readValue(page) {
   return { ok: true, length };
 }
 
-/** Runs in the page's main frame: one password input, same origin, native setter, then input/change. */
-function setPassword({ selector, expected, value }) {
+/** Runs in the page's main frame without the secret: one password input, same origin, cleared and focused. */
+function preparePassword({ selector, expected }) {
   if (expected === null || document.location.origin !== expected) return { ok: false, code: "origin_mismatch" };
   const nodes = document.querySelectorAll(selector);
   if (nodes.length !== 1) return { ok: false, code: "not_password_field" };
   const node = nodes[0];
   if (!(node instanceof HTMLInputElement) || node.type !== "password") return { ok: false, code: "not_password_field" };
-  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(node, value);
-  node.dispatchEvent(new Event("input", { bubbles: true }));
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(node, "");
+  node.focus();
+  return document.activeElement === node ? { ok: true } : { ok: false, code: "not_password_field" };
+}
+
+/** Runs after typing, again without the secret: same origin, same focused password input, expected length. */
+function confirmPassword({ selector, expected, length }) {
+  if (document.location.origin !== expected) return { ok: false, code: "origin_mismatch" };
+  const nodes = document.querySelectorAll(selector);
+  const node = nodes.length === 1 ? nodes[0] : null;
+  if (!(node instanceof HTMLInputElement) || node.type !== "password" || document.activeElement !== node) {
+    return { ok: false, code: "browser_failed" };
+  }
+  if (node.value.length !== length) return { ok: false, code: "browser_failed" };
   node.dispatchEvent(new Event("change", { bubbles: true }));
-  return { ok: true, length: value.length };
+  return { ok: true };
 }
 
 const FILL_CODES = ["origin_mismatch", "not_password_field"];
 
+/** Only the shape zks expects leaves the page; anything else is browser_failed. */
+function pageResult(r) {
+  if (r !== null && typeof r === "object" && r.ok === true) return { ok: true };
+  if (r !== null && typeof r === "object" && r.ok === false && FILL_CODES.includes(r.code)) return { ok: false, code: r.code };
+  return { ok: false, code: "browser_failed" };
+}
+
+// The secret never enters page JavaScript as an evaluate argument: it is typed through the
+// browser's input pipeline into the input that a secret-free evaluate focused, and the origin
+// is checked again right before the Keychain read and right before typing.
 async function fill(page) {
   if (!(await originMatches(page))) return { ok: false, code: "origin_mismatch" };
   if (!(await waitForElement(page))) return { ok: false, code: "not_found" };
+  const prepared = pageResult(await page.evaluate(preparePassword, { selector: spec.selector, expected: spec.origin }));
+  if (!prepared.ok) return prepared;
+  if (!(await originMatches(page))) return { ok: false, code: "origin_mismatch" };
   const found = spawnSync(SECURITY, ["find-generic-password", "-s", spec.service, "-a", spec.account, "-w"], { timeout: 15000 });
   if (found.status === 44) return { ok: false, code: "not_found" };
   if (found.status !== 0 || !found.stdout) return { ok: false, code: "keychain_failed" };
@@ -150,18 +175,14 @@ async function fill(page) {
   bytes.fill(0);
   if (value.length === 0) return { ok: false, code: "not_found" };
   const length = value.length;
-  let filled;
   try {
-    filled = await page.evaluate(setPassword, { selector: spec.selector, expected: spec.origin, value });
+    if (!(await originMatches(page))) return { ok: false, code: "origin_mismatch" };
+    await page.keyboard.insertText(value);
   } finally {
     value = null;
   }
-  // Only the shape zks expects leaves this function; the length is zks's own, not the page's.
-  if (filled !== null && typeof filled === "object" && filled.ok === true) return { ok: true, length };
-  if (filled !== null && typeof filled === "object" && filled.ok === false && FILL_CODES.includes(filled.code)) {
-    return { ok: false, code: filled.code };
-  }
-  return { ok: false, code: "browser_failed" };
+  const confirmed = pageResult(await page.evaluate(confirmPassword, { selector: spec.selector, expected: spec.origin, length }));
+  return confirmed.ok ? { ok: true, length } : confirmed;
 }
 
 let result;

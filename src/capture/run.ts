@@ -1,7 +1,9 @@
 import type { Exec } from "../platform/exec.ts";
 import { buildCaptureScript, parseCaptureOutput, type CaptureOutcome, type CaptureScriptSpec } from "./script.ts";
 
-export const CAPTURE_TIMEOUT_MS = 60_000;
+// Longer than every wait inside the script (click, selector, value poll, Keychain), so the
+// script's own cleanup (about:blank after a reveal) runs before zks gives up on it.
+export const CAPTURE_TIMEOUT_MS = 120_000;
 
 /**
  * Pipes zks's own script to `ego-browser nodejs` (absolute path, no shell, fixed env) and reads

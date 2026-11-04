@@ -65,6 +65,9 @@ const MISSING_SECURITY = "/nonexistent/zks-test/security";
 class FakeElement {
   textContent = "";
   events: Array<{ type: string; bubbles: boolean }> = [];
+  focus() {
+    (globalThis as Record<string, unknown>).__zksFocused = this;
+  }
   dispatchEvent(event: Event) {
     this.events.push({ type: event.type, bubbles: event.bubbles });
     return true;
@@ -97,7 +100,19 @@ class FakeTextArea extends FakeElement {
 /** A fake page whose evaluate runs the real in-page function against a fake document. */
 function domPage(options: { nodes: FakeElement[]; origin?: string; url?: () => string; over?: Record<string, unknown> }) {
   const calls: string[] = [];
+  const evaluateArgs: unknown[] = [];
+  (globalThis as Record<string, unknown>).__zksFocused = undefined;
   const page: Record<string, unknown> = {
+    keyboard: {
+      insertText: async (text: string) => {
+        calls.push("insertText");
+        const target = (globalThis as Record<string, unknown>).__zksFocused;
+        if (target instanceof FakeInput) {
+          nativeValue.set!.call(target, target.value + text);
+          target.events.push({ type: "input", bubbles: true });
+        }
+      },
+    },
     url: async () => (options.url ? options.url() : ORIGIN),
     waitForSelector: async () => void calls.push("wait"),
     click: async () => void calls.push("click"),
@@ -105,9 +120,16 @@ function domPage(options: { nodes: FakeElement[]; origin?: string; url?: () => s
     goto: async (url: string) => void calls.push(`goto:${url}`),
     evaluate: async (fn: (arg: unknown) => unknown, arg: unknown) => {
       calls.push("evaluate");
+      evaluateArgs.push(arg);
       const g = globalThis as Record<string, unknown>;
       const saved = { document: g.document, HTMLInputElement: g.HTMLInputElement, HTMLTextAreaElement: g.HTMLTextAreaElement };
-      g.document = { location: { origin: options.origin ?? ORIGIN }, querySelectorAll: () => options.nodes };
+      g.document = {
+        location: { origin: options.origin ?? ORIGIN },
+        querySelectorAll: () => options.nodes,
+        get activeElement() {
+          return g.__zksFocused;
+        },
+      };
       g.HTMLInputElement = FakeInput;
       g.HTMLTextAreaElement = FakeTextArea;
       try {
@@ -118,7 +140,7 @@ function domPage(options: { nodes: FakeElement[]; origin?: string; url?: () => s
     },
     ...options.over,
   };
-  return { page, calls };
+  return { page, calls, evaluateArgs };
 }
 
 /** Runs a generated script against a fake ego API and returns what it printed and what the page saw. */
@@ -203,7 +225,7 @@ test("S1: a fill script never contains the value it fills; it reads the Keychain
   const script = buildCaptureScript(spec({ mode: "fill", click: null, service: "app", account: "password" }));
   assert.ok(script.includes('"find-generic-password"'));
   assert.ok(!script.includes("page.fill"), "page.fill can reach cross-origin frames");
-  assert.ok(script.includes('Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call('));
+  assert.ok(script.includes("page.keyboard.insertText("));
   assert.ok(!script.includes(CANARY));
 });
 
@@ -218,9 +240,37 @@ test("S11: fill sets one password input with the native setter and input/change 
   const { printed } = await runScript(buildCaptureScript(fillSpec(), fakeSecurity()), page);
   assert.deepEqual(printed, [`ZKS_RESULT {"ok":true,"length":${CANARY.length}}`]);
   assert.equal(input.value, CANARY);
-  assert.equal(input.nativeSets, 1);
+  assert.equal(input.nativeSets, 1, "only the clear goes through the setter");
   assert.deepEqual(input.events, [{ type: "input", bubbles: true }, { type: "change", bubbles: true }]);
-  assert.deepEqual(calls, ["wait", "evaluate"]);
+  assert.deepEqual(calls, ["wait", "evaluate", "insertText", "evaluate"]);
+});
+
+test("S1 (N1): the secret is typed through the keyboard and never passed into the page's JavaScript", async () => {
+  const input = Object.assign(new FakeInput(), { type: "password" });
+  const { page, evaluateArgs } = domPage({ nodes: [input] });
+  const { printed } = await runScript(buildCaptureScript(fillSpec(), fakeSecurity()), page);
+  assert.deepEqual(printed, [`ZKS_RESULT {"ok":true,"length":${CANARY.length}}`]);
+  assert.equal(evaluateArgs.length, 2);
+  assert.ok(!JSON.stringify(evaluateArgs).includes(CANARY), "evaluate received the secret");
+});
+
+test("S1 (N1): if the page leaves the origin before the Keychain read, the secret is never read", async () => {
+  const input = Object.assign(new FakeInput(), { type: "password" });
+  const urls = [ORIGIN, "https://evil.example"];
+  const { page, calls } = domPage({ nodes: [input], url: () => urls.shift() ?? "https://evil.example" });
+  const { printed } = await runScript(buildCaptureScript(fillSpec(), MISSING_SECURITY), page);
+  assert.deepEqual(printed, ['ZKS_RESULT {"ok":false,"code":"origin_mismatch"}']);
+  assert.ok(!calls.includes("insertText"));
+});
+
+test("S1 (N1): if the page leaves the origin after the Keychain read, nothing is typed", async () => {
+  const input = Object.assign(new FakeInput(), { type: "password" });
+  const urls = [ORIGIN, ORIGIN, "https://evil.example"];
+  const { page, calls } = domPage({ nodes: [input], url: () => urls.shift() ?? "https://evil.example" });
+  const { printed } = await runScript(buildCaptureScript(fillSpec(), fakeSecurity()), page);
+  assert.deepEqual(printed, ['ZKS_RESULT {"ok":false,"code":"origin_mismatch"}']);
+  assert.ok(!calls.includes("insertText"));
+  assert.equal(input.value, "");
 });
 
 test("S11: fill refuses a textarea, a text input or several matches with not_password_field and sets nothing", async () => {
@@ -792,4 +842,24 @@ test("S11: help lists both capture forms", () => {
   assert.ok(HELP_TEXT.includes("zks capture fill --space ID --page LABEL --selector CSS"));
   assert.ok(HELP_TEXT.includes("| --from SERVICE/ACCOUNT) --origin ORIGIN"));
   assert.ok(!HELP_TEXT.includes("--from SERVICE/ACCOUNT) [--origin ORIGIN]"));
+});
+
+test("S1 (N2): fill --from asks again when the Keychain item changed after its recorded capture", async () => {
+  const h = harness({ exec: OK(14), keychain: { "app/password": "stored" }, approve: false });
+  capturedFrom(h, ORIGIN);
+  h.keychain.modified.set("app/password", new Date("2026-11-04T11:30:00.000Z"));
+  const out = await run(FROM, h.deps);
+  assert.equal(out.exitCode, 3, out.stdout);
+  assert.deepEqual(h.human.approvals, [[`Fill app/password into ${ORIGIN}?`, `It was captured from ${ORIGIN}, but the item changed after that capture.`]]);
+  assert.equal(egoCalls(h).length, 0);
+
+  const unknown = harness({ exec: OK(14), keychain: { "app/password": "stored" }, approve: false });
+  capturedFrom(unknown, ORIGIN);
+  unknown.keychain.modified.delete("app/password");
+  assert.equal((await run(FROM, unknown.deps)).exitCode, 3);
+});
+
+test("S11 (N3): the capture process timeout covers every wait inside the script", async () => {
+  const { CAPTURE_TIMEOUT_MS } = await import("../src/capture/run.ts");
+  assert.ok(CAPTURE_TIMEOUT_MS >= 120_000);
 });

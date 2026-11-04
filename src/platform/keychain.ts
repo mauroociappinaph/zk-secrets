@@ -8,6 +8,8 @@ export interface Keychain {
   set(service: string, account: string, value: SecretBuffer): Promise<void>;
   remove(service: string, account: string): Promise<boolean>;
   has(service: string, account: string): Promise<boolean>;
+  /** Last modification time from the item's attributes (never its value); null when missing. */
+  modifiedAt(service: string, account: string): Promise<Date | null>;
 }
 
 const KEYCHAIN_ITEM_NOT_FOUND = 44;
@@ -52,5 +54,18 @@ export function createKeychain(exec: Exec): Keychain {
       const res = await exec("/usr/bin/security", ["find-generic-password", "-s", service, "-a", account]);
       return res.code === 0;
     },
+    async modifiedAt(service, account) {
+      // Without -w, security prints only attributes; "mdat" looks like "20261104175302Z\000".
+      const res = await exec("/usr/bin/security", ["find-generic-password", "-s", service, "-a", account]);
+      if (res.code !== 0) return null;
+      return parseKeychainDate(res.stdout.toString("utf8"));
+    },
   };
+}
+
+export function parseKeychainDate(attributes: string): Date | null {
+  const m = /"mdat"<timedate>=\S+\s+"(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})Z/.exec(attributes);
+  if (!m) return null;
+  const [, y, mo, d, h, mi, s] = m;
+  return new Date(Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s)));
 }

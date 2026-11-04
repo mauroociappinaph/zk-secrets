@@ -60,6 +60,8 @@ export interface AuditStore {
    * item "<service>/<account>"; "" when it was read without --origin, null when there is none.
    */
   lastCaptureOrigin(target: string): string | null;
+  /** Origin and time of the last applied capture-read/capture-generate of target. */
+  lastCapture(target: string): { origin: string; ts: string } | null;
   pendingMirror(limit: number): AuditRecord[];
   markMirrored(auditIds: string[], ts: string): void;
   close(): void;
