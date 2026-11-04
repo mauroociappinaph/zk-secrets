@@ -22,6 +22,7 @@ Repo: `mauroociappinaph/zk-secrets` (private), branches `main` and `develop`.
 - T4 [S1] canary tests through `run` — inline, mutation-checked (3 mutants killed) — 67ff5c4 — done
 - T5 [S6,S8] install script, skill, docs, AGENTS.md rule, CI — worker — eea3174 — done
 - T6 [S7] GitHub private repo, main + develop — inline — repo created; feature merge after verify
+- T7 [S1,S4,S5] verify round 1 corrections (L5, L6) — worker — commit: pending
 
 ## Log
 
@@ -29,3 +30,5 @@ Repo: `mauroociappinaph/zk-secrets` (private), branches `main` and `develop`.
 - L2 (user): "Decid todo vos. Debe funcionar en todas mis sesiones de gs para que lo haga solo. Debe incluir todas las plataformas incluyendo variables de entorno , etc . Crea el repo en maurociappinaph privado con rama main y develop"
 - L3 (decision): GitHub account is `mauroociappinaph` (active gh login); repo `zk-secrets`. Node 22 + TypeScript, node:test, node:sqlite (no native deps). Branch flow: work on `feature/zks-core`, merge to `develop`, fast-forward `main` for v0.1.0.
 - L4 (evidence): 40/40 tests + typecheck; install.sh ran, `zks doctor` install.status ok; real Keychain round-trip ok; repo mauroociappinaph/zk-secrets PRIVATE with main+develop; real smoke: human approved dialog, `ZKS_SMOKE_TEST` (generate) applied to GitHub Actions, audit result applied.
+- L5 (verify round 1, gentle-ai-verify): S1 partial, S5 partial. Findings: (1 critical) agent-controlled env (AWS_ENDPOINT_URL, PATH, GH_HOST, XDG_*, OP_CONNECT_HOST, proxies, HOME) can redirect plaintext after approval; (2 high) dialog truncates at 25 lines and never shows real destinations (repo, projectId/teamId, region/prefix/roleArn, Railway ids, Supabase ref); (3 high) a source can be marked sensitive:false and exfiltrated to a readable target (e.g. gh variable); keychain source can read zks's own tokens; dotenv path unrestricted (~/.aws/credentials); (4 medium) dotenv path / op ref can inject lines or bidi chars into the dialog; (5 medium) tail deletion undetected by verify; HOME override relocates audit; config unset disables mirror without approval; (6 medium) audit append failure after a successful write is recorded as failed; (7 low) prototype keys (__proto__, --only toString), loose SAFE_ID fields, webhook URL not validated on read, base64url missing in Redactor, ROLLBACK after failed BEGIN, unknown short flags and extra positionals silently ignored, actor label forgeable (document only), Keychain items readable by same-user `security` (document only).
+- L6 (decision): fix 1-7 in one correction round (T7). Keychain `-T ""` ACL and actor authentication stay documented residual risks (same-user agent limit).
