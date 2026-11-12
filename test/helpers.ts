@@ -25,7 +25,7 @@ export const GITHUB_PUBLIC_KEY = sodium.to_base64(GITHUB_KEYPAIR.publicKey, sodi
 export const GH_TOKEN = "gho_testtoken123";
 
 /** Absolute tool paths the harness resolves, as install.sh writes them to tools.json. */
-export const TEST_TOOLS: ToolPaths = { egoBrowser: "/test/bin/ego-browser", gh: "/test/bin/gh", op: "/test/bin/op" };
+export const TEST_TOOLS: ToolPaths = { egoBrowser: "/test/bin/ego-browser", gh: "/test/bin/gh", op: "/test/bin/op", docker: "/test/bin/docker" };
 
 /** Opens a GitHub sealed box with the test keypair. */
 export function openSealed(encryptedValue: string): string {

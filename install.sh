@@ -1,7 +1,7 @@
 #!/bin/sh
 # Installs zks for the current macOS user:
 #   ~/.local/libexec/zks/<version>/   read-only app (dist, bin, production node_modules, sbom.cdx.json) and
-#                                     tools.json: absolute paths of ego-browser, gh and op
+#                                     tools.json: absolute paths of ego-browser, gh, op and docker
 #   ~/.local/bin/zks                  launcher with node, home and install path baked in; runs
 #                                     node through `env -i` with a fixed PATH
 #   ~/.config/zks/integrity.json      digest of the install, checked by `zks doctor`
@@ -191,8 +191,13 @@ fi
 printf '==> Recording tool paths %s/tools.json\n' "$DEST"
 # Each entry also pins the sha256 of the binary (symlinks followed): zks refuses to run a tool
 # whose binary changed since install and `zks doctor` reports it as "changed".
+# With a second argument the tool is looked up on that search path only (docker: SAFE_PATH).
 tool_path() {
-  found="$(command -v "$1" 2>/dev/null)" || found=""
+  if [ -n "${2:-}" ]; then
+    found="$(PATH="$2" && command -v "$1" 2>/dev/null)" || found=""
+  else
+    found="$(command -v "$1" 2>/dev/null)" || found=""
+  fi
   case "$found" in
     /*)
       sum="$(shasum -a 256 <"$found" 2>/dev/null | cut -d ' ' -f 1)" || sum=""
@@ -205,9 +210,10 @@ tool_path() {
 EGO_PATH="$(tool_path ego-browser)"
 GH_PATH="$(tool_path gh)"
 OP_PATH="$(tool_path op)"
-printf '{\n  "ego-browser": %s,\n  "gh": %s,\n  "op": %s\n}\n' "$EGO_PATH" "$GH_PATH" "$OP_PATH" >"$DEST/tools.json"
+DOCKER_PATH="$(tool_path docker "$SAFE_PATH")"
+printf '{\n  "ego-browser": %s,\n  "gh": %s,\n  "op": %s,\n  "docker": %s\n}\n' "$EGO_PATH" "$GH_PATH" "$OP_PATH" "$DOCKER_PATH" >"$DEST/tools.json"
 chmod 444 "$DEST/tools.json"
-printf '    ego-browser: %s\n    gh: %s\n    op: %s\n' "$EGO_PATH" "$GH_PATH" "$OP_PATH"
+printf '    ego-browser: %s\n    gh: %s\n    op: %s\n    docker: %s\n' "$EGO_PATH" "$GH_PATH" "$OP_PATH" "$DOCKER_PATH"
 
 if [ "$MODE" = system ]; then
   chown -R root:wheel "$DEST"

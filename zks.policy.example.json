@@ -7,14 +7,18 @@
     "sm-prod": { "provider": "aws-sm", "region": "us-east-1", "prefix": "acme-shop/prod/", "profile": "acme-prod" },
     "github-prod": { "provider": "github", "repo": "acme/shop", "environment": "production" },
     "railway-prod": { "provider": "railway", "projectId": "REPLACE-ME", "environmentId": "REPLACE-ME", "serviceId": "REPLACE-ME", "tokenType": "project" },
-    "supabase-prod": { "provider": "supabase", "projectRef": "abcdefghijklmnopqrst" }
+    "supabase-prod": { "provider": "supabase", "projectRef": "abcdefghijklmnopqrst" },
+    "netlify-prod": { "provider": "netlify", "accountId": "acme-team", "siteId": "REPLACE-ME", "context": "production" },
+    "swarm-prod": { "provider": "docker-swarm", "context": "prod-swarm", "replace": true },
+    "compose-local": { "provider": "compose", "dir": "./run/compose-secrets" },
+    "dotenv-local": { "provider": "dotenv", "path": ".env.local" }
   },
   "variables": {
     "STRIPE_SECRET_KEY": {
       "sensitive": true,
       "description": "Stripe live secret key, kept in 1Password",
       "source": { "kind": "op", "ref": "op://Production/Stripe/secret_key" },
-      "targets": ["vercel-prod", "ssm-prod", "sm-prod", "github-prod", "railway-prod", "supabase-prod"]
+      "targets": ["vercel-prod", "ssm-prod", "sm-prod", "github-prod", "railway-prod", "supabase-prod", "netlify-prod"]
     },
     "DB_USER": {
       "sensitive": false,
@@ -31,13 +35,13 @@
       "sensitive": true,
       "description": "Built in memory from DB_USER, DB_PASSWORD and the host",
       "source": { "kind": "template", "template": "postgres://${DB_USER}:${DB_PASSWORD:url}@db.acme.internal:5432/shop" },
-      "targets": ["vercel-prod", "ssm-prod"]
+      "targets": ["vercel-prod", "ssm-prod", "dotenv-local"]
     },
     "JWT_SIGNING_KEY": {
       "sensitive": true,
       "description": "Ed25519 private key for signing tokens",
       "source": { "kind": "generate", "format": "ed25519-private-key" },
-      "targets": ["ssm-prod"]
+      "targets": ["ssm-prod", "swarm-prod", "compose-local"]
     },
     "JWT_PUBLIC_KEY": {
       "sensitive": false,

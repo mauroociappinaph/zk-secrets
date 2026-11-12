@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import type { Operation } from "./types.ts";
 
 /** Where a write really goes, with every identifier the provider uses; shown in the approval dialog. */
@@ -22,6 +23,14 @@ export function describeDestination(op: Operation): string {
       return `railway project ${target.projectId} env ${target.environmentId}${target.serviceId ? ` service ${target.serviceId}` : ""}`;
     case "supabase":
       return `supabase project ${target.projectRef}`;
+    case "netlify":
+      return `netlify account ${target.accountId}${target.siteId ? ` site ${target.siteId}` : ""} context ${target.context}`;
+    case "docker-swarm":
+      return `docker-swarm secret ${op.name} context ${target.context ?? "current"}${target.replace === true ? " (replace)" : ""}`;
+    case "compose":
+      return `compose file ${join(target.dir, op.name)}`;
+    case "dotenv":
+      return `dotenv file ${target.path}`;
   }
 }
 
@@ -40,6 +49,14 @@ export function describeEffect(op: Operation): string {
       return "consumers read it on their next fetch";
     case "supabase":
       return "Edge Functions use it on their next invocation";
+    case "netlify":
+      return "applies on the next Netlify build or deploy";
+    case "docker-swarm":
+      return "update services to use the new secret";
+    case "compose":
+      return "restart the Compose stack to use it";
+    case "dotenv":
+      return "restart processes that read the file";
   }
 }
 

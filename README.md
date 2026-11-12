@@ -1,19 +1,19 @@
 # zks — zero-knowledge secrets for AI agents
 
-`zks` is a macOS CLI that writes secrets and env vars to Vercel, AWS SSM Parameter Store, AWS Secrets Manager, GitHub Actions, Railway and Supabase **without the agent ever seeing a value**. The agent edits a policy file with names, targets and *sources* (1Password, Keychain, hidden dialog, generator, dotenv file). zks resolves each value itself, shows you one native approval dialog (or none, for a destination you already chose "Always allow" for), writes straight to the provider, and records metadata only in a hash-chained audit log. With `zks capture`, the agent also obtains web-issued tokens and API keys itself in ego-browser without seeing them: zks's own browser script moves the value between the page and the Keychain.
+`zks` is a macOS CLI that writes secrets and env vars to Vercel, AWS SSM Parameter Store, AWS Secrets Manager, GitHub Actions, Railway, Supabase, Netlify, Docker Swarm, Compose secret files and local `.env` files **without the agent ever seeing a value**. The agent edits a policy file with names, targets and *sources* (1Password, Keychain, hidden dialog, generator, dotenv file). zks resolves each value itself, shows you one native approval dialog (or none, for a destination you already chose "Always allow" for), writes straight to the provider, and records metadata only in a hash-chained audit log. With `zks capture`, the agent also obtains web-issued tokens and API keys itself in ego-browser without seeing them: zks's own browser script moves the value between the page and the Keychain.
 
 ## What is guaranteed, and what is not
 
 **Guaranteed by design**
 
-- Secret values never appear in zks argv, environment, stdout, stderr, temp files or the audit log. Output is JSON metadata; any echoed secret is scrubbed.
+- Secret values never appear in zks argv, environment, stdout, stderr, temp files or the audit log. Output is JSON metadata; any echoed secret is scrubbed. File destinations (`compose`, `dotenv`) are written through a mode-600 file in the destination directory that is renamed into place: that file is the destination, and it is removed if the write fails.
 - zks rejects secret values on the command line (`--value`, `--secret`, `--token`, `--password`) and in the policy (`value` is only allowed when `sensitive: false`). Any `source` requires `sensitive: true`, so a resolved value can never go out as a readable plain variable.
-- Nothing is written to a new destination until you click **Approve once** or **Always allow** in a macOS dialog. The dialog lists every write with its real destination (Vercel project/team, AWS region/name/role/profile/KMS key, GitHub repo/environment, Railway ids, Supabase project, the absolute path of a dotenv file), marks writes to a destination you have not trusted yet with `[NEW destination]`, and is never truncated: at most 20 writes, 300 characters per line and 6000 in total per apply (`too_many_operations` / `dialog_too_long` otherwise). Denial, timeout or no GUI writes nothing and is audited as `denied`. See [Trusted destinations](#trusted-destinations).
+- Nothing is written to a new destination until you click **Approve once** or **Always allow** in a macOS dialog. The dialog lists every write with its real destination (Vercel project/team, AWS region/name/role/profile/KMS key, GitHub repo/environment, Railway ids, Supabase project, Netlify account/site/context, docker context and secret name, the absolute path of a Compose secret file, the absolute path of a dotenv file), marks writes to a destination you have not trusted yet with `[NEW destination]`, and is never truncated: at most 20 writes, 300 characters per line and 6000 in total per apply (`too_many_operations` / `dialog_too_long` otherwise). Denial, timeout or no GUI writes nothing and is audited as `denied`. See [Trusted destinations](#trusted-destinations).
 - zks ignores the caller's environment: the launcher runs node through `env -i` with only `HOME`, `USER`, `LOGNAME`, `LANG`, a fixed `PATH` and the agent label, and zks empties `process.env` again before loading anything else. Variables such as `AWS_ENDPOINT_URL`, `HTTPS_PROXY`, `NODE_EXTRA_CA_CERTS`, `GH_HOST` or `XDG_CONFIG_HOME` cannot redirect a write, and `endpoint_url` in `~/.aws/config` is ignored.
 - GitHub writes go from zks straight to `https://api.github.com` (secrets sealed with the repository's libsodium public key). The `gh` CLI is only asked for your login token (`gh auth token --hostname github.com`), so its config (hosts, `http_unix_socket`) cannot redirect a write.
 - Provider tokens live in the macOS Keychain; AWS uses your existing SSO or profile credentials.
-- `zks capture` reads a token from a web page (or fills a password into one) inside a script zks builds and pipes to `ego-browser nodejs`; the value goes straight between the page and `/usr/bin/security`, and zks prints only its length. zks provider tokens (`zks/vercel`, `zks/railway`, `zks/supabase`, `zks/sheets-hmac`) are only captured from their pinned provider origin. See [Web token capture](#web-token-capture).
-- zks never looks `ego-browser`, `gh` or `op` up on `PATH`: `install.sh` records their real paths and the sha256 of each binary in the read-only install (`tools.json`, covered by the integrity digest). zks runs a tool only while its binary still has that hash; a changed binary is refused with a stderr warning (`zks: gh changed since install (sha256 mismatch); rerun ./install.sh to pin the new binary`), the command reports the tool unavailable, and `zks doctor` shows `tools.pins.<tool>: "changed"`.
+- `zks capture` reads a token from a web page (or fills a password into one) inside a script zks builds and pipes to `ego-browser nodejs`; the value goes straight between the page and `/usr/bin/security`, and zks prints only its length. zks provider tokens (`zks/vercel`, `zks/railway`, `zks/supabase`, `zks/netlify`, `zks/sheets-hmac`) are only captured from their pinned provider origin. See [Web token capture](#web-token-capture).
+- zks never looks `ego-browser`, `gh`, `op` or `docker` up on `PATH`: `install.sh` records `docker` only when it finds it on the fixed system path (`/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`) and records their real paths and the sha256 of each binary in the read-only install (`tools.json`, covered by the integrity digest). zks runs a tool only while its binary still has that hash; a changed binary is refused with a stderr warning (`zks: gh changed since install (sha256 mismatch); rerun ./install.sh to pin the new binary`), the command reports the tool unavailable, and `zks doctor` shows `tools.pins.<tool>: "changed"`.
 
 **Honest limits**
 
@@ -27,9 +27,9 @@
 - The local hash chain, the Keychain anchor (`audit-head`) and the Sheet mirror make tampering with the audit log **evident, not impossible**.
 - After the write, the provider's own access rules apply. Vercel `sensitive` variables and GitHub secrets cannot be read back; SSM SecureString and Secrets Manager values can be read by any principal with decrypt/read permission; Railway variables stay readable by every member of the Railway project.
 - `zks capture` trusts the same-user agent to follow the skill: while a page shows a revealed token, or after a fill while the password field holds the value, the agent's own ego-browser session could read it. zks shrinks that window (it clicks the reveal itself, blanks the element, leaves the page on `about:blank` after every reveal click, and fills only password inputs), it cannot close it. The ego-browser runtime holds the value in memory while the script runs.
-- The first capture into a `zks/*` token (`zks/vercel`, `zks/railway`, `zks/supabase`, `zks/sheets-hmac`) needs no approval: only replacing an existing one does. The pinned origin limits it to the provider's own site, so an agent can only store a token that site issued to your logged-in session; a same-user agent could still store a token of its choosing there (same-user limit).
+- The first capture into a `zks/*` token (`zks/vercel`, `zks/railway`, `zks/supabase`, `zks/netlify`, `zks/sheets-hmac`) needs no approval: only replacing an existing one does. The pinned origin limits it to the provider's own site, so an agent can only store a token that site issued to your logged-in session; a same-user agent could still store a token of its choosing there (same-user limit).
 - `fill --from` decides "same origin, no dialog" from the local audit log, which a same-user process can rewrite (tamper-evident through `zks audit verify`, not tamper-proof).
-- `tools.json` pins each tool by path and sha256: after upgrading `gh`, `op` or ego-browser, rerun `./install.sh`, or zks refuses the changed binary and reports the tool unavailable (`zks doctor`: `"changed"`). The hash is checked once per zks process before the first run of each tool; a binary swapped between that check and the run is not caught (same-user limit).
+- `tools.json` pins each tool by path and sha256: after upgrading `gh`, `op`, `docker` or ego-browser, rerun `./install.sh`, or zks refuses the changed binary and reports the tool unavailable (`zks doctor`: `"changed"`). The hash is checked once per zks process before the first run of each tool; a binary swapped between that check and the run is not caught (same-user limit).
 - The Google Sheets audit is a **mirror**. The source of truth is the local log (`zks audit verify`) and the providers' own audit logs.
 
 ## Quick start
@@ -46,7 +46,7 @@ zks validate && zks plan
 zks apply --only STRIPE_SECRET_KEY --target vercel-prod
 ```
 
-A full six-provider policy lives in [`zks.policy.example.json`](./zks.policy.example.json).
+A policy using every provider lives in [`zks.policy.example.json`](./zks.policy.example.json).
 
 ## Commands
 
@@ -63,9 +63,9 @@ zks rotate NAME [--target t1,t2] [--policy FILE]
 zks inventory [--project P] [--policy FILE] Which variable is in which destination and how old
                                             (audit log metadata, no network)
 zks auth status                             Show which provider tokens are in the Keychain
-zks auth set <vercel|railway|supabase|sheets-hmac>
+zks auth set <vercel|railway|supabase|netlify|sheets-hmac>
                                             Store a token through a hidden dialog
-zks auth delete <vercel|railway|supabase|sheets-hmac>
+zks auth delete <vercel|railway|supabase|netlify|sheets-hmac>
 zks capture read --space ID --page LABEL --selector CSS --store SERVICE/ACCOUNT [--click SELECTOR] [--origin ORIGIN]
                                             In an ego-browser page: click, read the token element
                                             into the Keychain, blank it (value never shown)
@@ -105,8 +105,12 @@ zks --version | zks help
 | `github` | Actions secret (sensitive, sealed-box encrypted) or variable (plain), through `api.github.com` | `gh auth login` (zks reads the token with `gh auth token`) | `repo` (at most 100 characters) | `environment` |
 | `railway` | service or shared variable | `zks/railway` (`zks capture` or `zks auth set railway`) | `projectId`, `environmentId` | `serviceId`, `tokenType`, `skipDeploys` |
 | `supabase` | Edge Functions secret | `zks/supabase` (`zks capture` or `zks auth set supabase`) | `projectRef` (20 lowercase alphanumerics) | — |
+| `netlify` | account (or site) env var for one deploy context, `is_secret` when sensitive | `zks/netlify` (`zks capture` or `zks auth set netlify`) | `accountId`, `context` (`all`, `production`, `deploy-preview`, `branch-deploy`, `dev`) | `siteId` |
+| `docker-swarm` | Swarm secret `NAME` (`docker secret create NAME -`, value on stdin) | the docker CLI pinned in `tools.json` and its context | — | `context` (docker context, default the current one), `replace` |
+| `compose` | file `<dir>/<NAME>` (mode `600`, `dir` `700`) for Compose `secrets: <name>: file:` | — | `dir` (relative to the current directory, or absolute) | — |
+| `dotenv` | `NAME="value"` in a local `.env*` file (mode `600`), other lines kept | — | `path` (relative to the current directory, or absolute; file name `.env*`) | — |
 
-Rules: Vercel sensitive variables cannot target `development`; Supabase rejects names starting with `SUPABASE_`. Variable names `__proto__`, `constructor` and `prototype` (any case) are reserved.
+Rules: Vercel sensitive variables cannot target `development`; Supabase rejects names starting with `SUPABASE_`. Netlify: a missing variable is created; an existing one gets the value for `context`; a sensitive value is refused (`netlify_not_secret`, nothing written) when the existing variable is not secret. Docker Swarm secrets are immutable: an existing one fails with `secret_exists` unless the target sets `replace: true`, which runs `docker secret rm` then `create` (a secret still used by a service cannot be removed: `docker_failed`); without docker in `tools.json` the write fails with `docker_unavailable`. Docker secret names must start and end with a letter or digit. `compose` refuses a `dir` or file that is a symlink (`symlink_refused`) and an existing `dir` others can access (`insecure_dir`, run `chmod 700`); it never changes an existing directory's mode. `dotenv` replaces the first definition of `NAME` in place (keeping `export`, and a quoted value spanning several lines as a whole), drops later definitions, appends it when missing, and rewrites the file atomically (mode-600 file in the same directory, renamed into place); it escapes `\`, `"`, newline, carriage return and `$` (`\\`, `\"`, `\n`, `\r`, `\$`, as shells, python-dotenv, Compose and dotenv-expand read them), refuses a symlinked file (`symlink_refused`) and does not create missing directories (`file_write_failed`). It is a different thing from the `dotenv` source, which keeps its relative-only rule. Variable names `__proto__`, `constructor` and `prototype` (any case) are reserved.
 
 ## Sources
 
@@ -171,6 +175,10 @@ The first write to a destination opens the dialog with three buttons: **Deny** (
 | `aws:<profile or default>:<roleArn or no-role>:<region>` | SSM and Secrets Manager writes with that profile, role and region |
 | `railway:<projectId>` | that Railway project |
 | `supabase:<projectRef>` | that Supabase project |
+| `netlify:<accountId>` | every site of that Netlify account |
+| `docker-swarm:<context>` or `docker-swarm:current-context` | the swarm of that docker context, or of whichever context is current |
+| `compose:<absolute dir>` | that Compose secrets directory |
+| `dotenv:<absolute path>` | that one `.env` file |
 
 Keys trusted before this format (`vercel:<teamId>`) no longer match any write; `zks trust list` describes them as an old Vercel key format and `zks trust remove <key>` drops them. The keys live in `~/.config/zks/trust.json` (mode `600`), signed with HMAC-SHA256 by a key in the Keychain item `zks`/`trust-hmac`. A file that is unparsable or whose signature does not match trusts nothing: every write asks again and `apply` and `doctor` report `trust: "invalid"`. `zks trust list` shows the keys; `zks trust remove <key>` drops one without a dialog.
 
@@ -200,6 +208,10 @@ Every `plan` operation carries `effect`, and `effects` groups the operations by 
 | github | `used by the next workflow run` |
 | aws-ssm, aws-sm | `consumers read it on their next fetch` |
 | supabase | `Edge Functions use it on their next invocation` |
+| netlify | `applies on the next Netlify build or deploy` |
+| docker-swarm | `update services to use the new secret` |
+| compose | `restart the Compose stack to use it` |
+| dotenv | `restart processes that read the file` |
 
 ## Doctor --fix
 
@@ -228,7 +240,7 @@ zks capture fill --space 7 --page p1 --selector "#password" --from indec/passwor
 - The script prints one line, `ZKS_RESULT {"ok":true,"length":N}` or `{"ok":false,"code":...}`; zks reads only that line and never relays any other ego output.
 - Output: `{ok, command: "capture", mode: "read"|"fill", store, origin, length, auditId, mirror}`. Errors (exit 1): `origin_mismatch` (nothing stored or filled), `not_found`, `not_password_field`, `keychain_failed`, `browser_failed`, `restore_failed`. Usage errors exit 2 and never echo a value.
 - One-time codes that are not secrets worth keeping (an e-mail verification code) are not captured: the agent types them with normal ego actions.
-- Service `zks` (any case) is reserved: only `zks/vercel` (`--origin https://vercel.com`), `zks/railway` (`https://railway.com`), `zks/supabase` (`https://supabase.com`) and `zks/sheets-hmac` (`https://script.google.com`) can be captured, only with `read` and only from that origin. `fill` never uses service `zks`.
+- Service `zks` (any case) is reserved: only `zks/vercel` (`--origin https://vercel.com`), `zks/railway` (`https://railway.com`), `zks/supabase` (`https://supabase.com`), `zks/netlify` (`https://app.netlify.com`) and `zks/sheets-hmac` (`https://script.google.com`) can be captured, only with `read` and only from that origin. `fill` never uses service `zks`.
 - Replacing an existing Keychain item (`read`, `fill --generate`) opens an approval dialog first; denial exits 3 and runs nothing. After approval zks reads the old value into memory (never output, audited or put in the script); if the capture then does not end ok (any error code, isolated refusals included, or a thrown error), zks writes the old value back after the script returns and the error output adds `restored: true`. If that write-back fails the error is `restore_failed` (exit 1, audited). The in-memory copy is zeroed in every case; on success the new value stays. The first capture into a new item, `zks/*` included, needs no approval (see [What is guaranteed, and what is not](#what-is-guaranteed-and-what-is-not)).
 ### Isolated capture (`--isolated`)
 

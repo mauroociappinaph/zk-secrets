@@ -1,4 +1,4 @@
-export const HELP_TEXT = `zks - zero-knowledge secrets and env vars for Vercel, AWS, GitHub, Railway and Supabase
+export const HELP_TEXT = `zks - zero-knowledge secrets and env vars for Vercel, AWS, GitHub, Railway, Supabase, Netlify and Docker
 
 Secret values never pass through argv, stdout, logs or the agent. zks reads them from a
 source (1Password, Keychain, hidden dialog, generator or dotenv file) and writes them straight
@@ -19,9 +19,9 @@ Usage:
   zks inventory [--project P] [--policy FILE] Which variable is in which destination and how old
                                               (audit log metadata, no network)
   zks auth status                             Show which provider tokens are in the Keychain
-  zks auth set <vercel|railway|supabase|sheets-hmac>
+  zks auth set <vercel|railway|supabase|netlify|sheets-hmac>
                                               Store a token through a hidden dialog
-  zks auth delete <vercel|railway|supabase|sheets-hmac>
+  zks auth delete <vercel|railway|supabase|netlify|sheets-hmac>
   zks capture read --space ID --page LABEL --selector CSS --store SERVICE/ACCOUNT [--click SELECTOR] [--origin ORIGIN]
                                               In an ego-browser page: click, read the token element
                                               into the Keychain, blank it (value never shown)
@@ -56,9 +56,15 @@ Sources (variables.<NAME>.source.kind): op, keychain, prompt, generate, dotenv, 
   public-key {of: "VAR"}: public PEM of VAR's generated private key; may be sensitive: false
   template {template: "postgres://\${USER}:\${PASS:url}@\${HOST}/db"}: built in memory, $\${ is a literal \${
 Non-sensitive env vars may use "value" instead of a source. Sensitive ones never can.
-Targets (targets.<key>.provider): vercel, aws-ssm, aws-sm, github, railway, supabase.
-Capture: zks/<vercel|railway|supabase|sheets-hmac> only from their own site (--origin https://vercel.com,
-https://railway.com, https://supabase.com, https://script.google.com); replacing an item asks first,
+Targets (targets.<key>.provider): vercel, aws-ssm, aws-sm, github, railway, supabase, netlify, docker-swarm,
+  compose, dotenv.
+  netlify {accountId, siteId?, context: all|production|deploy-preview|branch-deploy|dev}: token zks/netlify
+  docker-swarm {context?, replace?}: docker secret create NAME - (value on stdin); an existing secret is
+  secret_exists unless replace: true (rm, then create)
+  compose {dir}: writes <dir>/<NAME> (mode 600, dir 700, no symlinks) for Compose secrets: file:
+  dotenv {path}: upserts NAME="value" (escaped) in a .env* file, other lines kept, mode 600, atomic, no symlinks
+Capture: zks/<vercel|railway|supabase|netlify|sheets-hmac> only from their own site (--origin https://vercel.com,
+https://railway.com, https://supabase.com, https://app.netlify.com, https://script.google.com); replacing an item asks first,
 and a replaced item gets its old value back when the capture fails.
 
 Exit codes: 0 ok, 1 a write or check failed, 2 usage or policy error, 3 not approved.

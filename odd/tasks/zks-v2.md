@@ -52,9 +52,9 @@ Each spec quotes the list item the user selected by number, then the user's deci
 - T7 [S8] `zks inventory` — P2 — worker — 7ae4f28 — done
 - T8 [S9] plan effects — P2 — worker — 7ae4f28 — done
 - T9 [S10] `zks doctor --fix` — P2 — worker — 7ae4f28 — done
-- T10 [S11] Netlify sink — P3 — worker — in_progress
-- T11 [S12] Docker Swarm / Compose secret sinks — P3 — worker — in_progress
-- T12 [S13] dotenv file sink (mode 600) — P3 — worker — in_progress
+- T10 [S11] Netlify sink — P3 — worker — implemented, uncommitted (parent commits)
+- T11 [S12] Docker Swarm / Compose secret sinks — P3 — worker — implemented, uncommitted (parent commits)
+- T12 [S13] dotenv file sink (mode 600) — P3 — worker — implemented, uncommitted (parent commits)
 - T13 [S14] capture recipes — P4 — pending
 - T14 [S15] Playwright/Chrome capture backend — P4 — pending
 - T15 [S16] capture from a downloaded file — P4 — pending
