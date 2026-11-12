@@ -55,7 +55,7 @@ Branches:
 - **AWS credentials expired**: the agent runs `aws sso login`; the human only completes a sign-in or 2FA step if the browser asks. **GitHub `missing_token`**: the agent runs `gh auth login --web` and finishes it in ego-browser; zks reads that session's token with `gh auth token` and calls `api.github.com` itself.
 - **`trust: "invalid"`** in the output: `~/.config/zks/trust.json` was altered or unsigned, so nothing is trusted and every write asks again. Tell the human.
 - **A secret pasted into chat**: the agent does not use it and recommends rotating it.
-- **A command needs secrets** (tests, a migration): the agent runs `zks run --only A,B -- <command>` instead of reading `.env` files or pulling values. The dialog opens every time and shows the command, its arguments, the directory and the names; the values go only into that command's environment, and zks exits with its exit code.
+- **A command needs secrets** (tests, a migration): the agent runs `zks run --only A,B -- <command>` instead of reading `.env` files or pulling values. The dialog opens every time and shows the command, its arguments, the directory and the names; the values go only into that command's environment, and zks exits with its exit code (a denial is the `not_approved` JSON on stdout, exit 3). Generated variables are skipped unless named, and naming one is a usage error.
 
 ## Capture sequence
 

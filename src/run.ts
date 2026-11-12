@@ -548,17 +548,18 @@ async function rotate(deps: Deps, name: string | undefined, flags: Map<string, s
 const RUN_USAGE = "usage: zks run [--policy FILE] [--only A,B] [--agent LABEL] -- <command> [args...]";
 const MAX_RUN_ARGUMENTS = 300;
 
-/** Arguments as the dialog shows them: shell-like quoting, at most 300 characters, cut with "…". */
+/** Arguments as the dialog shows them, in full: shell-like quoting. runCommand refuses more than 300 characters. */
 function describeArguments(args: string[]): string {
   if (args.length === 0) return "(none)";
-  const text = args.map((a) => (/^[A-Za-z0-9_@%+=:,.\/-]+$/.test(a) ? a : JSON.stringify(a))).join(" ");
-  return text.length > MAX_RUN_ARGUMENTS ? `${text.slice(0, MAX_RUN_ARGUMENTS - 1)}…` : text;
+  return args.map((a) => (/^[A-Za-z0-9_@%+=:,.\/-]+$/.test(a) ? a : JSON.stringify(a))).join(" ");
 }
 
 /**
  * `zks run -- <command>`: after the human approves the command in a dialog (every time, no trust),
  * resolves the selected variables in memory and starts the command with them as environment
  * variables of that child only. zks prints nothing on success and exits with the child's code.
+ * Generated variables (and those derived from them) are skipped unless named, then refused: their
+ * value exists only at its destinations, and run would create a new one.
  */
 async function runCommand(
   deps: Deps,
@@ -572,11 +573,27 @@ async function runCommand(
   const unknown = (only ?? []).find((n) => !Object.hasOwn(policy.variables, n));
   // The name is not echoed: it might be a pasted secret (same rule as rotate).
   if (unknown !== undefined) throw new UsageError("--only: a name is not a variable of the policy; see `zks plan`");
-  const names = Object.keys(policy.variables).filter((n) => !only || only.includes(n));
+  const generated = (n: string) => policy.variables[n]?.source?.kind === "generate" || generatedDependencies(policy, n).length > 0;
+  const named = Object.keys(policy.variables).filter((n) => only?.includes(n) && generated(n));
+  if (named.length > 0) {
+    throw new UsageError(`run cannot inject generated values; they exist only at their destinations (${named.join(", ")})`);
+  }
+  const names = Object.keys(policy.variables).filter((n) => (only ? only.includes(n) : !generated(n)));
   if (names.length === 0) throw new UsageError("--only: select at least one variable");
   const spec = (name: string) => policy.variables[name] as Policy["variables"][string];
 
   const [command, ...args] = commandArgv as [string, ...string[]];
+  const shownArguments = describeArguments(args);
+  // The dialog shows the arguments whole: a cut line could hide the part that matters.
+  if (shownArguments.length > MAX_RUN_ARGUMENTS) {
+    return json(EXIT_USAGE, {
+      ok: false,
+      error: {
+        code: "arguments_too_long",
+        message: `the arguments are longer than ${MAX_RUN_ARGUMENTS} characters; the dialog shows them in full, so shorten them`,
+      },
+    });
+  }
   // A cwd with ":" cannot be a PATH entry; the command then only searches the fixed system PATH.
   const searchPath = deps.cwd.includes(":") ? SAFE_PATH : `${join(deps.cwd, "node_modules", ".bin")}:${SAFE_PATH}`;
   const executable = resolveExecutable(command, deps.cwd, searchPath);
@@ -595,7 +612,7 @@ async function runCommand(
     `Run a command with ${names.length} value(s) in its environment:`,
     `Command: ${executable}`,
     "Arguments:",
-    describeArguments(args),
+    shownArguments,
     `Directory: ${deps.cwd}`,
     "Variables:",
     ...names.map((n) => `- ${n} [${spec(n).sensitive ? "secret" : "plain"}; ${describeSource(spec(n).source, deps.cwd)}]`),
@@ -678,7 +695,13 @@ async function runCommand(
         }
       }
       // spawn() copies the environment before it returns; the copy belongs to the child.
-      child = deps.spawnInherited(executable, args, { cwd: deps.cwd, env: { PATH: searchPath, ...env } });
+      try {
+        child = deps.spawnInherited(executable, args, { cwd: deps.cwd, env: { PATH: searchPath, ...env } });
+      } catch (error) {
+        // A synchronous spawn failure takes the same audited run_failed path as an asynchronous one.
+        const spawned = Promise.resolve(error instanceof Error ? error : new Error(String(error)));
+        child = { spawned, exited: new Promise<never>(() => undefined), kill: () => undefined };
+      }
     } finally {
       resolver.dispose();
       for (const name of Object.keys(env)) delete env[name];
@@ -700,17 +723,43 @@ async function runCommand(
       await saveAnchor(deps, store);
       return json(EXIT_FAILED, { ...head, error: { code: "audit_failed", message: "the command was stopped: its audit record could not be written" } });
     }
-    await saveAnchor(deps, store);
-    await deps.mirror.sync(store);
   } finally {
     store.close();
   }
 
-  // The child owns stdout from here on.
+  // The child owns stdout from here on: zks prints nothing there and keeps the child's exit code.
   const exit = await (child as SpawnedChild).exited;
+  await syncAfterRun(deps, redactor);
   if (exit.code !== null) return { exitCode: exit.code, stdout: "" };
   const number = exit.signal === null ? undefined : osConstants.signals[exit.signal];
   return { exitCode: number === undefined ? EXIT_FAILED : 128 + number, stdout: "" };
+}
+
+/** Audit anchor and mirror after a run: a failure is one redacted stderr line, never the exit code or stdout. */
+async function syncAfterRun(deps: Deps, redactor: Redactor): Promise<void> {
+  const problems: string[] = [];
+  const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
+  try {
+    const store = deps.openAudit();
+    try {
+      const { anchorError } = await saveAnchor(deps, store);
+      if (anchorError !== undefined) problems.push(anchorError);
+      try {
+        const mirror = await deps.mirror.sync(store);
+        if (mirror.error !== undefined) problems.push(mirror.error);
+      } catch (error) {
+        problems.push(message(error));
+      }
+    } finally {
+      store.close();
+    }
+  } catch (error) {
+    problems.push(message(error));
+  }
+  if (problems.length > 0) {
+    const line = redactor.scrub(problems.join("; ")).replace(/[\r\n]+/g, " ").slice(0, 300);
+    process.stderr.write(`zks: audit anchor/mirror: ${line}\n`);
+  }
 }
 
 const DAY_MS = 86_400_000;

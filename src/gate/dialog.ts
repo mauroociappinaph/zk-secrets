@@ -18,14 +18,12 @@ const APPROVAL_TIMEOUT_SECONDS = 180;
 const PROMPT_TIMEOUT_SECONDS = 300;
 
 export function appleScriptString(text: string): string {
-  // "…" (a truncation mark) goes as `character id 8230`, so the script itself stays ASCII.
-  const escaped = text.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/…/g, '" & (character id 8230) & "');
-  return `"${escaped}"`;
+  return `"${text.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
-/** Replaces every character outside printable ASCII (newlines, tabs, bidi controls) with "?"; keeps "…". */
+/** Replaces every character outside printable ASCII (newlines, tabs, bidi controls) with "?". */
 export function sanitizeLine(text: string): string {
-  return text.replace(/[^\x20-\x7E…]/g, "?");
+  return text.replace(/[^\x20-\x7E]/g, "?");
 }
 
 export function createMacDialogs(exec: Exec, platform: NodeJS.Platform = process.platform): HumanChannel {

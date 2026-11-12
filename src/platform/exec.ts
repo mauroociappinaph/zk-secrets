@@ -85,17 +85,13 @@ export type SpawnInherited = (path: string, args: string[], options: { cwd: stri
 export function createSpawnInherited(base: ExecBase): SpawnInherited {
   return (path, args, options) => {
     const child = spawn(path, args, { shell: false, stdio: "inherit", cwd: options.cwd, env: { ...childEnv(base), ...options.env } });
-    // While the child runs zks stays alive to return its exit code: Ctrl-C already reaches the
-    // child through the terminal's process group, SIGTERM and SIGHUP sent to zks are forwarded.
-    const ignore = () => undefined;
+    // While the child runs zks stays alive to return its exit code: SIGINT, SIGTERM and SIGHUP
+    // sent to zks are forwarded to the child (Ctrl-C also reaches it through the terminal).
+    const signals = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
     const forward = (signal: NodeJS.Signals) => void child.kill(signal);
-    process.on("SIGINT", ignore);
-    process.on("SIGTERM", forward);
-    process.on("SIGHUP", forward);
+    for (const signal of signals) process.on(signal, forward);
     const release = () => {
-      process.off("SIGINT", ignore);
-      process.off("SIGTERM", forward);
-      process.off("SIGHUP", forward);
+      for (const signal of signals) process.off(signal, forward);
     };
     const spawned = new Promise<Error | null>((resolve) => {
       child.once("spawn", () => resolve(null));
