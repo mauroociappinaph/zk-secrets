@@ -45,7 +45,7 @@ Each spec quotes the list item the user selected by number, then the user's deci
 
 - T1 [S2] pin gh/op/ego-browser binaries by sha256 in tools.json; refuse and warn on change — P1 — inline — 42ccc92 — done
 - T2 [S1] `install.sh --system` root-owned install under /usr/local/libexec/zks — P1 — inline — 5429b77 — done (launcher in /usr/local/libexec/zks/bin: /usr/local/bin is uid 501 here)
-- T3 [S3] capture in an isolated ego-browser profile/space — P1 — worker — COMMIT — done (page p1 confirmed against real ego; isolated flow not run against a real second profile)
+- T3 [S3] capture in an isolated ego-browser profile/space — P1 — worker — 73bbc31 — done (page p1 confirmed against real ego; isolated flow not run against a real second profile)
 - T4 [S4] SBOM, npm audit in install/CI, pinned lockfile check — P1 — inline — 464388e — done (socket.dev skipped: needs account+token)
 - T5 [S5,S6] formatted generators and derived sources — P2 — pending
 - T6 [S7] `zks rotate NAME` — P2 — pending
