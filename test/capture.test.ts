@@ -808,6 +808,7 @@ const PINNED: Record<string, string> = {
   vercel: "https://vercel.com",
   railway: "https://railway.com",
   supabase: "https://supabase.com",
+  netlify: "https://app.netlify.com",
   "sheets-hmac": "https://script.google.com",
 };
 
@@ -825,7 +826,7 @@ test("S11: zks provider tokens are captured only from their pinned origin", asyn
 });
 
 test("S11: other zks accounts and every zks fill are refused", async () => {
-  const message = "the Keychain service zks only takes captured provider tokens: vercel, railway, supabase, sheets-hmac";
+  const message = "the Keychain service zks only takes captured provider tokens: vercel, railway, supabase, netlify, sheets-hmac";
   for (const account of ["trust-hmac", "audit-head", "Vercel", "github"]) {
     await refused([...replace(READ, "--store", `zks/${account}`), "--origin", "https://vercel.com"], message);
     await refused([...replace(READ, "--store", `Zks/${account}`), "--origin", "https://vercel.com"], message);

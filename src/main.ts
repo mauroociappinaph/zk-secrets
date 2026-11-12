@@ -12,7 +12,7 @@ import { checkIntegrity, checkOwnership } from "./platform/integrity.ts";
 import { ZKS_KEYCHAIN_SERVICE, createKeychain } from "./platform/keychain.ts";
 import { SYSTEM_LIBEXEC, installLayout, zksPaths } from "./platform/paths.ts";
 import { fixPermissions } from "./platform/permissions.ts";
-import { NO_PINS, TOOLS_FILE, parseToolPins, pinnedExec, resolveTools, sha256File, type ToolPaths, type ToolPins } from "./platform/tools.ts";
+import { NO_PINS, TOOLS_FILE, TOOL_NAMES, parseToolPins, pinnedExec, resolveTools, sha256File, type ToolPaths, type ToolPins } from "./platform/tools.ts";
 import { loadTrust, type TrustFile } from "./policy/trust.ts";
 import { TOKEN_ACCOUNTS, run, type Deps, type ZksConfig } from "./run.ts";
 import { createAwsClientFactory } from "./sinks/aws-clients.ts";
@@ -46,7 +46,7 @@ function loadTools(): { tools: ToolPaths; pins: ToolPins; source: "tools.json" |
 
 /** Per tool: "ok" (hash matches), "changed", "unpinned" (legacy tools.json or dev run) or "missing". */
 async function pinStatus(tools: ToolPaths, pins: ToolPins): Promise<Record<string, string>> {
-  const names: Record<keyof ToolPaths, string> = { egoBrowser: "ego-browser", gh: "gh", op: "op" };
+  const names = TOOL_NAMES;
   const status: Record<string, string> = {};
   for (const key of Object.keys(names) as (keyof ToolPaths)[]) {
     const path = tools[key];
@@ -165,6 +165,7 @@ export async function main(identity: Identity): Promise<number> {
           "ego-browser": tools.egoBrowser !== null && isExecutableFile(tools.egoBrowser),
           op: tools.op !== null && isExecutableFile(tools.op),
           gh: tools.gh !== null && isExecutableFile(tools.gh),
+          docker: tools.docker !== null && isExecutableFile(tools.docker),
           aws: await which("aws"),
           pins: await pinStatus(tools, pins),
         },

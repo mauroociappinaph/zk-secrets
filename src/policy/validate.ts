@@ -2,6 +2,7 @@ import { resolve as resolvePath } from "node:path";
 import { MAX_TEMPLATE_LENGTH, TemplateSyntaxError, parseTemplate, templateRefs } from "./template.ts";
 import {
   GENERATE_FORMATS,
+  NETLIFY_CONTEXTS,
   PROVIDERS,
   VERCEL_ENVIRONMENTS,
   type Operation,
@@ -19,6 +20,18 @@ const VERCEL_ID = /^[A-Za-z0-9_.-]{1,100}$/;
 const GIT_BRANCH = /^[A-Za-z0-9_.\/-]{1,250}$/;
 const GITHUB_ENVIRONMENT = /^[A-Za-z0-9_.-]{1,255}$/;
 const RAILWAY_ID = /^[A-Za-z0-9-]{1,64}$/;
+const NETLIFY_ID = /^[A-Za-z0-9_-]{1,100}$/;
+/**
+ * Docker endpoints zks can bind to itself: only `unix:///absolute/path` (the sink lstats it).
+ * No `ssh://` (resolved through the user's ssh client config) and no `tcp://` (plain HTTP:
+ * the sink never has TLS certificates, so the value would travel unencrypted).
+ */
+const DOCKER_HOST = /^unix:\/\/\/[\x21-\x7e]{1,200}$/;
+/** Docker secret names: letters, digits, `_`, `.`, `-`, starting and ending with a letter or digit. */
+const DOCKER_SECRET_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,62}[A-Za-z0-9])?$/;
+/** A file system path zks shows in the dialog: printable ASCII, at most 200 characters. */
+const FILE_PATH = /^[\x20-\x7E]{1,200}$/;
+const DOTENV_FILE_NAME = /(^|\/)\.env[A-Za-z0-9_.-]*$/;
 const AWS_PROFILE = /^[A-Za-z0-9_.-]{1,64}$/;
 const KMS_KEY_ID = /^(alias\/[A-Za-z0-9\/_-]{1,250}|[0-9a-f-]{36}|arn:aws[a-z-]*:kms:[a-z0-9-]+:\d{12}:(key|alias)\/[A-Za-z0-9\/_-]+)$/;
 const KEYCHAIN_ID = /^[A-Za-z0-9_.-]{1,128}$/;
@@ -167,6 +180,27 @@ function validateTarget(path: string, target: unknown, issues: string[]): void {
       break;
     case "supabase":
       requireString(`${path}.projectRef`, target.projectRef, /^[a-z0-9]{20}$/, issues);
+      break;
+    case "netlify":
+      requireString(`${path}.accountId`, target.accountId, NETLIFY_ID, issues);
+      optionalString(`${path}.siteId`, target.siteId, NETLIFY_ID, issues);
+      if (!(NETLIFY_CONTEXTS as readonly unknown[]).includes(target.context)) {
+        issues.push(`${path}.context: must be one of ${NETLIFY_CONTEXTS.join(", ")}`);
+      }
+      break;
+    case "docker-swarm":
+      if (typeof target.host !== "string" || !DOCKER_HOST.test(target.host)) {
+        issues.push(`${path}.host: must be unix:///path to a real docker socket`);
+      }
+      if (target.replace !== undefined && typeof target.replace !== "boolean") issues.push(`${path}.replace: must be a boolean`);
+      break;
+    case "compose":
+      if (typeof target.dir !== "string" || !FILE_PATH.test(target.dir)) issues.push(`${path}.dir: must be a path of 1 to 200 printable characters`);
+      break;
+    case "dotenv":
+      if (typeof target.path !== "string" || !FILE_PATH.test(target.path) || !DOTENV_FILE_NAME.test(target.path)) {
+        issues.push(`${path}.path: must be a path of 1 to 200 printable characters to a .env* file`);
+      }
       break;
   }
 }
@@ -369,6 +403,9 @@ function validateVariable(name: string, spec: unknown, targets: Json, variables:
       target.environments.includes("development")
     ) {
       issues.push(`${path}: Vercel sensitive variables cannot target development (target "${key}")`);
+    }
+    if (target.provider === "docker-swarm" && VARIABLE_NAME.test(name) && !DOCKER_SECRET_NAME.test(name)) {
+      issues.push(`${path}: docker secret names must start and end with a letter or digit (target "${key}")`);
     }
   }
 }

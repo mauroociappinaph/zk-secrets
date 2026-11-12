@@ -52,7 +52,7 @@ const NEW_DESTINATION = "[NEW destination]";
 const ALWAYS_ALLOW_NOTE =
   "Always allow: trust every [NEW destination] (whole GitHub owner, Vercel team, AWS profile+role+region or project) for all projects.";
 
-export const TOKEN_ACCOUNTS = ["vercel", "railway", "supabase", "sheets-hmac"] as const;
+export const TOKEN_ACCOUNTS = ["vercel", "railway", "supabase", "netlify", "sheets-hmac"] as const;
 export type TokenAccount = (typeof TOKEN_ACCOUNTS)[number];
 
 export interface ZksConfig {
@@ -242,6 +242,8 @@ export function environmentOf(target: TargetConfig): string {
       return target.environment ?? "";
     case "railway":
       return target.environmentId;
+    case "netlify":
+      return target.context;
     default:
       return "";
   }
@@ -257,7 +259,16 @@ async function loadPolicy(deps: Deps, path: string | undefined): Promise<Policy>
   } catch {
     throw new PolicyError([`policy: ${file} is not valid JSON`]);
   }
-  return validatePolicy(parsed);
+  return withAbsolutePaths(validatePolicy(parsed), deps.cwd);
+}
+
+/** File targets are resolved against cwd once, so the dialog, trust key and sink use one absolute path. */
+function withAbsolutePaths(policy: Policy, cwd: string): Policy {
+  for (const target of Object.values(policy.targets)) {
+    if (target.provider === "compose") target.dir = resolvePath(cwd, target.dir);
+    if (target.provider === "dotenv") target.path = resolvePath(cwd, target.path);
+  }
+  return policy;
 }
 
 /** Refuses any option the command does not use. Only known command names are echoed. */
@@ -1014,6 +1025,7 @@ export const PINNED_CAPTURE_ORIGINS: Record<TokenAccount, string> = {
   vercel: "https://vercel.com",
   railway: "https://railway.com",
   supabase: "https://supabase.com",
+  netlify: "https://app.netlify.com",
   "sheets-hmac": "https://script.google.com",
 };
 

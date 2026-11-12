@@ -1,4 +1,15 @@
-export const PROVIDERS = ["vercel", "aws-ssm", "aws-sm", "github", "railway", "supabase"] as const;
+export const PROVIDERS = [
+  "vercel",
+  "aws-ssm",
+  "aws-sm",
+  "github",
+  "railway",
+  "supabase",
+  "netlify",
+  "docker-swarm",
+  "compose",
+  "dotenv",
+] as const;
 export type Provider = (typeof PROVIDERS)[number];
 
 export const VERCEL_ENVIRONMENTS = ["production", "preview", "development"] as const;
@@ -48,13 +59,46 @@ export interface SupabaseTarget {
   projectRef: string;
 }
 
+export const NETLIFY_CONTEXTS = ["all", "production", "deploy-preview", "branch-deploy", "dev"] as const;
+
+export interface NetlifyTarget {
+  provider: "netlify";
+  accountId: string;
+  siteId?: string;
+  context: (typeof NETLIFY_CONTEXTS)[number];
+}
+
+export interface DockerSwarmTarget {
+  provider: "docker-swarm";
+  /** Daemon endpoint passed as `docker --host`: `unix:///path` to a real socket (not a symlink); no `tcp://` (plain HTTP) or `ssh://`, contexts are ignored. */
+  host: string;
+  /** Swarm secrets are immutable: replace removes an existing one, then creates it. */
+  replace?: boolean;
+}
+
+export interface ComposeTarget {
+  provider: "compose";
+  /** Directory of the secret files; absolute after loading (resolved against cwd). */
+  dir: string;
+}
+
+export interface DotenvTarget {
+  provider: "dotenv";
+  /** A .env* file; absolute after loading (resolved against cwd). */
+  path: string;
+}
+
 export type TargetConfig =
   | VercelTarget
   | AwsSsmTarget
   | AwsSmTarget
   | GithubTarget
   | RailwayTarget
-  | SupabaseTarget;
+  | SupabaseTarget
+  | NetlifyTarget
+  | DockerSwarmTarget
+  | ComposeTarget
+  | DotenvTarget;
 
 export const GENERATE_FORMATS = ["random", "uuid", "jwt-secret", "password", "rsa-private-key", "ed25519-private-key"] as const;
 export type GenerateFormat = (typeof GENERATE_FORMATS)[number];

@@ -1,0 +1,73 @@
+import { lstat } from "node:fs/promises";
+import type { ExecResult } from "../platform/exec.ts";
+import type { DockerSwarmTarget } from "../policy/types.ts";
+import { SinkError, type Sink } from "./types.ts";
+
+const SECRET_ID = /^[A-Za-z0-9]{1,64}$/;
+const TIMEOUT_MS = 60_000;
+
+function unavailable(): SinkError {
+  return new SinkError("docker_unavailable", "docker is not available; install Docker and rerun ./install.sh");
+}
+
+/**
+ * Docker Swarm secret through the pinned docker CLI: `docker secret create NAME -` with the value
+ * on stdin. Swarm secrets are immutable, so an existing one is `secret_exists` unless the target
+ * sets `replace: true` (rm, then create). docker's own output is never echoed.
+ *
+ * The daemon is always the policy's `host` (`--host`, shown in the dialog and part of the trust
+ * key) and DOCKER_CONFIG points at an empty read-only directory, so the user's docker contexts
+ * and config, which a same-user agent could edit, never choose where the value goes.
+ */
+const DOCKER_ENV = { DOCKER_CONFIG: "/var/empty" };
+const UNIX = "unix://";
+
+/**
+ * A `unix://` host must be a real socket: lstat (never following a symlink) refuses a symlink, a
+ * missing path or anything else before docker runs. Only unix sockets are accepted.
+ */
+async function checkHost(host: string): Promise<void> {
+  if (!host.startsWith(UNIX)) return;
+  const path = host.slice(UNIX.length);
+  const stats = await lstat(path).catch(() => null);
+  if (!stats || !stats.isSocket()) {
+    throw new SinkError("docker_host_invalid", `${path} is not a socket; zks talks only to a real docker socket, not a symlink`);
+  }
+}
+
+export const dockerSwarmSink: Sink = {
+  async apply(op, value, ctx) {
+    const target = op.target as DockerSwarmTarget;
+    const docker = ctx.tools.docker;
+    if (!docker) throw unavailable();
+    await checkHost(target.host);
+    const prefix = ["--host", target.host];
+    const run = async (args: string[], input?: Buffer): Promise<ExecResult> => {
+      try {
+        return await ctx.exec(docker, [...prefix, "secret", ...args], { timeoutMs: TIMEOUT_MS, env: DOCKER_ENV, ...(input ? { input } : {}) });
+      } catch {
+        throw unavailable();
+      }
+    };
+
+    const inspect = await run(["inspect", "--format", "{{.ID}}", op.name]);
+    if (inspect.code === 0) {
+      if (target.replace !== true) {
+        throw new SinkError("secret_exists", `docker secret ${op.name} already exists; set replace: true on the target to remove and recreate it`);
+      }
+      const rm = await run(["rm", op.name]);
+      if (rm.code !== 0) throw new SinkError("docker_failed", `docker secret rm ${op.name} failed (exit ${rm.code}); a service may still use it`);
+    }
+
+    const input = Buffer.from(value.reveal(), "utf8");
+    let created: ExecResult;
+    try {
+      created = await run(["create", op.name, "-"], input);
+    } finally {
+      input.fill(0);
+    }
+    if (created.code !== 0) throw new SinkError("docker_failed", `docker secret create ${op.name} failed (exit ${created.code})`);
+    const id = created.stdout.toString("utf8").trim();
+    return SECRET_ID.test(id) ? { version: id } : {};
+  },
+};

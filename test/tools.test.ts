@@ -12,7 +12,7 @@ const EGO = "/Applications/ego lite.app/Contents/Helpers/ego-browser";
 
 test("S11: tools.json gives absolute paths for ego-browser, gh and op", () => {
   const tools = parseToolsFile(JSON.stringify({ "ego-browser": EGO, gh: "/opt/homebrew/bin/gh", op: null }));
-  assert.deepEqual(tools, { egoBrowser: EGO, gh: "/opt/homebrew/bin/gh", op: null });
+  assert.deepEqual(tools, { egoBrowser: EGO, gh: "/opt/homebrew/bin/gh", op: null, docker: null });
 });
 
 test("S11: tools.json entries that are not absolute plain paths resolve to null", () => {
@@ -32,7 +32,7 @@ test("S11: without tools.json each tool is looked up on SAFE_PATH only, first ma
     return executables.has(path);
   };
   assert.equal(findOnSafePath("gh", isExecutable), "/usr/local/bin/gh");
-  assert.deepEqual(resolveTools(null, isExecutable), { egoBrowser: null, gh: "/usr/local/bin/gh", op: "/opt/homebrew/bin/op" });
+  assert.deepEqual(resolveTools(null, isExecutable), { egoBrowser: null, gh: "/usr/local/bin/gh", op: "/opt/homebrew/bin/op", docker: null });
   const dirs = SAFE_PATH.split(":");
   for (const path of checked) assert.ok(dirs.some((dir) => path === `${dir}/${path.split("/").pop()}`), path);
 });
@@ -43,7 +43,7 @@ test("S11: a present tools.json is used as is, with no PATH lookup", () => {
     lookups++;
     return true;
   });
-  assert.deepEqual(tools, { egoBrowser: EGO, gh: null, op: null });
+  assert.deepEqual(tools, { egoBrowser: EGO, gh: null, op: null, docker: null });
   assert.equal(lookups, 0);
 });
 
@@ -103,8 +103,8 @@ test("v2 S2: tools.json entries may carry a sha256 pin; legacy string entries st
     gh: { path: "/opt/homebrew/bin/gh", sha256: PIN_GH },
     op: "/opt/homebrew/bin/op",
   });
-  assert.deepEqual(parseToolsFile(text), { egoBrowser: EGO, gh: "/opt/homebrew/bin/gh", op: "/opt/homebrew/bin/op" });
-  assert.deepEqual(parseToolPins(text), { egoBrowser: "c".repeat(64), gh: PIN_GH, op: null });
+  assert.deepEqual(parseToolsFile(text), { egoBrowser: EGO, gh: "/opt/homebrew/bin/gh", op: "/opt/homebrew/bin/op", docker: null });
+  assert.deepEqual(parseToolPins(text), { egoBrowser: "c".repeat(64), gh: PIN_GH, op: null, docker: null });
 });
 
 test("v2 S2: a malformed pin makes the tool unavailable instead of unpinned", () => {
@@ -118,7 +118,7 @@ test("v2 S2: pinned exec runs a tool whose binary hash matches, hashing it once 
   const hashed: string[] = [];
   const warnings: string[] = [];
   const base = fakeExec(() => ({ stdout: Buffer.from("ok") }));
-  const exec = pinnedExec(base.exec, { egoBrowser: null, gh: "/opt/homebrew/bin/gh", op: null }, { egoBrowser: null, gh: PIN_GH, op: null }, {
+  const exec = pinnedExec(base.exec, { egoBrowser: null, gh: "/opt/homebrew/bin/gh", op: null, docker: null }, { egoBrowser: null, gh: PIN_GH, op: null, docker: null }, {
     hashFile: async (path) => (hashed.push(path), PIN_GH),
     warn: (line) => warnings.push(line),
   });
@@ -133,7 +133,7 @@ test("v2 S2: pinned exec runs a tool whose binary hash matches, hashing it once 
 test("v2 S2: an unpinned (legacy) tool runs without hashing", async () => {
   const hashed: string[] = [];
   const base = fakeExec();
-  const exec = pinnedExec(base.exec, { egoBrowser: null, gh: "/opt/homebrew/bin/gh", op: null }, { egoBrowser: null, gh: null, op: null }, {
+  const exec = pinnedExec(base.exec, { egoBrowser: null, gh: "/opt/homebrew/bin/gh", op: null, docker: null }, { egoBrowser: null, gh: null, op: null, docker: null }, {
     hashFile: async (path) => (hashed.push(path), PIN_GH),
     warn: () => undefined,
   });
@@ -145,7 +145,7 @@ test("v2 S2: an unpinned (legacy) tool runs without hashing", async () => {
 test("v2 S2: a tool whose binary changed since install is refused with a warning and never runs", async () => {
   const warnings: string[] = [];
   const base = fakeExec();
-  const exec = pinnedExec(base.exec, { egoBrowser: null, gh: null, op: "/opt/homebrew/bin/op" }, { egoBrowser: null, gh: null, op: PIN_OP }, {
+  const exec = pinnedExec(base.exec, { egoBrowser: null, gh: null, op: "/opt/homebrew/bin/op", docker: null }, { egoBrowser: null, gh: null, op: PIN_OP, docker: null }, {
     hashFile: async () => "d".repeat(64),
     warn: (line) => warnings.push(line),
   });
@@ -157,7 +157,7 @@ test("v2 S2: a tool whose binary changed since install is refused with a warning
 
 test("v2 S2: a missing pinned binary is refused like a changed one", async () => {
   const base = fakeExec();
-  const exec = pinnedExec(base.exec, { egoBrowser: null, gh: "/opt/homebrew/bin/gh", op: null }, { egoBrowser: null, gh: PIN_GH, op: null }, {
+  const exec = pinnedExec(base.exec, { egoBrowser: null, gh: "/opt/homebrew/bin/gh", op: null, docker: null }, { egoBrowser: null, gh: PIN_GH, op: null, docker: null }, {
     hashFile: async () => {
       throw new Error("ENOENT");
     },
@@ -169,7 +169,7 @@ test("v2 S2: a missing pinned binary is refused like a changed one", async () =>
 
 test("v2 S2: a changed op makes an op source fail as source_unavailable without running op", async () => {
   const base = fakeExec(() => ({ stdout: Buffer.from(CANARY) }));
-  const exec = pinnedExec(base.exec, TEST_TOOLS, { egoBrowser: null, gh: null, op: PIN_OP }, {
+  const exec = pinnedExec(base.exec, TEST_TOOLS, { egoBrowser: null, gh: null, op: PIN_OP, docker: null }, {
     hashFile: async () => "d".repeat(64),
     warn: () => undefined,
   });

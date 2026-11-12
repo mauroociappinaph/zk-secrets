@@ -54,6 +54,14 @@ export function trustKeyOf(op: Operation): string {
       return `railway:${target.projectId}`;
     case "supabase":
       return `supabase:${target.projectRef}`;
+    case "netlify":
+      return `netlify:${target.accountId}`;
+    case "docker-swarm":
+      return `docker-swarm:${target.host}`;
+    case "compose":
+      return `compose:${target.dir}`;
+    case "dotenv":
+      return `dotenv:${target.path}`;
   }
 }
 
@@ -78,6 +86,14 @@ export function describeTrustKey(key: string): string {
       return `Railway project ${first}`;
     case "supabase":
       return `Supabase project ${first}`;
+    case "netlify":
+      return parts.length === 2 ? `Netlify account ${first} (every site)` : "unknown destination";
+    case "docker-swarm":
+      return `Docker swarm at ${parts.slice(1).join(":")}`;
+    case "compose":
+      return `Compose secrets directory ${parts.slice(1).join(":")}`;
+    case "dotenv":
+      return `dotenv file ${parts.slice(1).join(":")}`;
     default:
       return "unknown destination";
   }
