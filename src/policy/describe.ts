@@ -26,7 +26,7 @@ export function describeDestination(op: Operation): string {
     case "netlify":
       return `netlify account ${target.accountId}${target.siteId ? ` site ${target.siteId}` : ""} context ${target.context}`;
     case "docker-swarm":
-      return `docker-swarm secret ${op.name} context ${target.context ?? "current"}${target.replace === true ? " (replace)" : ""}`;
+      return `docker-swarm secret ${op.name} at ${target.host}${target.replace === true ? " (replace)" : ""}`;
     case "compose":
       return `compose file ${join(target.dir, op.name)}`;
     case "dotenv":

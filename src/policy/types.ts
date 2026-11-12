@@ -70,8 +70,8 @@ export interface NetlifyTarget {
 
 export interface DockerSwarmTarget {
   provider: "docker-swarm";
-  /** docker context (`docker --context`); the current context when absent. */
-  context?: string;
+  /** Daemon endpoint passed as `docker --host` (`unix:///path`, `tcp://host:port`, `ssh://user@host`); contexts are ignored. */
+  host: string;
   /** Swarm secrets are immutable: replace removes an existing one, then creates it. */
   replace?: boolean;
 }

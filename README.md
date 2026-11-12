@@ -8,7 +8,7 @@
 
 - Secret values never appear in zks argv, environment, stdout, stderr, temp files or the audit log. Output is JSON metadata; any echoed secret is scrubbed. File destinations (`compose`, `dotenv`) are written through a mode-600 file in the destination directory that is renamed into place: that file is the destination, and it is removed if the write fails.
 - zks rejects secret values on the command line (`--value`, `--secret`, `--token`, `--password`) and in the policy (`value` is only allowed when `sensitive: false`). Any `source` requires `sensitive: true`, so a resolved value can never go out as a readable plain variable.
-- Nothing is written to a new destination until you click **Approve once** or **Always allow** in a macOS dialog. The dialog lists every write with its real destination (Vercel project/team, AWS region/name/role/profile/KMS key, GitHub repo/environment, Railway ids, Supabase project, Netlify account/site/context, docker context and secret name, the absolute path of a Compose secret file, the absolute path of a dotenv file), marks writes to a destination you have not trusted yet with `[NEW destination]`, and is never truncated: at most 20 writes, 300 characters per line and 6000 in total per apply (`too_many_operations` / `dialog_too_long` otherwise). Denial, timeout or no GUI writes nothing and is audited as `denied`. See [Trusted destinations](#trusted-destinations).
+- Nothing is written to a new destination until you click **Approve once** or **Always allow** in a macOS dialog. The dialog lists every write with its real destination (Vercel project/team, AWS region/name/role/profile/KMS key, GitHub repo/environment, Railway ids, Supabase project, Netlify account/site/context, docker host and secret name, the absolute path of a Compose secret file, the absolute path of a dotenv file), marks writes to a destination you have not trusted yet with `[NEW destination]`, and is never truncated: at most 20 writes, 300 characters per line and 6000 in total per apply (`too_many_operations` / `dialog_too_long` otherwise). Denial, timeout or no GUI writes nothing and is audited as `denied`. See [Trusted destinations](#trusted-destinations).
 - zks ignores the caller's environment: the launcher runs node through `env -i` with only `HOME`, `USER`, `LOGNAME`, `LANG`, a fixed `PATH` and the agent label, and zks empties `process.env` again before loading anything else. Variables such as `AWS_ENDPOINT_URL`, `HTTPS_PROXY`, `NODE_EXTRA_CA_CERTS`, `GH_HOST` or `XDG_CONFIG_HOME` cannot redirect a write, and `endpoint_url` in `~/.aws/config` is ignored.
 - GitHub writes go from zks straight to `https://api.github.com` (secrets sealed with the repository's libsodium public key). The `gh` CLI is only asked for your login token (`gh auth token --hostname github.com`), so its config (hosts, `http_unix_socket`) cannot redirect a write.
 - Provider tokens live in the macOS Keychain; AWS uses your existing SSO or profile credentials.
@@ -106,7 +106,7 @@ zks --version | zks help
 | `railway` | service or shared variable | `zks/railway` (`zks capture` or `zks auth set railway`) | `projectId`, `environmentId` | `serviceId`, `tokenType`, `skipDeploys` |
 | `supabase` | Edge Functions secret | `zks/supabase` (`zks capture` or `zks auth set supabase`) | `projectRef` (20 lowercase alphanumerics) | — |
 | `netlify` | account (or site) env var for one deploy context, `is_secret` when sensitive | `zks/netlify` (`zks capture` or `zks auth set netlify`) | `accountId`, `context` (`all`, `production`, `deploy-preview`, `branch-deploy`, `dev`) | `siteId` |
-| `docker-swarm` | Swarm secret `NAME` (`docker secret create NAME -`, value on stdin) | the docker CLI pinned in `tools.json` and its context | — | `context` (docker context, default the current one), `replace` |
+| `docker-swarm` | Swarm secret `NAME` (`docker secret create NAME -`, value on stdin) | the docker CLI pinned in `tools.json`, talking only to `host` | — | `host` (`unix:///path`, `tcp://host:port` or `ssh://user@host`, passed as `docker --host`; docker contexts and `~/.docker/config.json` are ignored), `replace` |
 | `compose` | file `<dir>/<NAME>` (mode `600`, `dir` `700`) for Compose `secrets: <name>: file:` | — | `dir` (relative to the current directory, or absolute) | — |
 | `dotenv` | `NAME="value"` in a local `.env*` file (mode `600`), other lines kept | — | `path` (relative to the current directory, or absolute; file name `.env*`) | — |
 
@@ -176,7 +176,7 @@ The first write to a destination opens the dialog with three buttons: **Deny** (
 | `railway:<projectId>` | that Railway project |
 | `supabase:<projectRef>` | that Supabase project |
 | `netlify:<accountId>` | every site of that Netlify account |
-| `docker-swarm:<context>` or `docker-swarm:current-context` | the swarm of that docker context, or of whichever context is current |
+| `docker-swarm:<host>` | the swarm daemon at that endpoint |
 | `compose:<absolute dir>` | that Compose secrets directory |
 | `dotenv:<absolute path>` | that one `.env` file |
 

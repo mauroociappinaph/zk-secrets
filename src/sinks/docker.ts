@@ -13,16 +13,22 @@ function unavailable(): SinkError {
  * Docker Swarm secret through the pinned docker CLI: `docker secret create NAME -` with the value
  * on stdin. Swarm secrets are immutable, so an existing one is `secret_exists` unless the target
  * sets `replace: true` (rm, then create). docker's own output is never echoed.
+ *
+ * The daemon is always the policy's `host` (`--host`, shown in the dialog and part of the trust
+ * key) and DOCKER_CONFIG points at an empty read-only directory, so the user's docker contexts
+ * and config, which a same-user agent could edit, never choose where the value goes.
  */
+const DOCKER_ENV = { DOCKER_CONFIG: "/var/empty" };
+
 export const dockerSwarmSink: Sink = {
   async apply(op, value, ctx) {
     const target = op.target as DockerSwarmTarget;
     const docker = ctx.tools.docker;
     if (!docker) throw unavailable();
-    const prefix = target.context ? ["--context", target.context] : [];
+    const prefix = ["--host", target.host];
     const run = async (args: string[], input?: Buffer): Promise<ExecResult> => {
       try {
-        return await ctx.exec(docker, [...prefix, "secret", ...args], { timeoutMs: TIMEOUT_MS, ...(input ? { input } : {}) });
+        return await ctx.exec(docker, [...prefix, "secret", ...args], { timeoutMs: TIMEOUT_MS, env: DOCKER_ENV, ...(input ? { input } : {}) });
       } catch {
         throw unavailable();
       }

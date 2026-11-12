@@ -21,7 +21,7 @@ const GIT_BRANCH = /^[A-Za-z0-9_.\/-]{1,250}$/;
 const GITHUB_ENVIRONMENT = /^[A-Za-z0-9_.-]{1,255}$/;
 const RAILWAY_ID = /^[A-Za-z0-9-]{1,64}$/;
 const NETLIFY_ID = /^[A-Za-z0-9_-]{1,100}$/;
-const DOCKER_CONTEXT = /^[A-Za-z0-9][A-Za-z0-9_.+-]{0,63}$/;
+const DOCKER_HOST = /^(unix:\/\/\/[\x21-\x7e]{1,200}|tcp:\/\/[A-Za-z0-9.:\[\]-]{1,200}|ssh:\/\/[A-Za-z0-9.:@-]{1,200})$/;
 /** Docker secret names: letters, digits, `_`, `.`, `-`, starting and ending with a letter or digit. */
 const DOCKER_SECRET_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,62}[A-Za-z0-9])?$/;
 /** A file system path zks shows in the dialog: printable ASCII, at most 200 characters. */
@@ -184,7 +184,9 @@ function validateTarget(path: string, target: unknown, issues: string[]): void {
       }
       break;
     case "docker-swarm":
-      optionalString(`${path}.context`, target.context, DOCKER_CONTEXT, issues);
+      if (typeof target.host !== "string" || !DOCKER_HOST.test(target.host)) {
+        issues.push(`${path}.host: must be unix:///path, tcp://host:port or ssh://user@host`);
+      }
       if (target.replace !== undefined && typeof target.replace !== "boolean") issues.push(`${path}.replace: must be a boolean`);
       break;
     case "compose":

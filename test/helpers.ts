@@ -64,13 +64,14 @@ export interface ExecCall {
   command: string;
   args: string[];
   input: string;
+  env?: Record<string, string>;
 }
 
 export function fakeExec(handler: (call: ExecCall) => Partial<ExecResult> = () => ({})) {
   const calls: ExecCall[] = [];
   const exec: Exec = async (command: string, args: string[], options: ExecOptions = {}) => {
     const input = options.input === undefined ? "" : Buffer.from(options.input).toString("utf8");
-    const call = { command, args: [...args], input };
+    const call: ExecCall = { command, args: [...args], input, ...(options.env ? { env: { ...options.env } } : {}) };
     calls.push(call);
     const res = handler(call);
     return { code: res.code ?? 0, stdout: res.stdout ?? Buffer.alloc(0), stderr: res.stderr ?? Buffer.alloc(0) };

@@ -19,6 +19,7 @@ import { CANARY, TEST_TOOLS, auditBytes, fakeAws, fakeExec, fakeFetch, fakeKeych
 
 const REPO = join(import.meta.dirname, "..");
 const DOCKER = TEST_TOOLS.docker as string;
+const SOCK = "unix:///var/run/docker.sock";
 
 function op(target: TargetConfig, name = "API_KEY"): Operation {
   return { name, targetKey: "t", target, variable: { sensitive: true, targets: ["t"], source: { kind: "prompt" } }, sourceKind: "prompt" };
@@ -55,63 +56,67 @@ const argvHasNoValue = (calls: ExecCall[]) => calls.every((c) => !c.args.join(" 
 
 test("S12: docker-swarm creates the secret with the value on stdin only", async () => {
   const c = ctx(docker());
-  assert.deepEqual(await dockerSwarmSink.apply(op({ provider: "docker-swarm" }), SecretBuffer.fromString(CANARY), c.context), {
+  assert.deepEqual(await dockerSwarmSink.apply(op({ provider: "docker-swarm", host: SOCK }), SecretBuffer.fromString(CANARY), c.context), {
     version: "k3y1d0000000000000000000a",
   });
   assert.deepEqual(
     c.exec.calls.map((call) => [call.command, call.args, call.input]),
     [
-      [DOCKER, ["secret", "inspect", "--format", "{{.ID}}", "API_KEY"], ""],
-      [DOCKER, ["secret", "create", "API_KEY", "-"], CANARY],
+      [DOCKER, ["--host", SOCK, "secret", "inspect", "--format", "{{.ID}}", "API_KEY"], ""],
+      [DOCKER, ["--host", SOCK, "secret", "create", "API_KEY", "-"], CANARY],
     ],
   );
 
+  // R1: the policy host is always passed as --host and the user's docker config/contexts are ignored.
+  assert.ok(c.exec.calls.every((call) => call.args[0] === "--host" && call.args[1] === SOCK && !call.args.includes("--context")));
+  assert.deepEqual(c.exec.calls.map((call) => call.env), [{ DOCKER_CONFIG: "/var/empty" }, { DOCKER_CONFIG: "/var/empty" }]);
+
   const withContext = ctx(docker());
-  await dockerSwarmSink.apply(op({ provider: "docker-swarm", context: "prod-swarm" }), SecretBuffer.fromString(CANARY), withContext.context);
-  assert.deepEqual(withContext.exec.calls[1]!.args, ["--context", "prod-swarm", "secret", "create", "API_KEY", "-"]);
+  await dockerSwarmSink.apply(op({ provider: "docker-swarm", host: "ssh://deploy@swarm.example.com" }), SecretBuffer.fromString(CANARY), withContext.context);
+  assert.deepEqual(withContext.exec.calls[1]!.args, ["--host", "ssh://deploy@swarm.example.com", "secret", "create", "API_KEY", "-"]);
 });
 
 test("S12: an existing docker secret is secret_exists unless replace: true, which removes then creates it", async () => {
   const kept = ctx(docker(["API_KEY"]));
   await rejects(
-    dockerSwarmSink.apply(op({ provider: "docker-swarm" }), SecretBuffer.fromString(CANARY), kept.context),
+    dockerSwarmSink.apply(op({ provider: "docker-swarm", host: SOCK }), SecretBuffer.fromString(CANARY), kept.context),
     "secret_exists",
     "docker secret API_KEY already exists; set replace: true on the target to remove and recreate it",
   );
   assert.equal(kept.exec.calls.length, 1);
 
   const replaced = ctx(docker(["API_KEY"]));
-  await dockerSwarmSink.apply(op({ provider: "docker-swarm", replace: true }), SecretBuffer.fromString(CANARY), replaced.context);
+  await dockerSwarmSink.apply(op({ provider: "docker-swarm", host: SOCK, replace: true }), SecretBuffer.fromString(CANARY), replaced.context);
   assert.deepEqual(
-    replaced.exec.calls.map((call) => call.args.slice(0, 2)),
+    replaced.exec.calls.map((call) => call.args.slice(2, 4)),
     [["secret", "inspect"], ["secret", "rm"], ["secret", "create"]],
   );
-  assert.deepEqual(replaced.exec.calls[1]!.args, ["secret", "rm", "API_KEY"]);
+  assert.deepEqual(replaced.exec.calls[1]!.args, ["--host", SOCK, "secret", "rm", "API_KEY"]);
   assert.ok(argvHasNoValue(replaced.exec.calls));
 });
 
 test("S12: docker failures report the step and exit code, never docker's output", async () => {
   const inUse = ctx(docker(["API_KEY"], { rm: 1 }));
   await rejects(
-    dockerSwarmSink.apply(op({ provider: "docker-swarm", replace: true }), SecretBuffer.fromString(CANARY), inUse.context),
+    dockerSwarmSink.apply(op({ provider: "docker-swarm", host: SOCK, replace: true }), SecretBuffer.fromString(CANARY), inUse.context),
     "docker_failed",
     "docker secret rm API_KEY failed (exit 1); a service may still use it",
   );
   assert.equal(inUse.exec.calls.length, 2);
 
   const create = ctx(docker([], { create: 1 }));
-  await rejects(dockerSwarmSink.apply(op({ provider: "docker-swarm" }), SecretBuffer.fromString(CANARY), create.context), "docker_failed", "docker secret create API_KEY failed (exit 1)");
+  await rejects(dockerSwarmSink.apply(op({ provider: "docker-swarm", host: SOCK }), SecretBuffer.fromString(CANARY), create.context), "docker_failed", "docker secret create API_KEY failed (exit 1)");
 
   const none = ctx(fakeExec(), { ...TEST_TOOLS, docker: null });
   await rejects(
-    dockerSwarmSink.apply(op({ provider: "docker-swarm" }), SecretBuffer.fromString(CANARY), none.context),
+    dockerSwarmSink.apply(op({ provider: "docker-swarm", host: SOCK }), SecretBuffer.fromString(CANARY), none.context),
     "docker_unavailable",
     "docker is not available; install Docker and rerun ./install.sh",
   );
   assert.equal(none.exec.calls.length, 0);
 
   const changed = ctx({ calls: [], exec: async () => Promise.reject(Object.assign(new Error("docker changed since install"), { code: "tool_changed" })) });
-  await rejects(dockerSwarmSink.apply(op({ provider: "docker-swarm" }), SecretBuffer.fromString(CANARY), changed.context), "docker_unavailable", "docker is not available; install Docker and rerun ./install.sh");
+  await rejects(dockerSwarmSink.apply(op({ provider: "docker-swarm", host: SOCK }), SecretBuffer.fromString(CANARY), changed.context), "docker_unavailable", "docker is not available; install Docker and rerun ./install.sh");
 });
 
 test("S12 S1: a real docker binary gets the value on stdin, never in argv or its environment", async () => {
@@ -119,15 +124,18 @@ test("S12 S1: a real docker binary gets the value on stdin, never in argv or its
   const fake = join(dir, "docker");
   writeFileSync(
     fake,
-    `#!/bin/sh\nprintf '%s\\n' "$@" >>"${dir}/argv"\n/usr/bin/env >>"${dir}/env"\ncase "$2" in inspect) exit 1;; create) /bin/cat >"${dir}/stdin"; echo abcdef123;; esac\n`,
+    `#!/bin/sh\nprintf '%s\\n' "$@" >>"${dir}/argv"\n/usr/bin/env >>"${dir}/env"\ncase "$4" in inspect) exit 1;; create) /bin/cat >"${dir}/stdin"; echo abcdef123;; esac\n`,
     { mode: 0o755 },
   );
   const exec = createExec({ home: dir, user: "tester" });
   const c = ctx({ calls: [], exec }, { ...TEST_TOOLS, docker: fake });
-  assert.deepEqual(await dockerSwarmSink.apply(op({ provider: "docker-swarm" }), SecretBuffer.fromString(CANARY), c.context), { version: "abcdef123" });
+  assert.deepEqual(await dockerSwarmSink.apply(op({ provider: "docker-swarm", host: SOCK }), SecretBuffer.fromString(CANARY), c.context), { version: "abcdef123" });
   assert.equal(readFileSync(join(dir, "stdin"), "utf8"), CANARY);
   assert.ok(!readFileSync(join(dir, "argv"), "utf8").includes(CANARY));
-  assert.ok(!readFileSync(join(dir, "env"), "utf8").includes(CANARY));
+  const env = readFileSync(join(dir, "env"), "utf8");
+  assert.ok(!env.includes(CANARY));
+  assert.ok(env.includes("DOCKER_CONFIG=/var/empty\n"));
+  assert.ok(readFileSync(join(dir, "argv"), "utf8").startsWith(`--host\n${SOCK}\n`));
 });
 
 test("S12: docker is a pinned tool in tools.json, looked up on SAFE_PATH in a development run", async () => {
@@ -231,28 +239,28 @@ test("S12: docker-swarm and compose targets are validated; docker secret names f
       return (error as PolicyError).issues;
     }
   };
-  assert.deepEqual(issues(policy({ provider: "docker-swarm", context: "prod", replace: true })), []);
+  assert.deepEqual(issues(policy({ provider: "docker-swarm", host: "tcp://10.0.0.5:2376", replace: true })), []);
   assert.deepEqual(issues(policy({ provider: "compose", dir: "./secrets" })), []);
-  assert.deepEqual(issues(policy({ provider: "docker-swarm", context: "-x", replace: "yes" })), [
-    "targets.t.context: must match /^[A-Za-z0-9][A-Za-z0-9_.+-]{0,63}$/",
+  assert.deepEqual(issues(policy({ provider: "docker-swarm", host: "prod", replace: "yes" })), [
+    "targets.t.host: must be unix:///path, tcp://host:port or ssh://user@host",
     "targets.t.replace: must be a boolean",
   ]);
-  assert.deepEqual(issues(policy({ provider: "docker-swarm" }, "_KEY_")), ["variables._KEY_: docker secret names must start and end with a letter or digit (target \"t\")"]);
+  assert.deepEqual(issues(policy({ provider: "docker-swarm", host: SOCK }, "_KEY_")), ["variables._KEY_: docker secret names must start and end with a letter or digit (target \"t\")"]);
   assert.deepEqual(issues(policy({ provider: "compose", dir: "" })), ["targets.t.dir: must be a path of 1 to 200 printable characters"]);
   assert.deepEqual(issues(policy({ provider: "compose", dir: "a\nb" })), ["targets.t.dir: must be a path of 1 to 200 printable characters"]);
 });
 
 test("S12: trust keys, destinations and effects of docker-swarm and compose", () => {
-  assert.equal(trustKeyOf(op({ provider: "docker-swarm" })), "docker-swarm:current-context");
-  assert.equal(trustKeyOf(op({ provider: "docker-swarm", context: "prod" })), "docker-swarm:prod");
+  assert.equal(trustKeyOf(op({ provider: "docker-swarm", host: SOCK })), "docker-swarm:" + SOCK);
+  assert.equal(trustKeyOf(op({ provider: "docker-swarm", host: "tcp://h:2376" })), "docker-swarm:tcp://h:2376");
   assert.equal(trustKeyOf(op({ provider: "compose", dir: "/w/secrets" })), "compose:/w/secrets");
-  assert.equal(describeTrustKey("docker-swarm:prod"), "Docker swarm of docker context prod");
-  assert.equal(describeTrustKey("docker-swarm:current-context"), "Docker swarm of the current docker context");
+  assert.equal(describeTrustKey("docker-swarm:tcp://h:2376"), "Docker swarm at tcp://h:2376");
+  assert.equal(describeTrustKey("docker-swarm:" + SOCK), "Docker swarm at " + SOCK);
   assert.equal(describeTrustKey("compose:/w/a:b"), "Compose secrets directory /w/a:b");
-  assert.equal(describeDestination(op({ provider: "docker-swarm", context: "prod", replace: true })), "docker-swarm secret API_KEY context prod (replace)");
-  assert.equal(describeDestination(op({ provider: "docker-swarm" })), "docker-swarm secret API_KEY context current");
+  assert.equal(describeDestination(op({ provider: "docker-swarm", host: SOCK, replace: true })), "docker-swarm secret API_KEY at " + SOCK + " (replace)");
+  assert.equal(describeDestination(op({ provider: "docker-swarm", host: SOCK })), "docker-swarm secret API_KEY at " + SOCK);
   assert.equal(describeDestination(op({ provider: "compose", dir: "/w/secrets" })), "compose file /w/secrets/API_KEY");
-  assert.equal(describeEffect(op({ provider: "docker-swarm" })), "update services to use the new secret");
+  assert.equal(describeEffect(op({ provider: "docker-swarm", host: SOCK })), "update services to use the new secret");
   assert.equal(describeEffect(op({ provider: "compose", dir: "/w" })), "restart the Compose stack to use it");
   assert.ok(HELP_TEXT.includes("docker-swarm") && HELP_TEXT.includes("compose {dir}"));
 });

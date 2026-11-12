@@ -57,7 +57,7 @@ export function trustKeyOf(op: Operation): string {
     case "netlify":
       return `netlify:${target.accountId}`;
     case "docker-swarm":
-      return `docker-swarm:${target.context ?? "current-context"}`;
+      return `docker-swarm:${target.host}`;
     case "compose":
       return `compose:${target.dir}`;
     case "dotenv":
@@ -89,8 +89,7 @@ export function describeTrustKey(key: string): string {
     case "netlify":
       return parts.length === 2 ? `Netlify account ${first} (every site)` : "unknown destination";
     case "docker-swarm":
-      if (parts.length !== 2) return "unknown destination";
-      return first === "current-context" ? "Docker swarm of the current docker context" : `Docker swarm of docker context ${first}`;
+      return `Docker swarm at ${parts.slice(1).join(":")}`;
     case "compose":
       return `Compose secrets directory ${parts.slice(1).join(":")}`;
     case "dotenv":
