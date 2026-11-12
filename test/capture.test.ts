@@ -1060,3 +1060,27 @@ test("v2 S3 (L16): fill keeps a leading UTF-8 BOM of a Keychain value", async ()
     assert.equal(input.value, value);
   }
 });
+
+test("v2 S3 (L18): fill keeps every BOM byte of a Keychain value (mid, double, before a newline)", async () => {
+  for (const value of ["a﻿b", "﻿﻿", "﻿a\nb"]) {
+    const input = Object.assign(new FakeInput(), { type: "password" });
+    const { page } = domPage({ nodes: [input] });
+    const { printed } = await runScript(buildCaptureScript(fillSpec(), fakeSecurityHex(value)), page);
+    assert.deepEqual(printed, [`ZKS_RESULT {"ok":true,"length":${value.length}}`], JSON.stringify(value));
+    assert.equal(Buffer.from(input.value, "utf8").toString("hex"), Buffer.from(value, "utf8").toString("hex"));
+  }
+});
+
+test("v2 S3 (L18): fill types nothing for overlong, surrogate or truncated UTF-8", async () => {
+  for (const hex of ["C0AF", "EDA080", "C3"]) {
+    const path = join(tempDir(), "security");
+    writeFileSync(path, `#!/bin/sh\nprintf 'password: 0x${hex} \\n' >&2\nexit 0\n`);
+    chmodSync(path, 0o700);
+    const input = Object.assign(new FakeInput(), { type: "password" });
+    const { page, calls } = domPage({ nodes: [input] });
+    const { printed } = await runScript(buildCaptureScript(fillSpec(), path), page);
+    assert.deepEqual(printed, ['ZKS_RESULT {"ok":false,"code":"keychain_failed"}'], hex);
+    assert.equal(input.value, "");
+    assert.equal(calls.includes("insertText"), false);
+  }
+});
