@@ -69,6 +69,11 @@ zks capture fill --space ID --page LABEL --selector CSS (--store SERVICE/ACCOUNT
                                             Fill a new random (16-128 bytes) or a stored password
                                             into one password input of an ego-browser page; --from
                                             into another origin than the item came from asks first
+zks capture read --isolated --url URL --selector CSS --store SERVICE/ACCOUNT [--click SELECTOR] --origin ORIGIN
+zks capture fill --isolated --url URL --selector CSS (--store SERVICE/ACCOUNT --generate BYTES
+                 | --from SERVICE/ACCOUNT) --origin ORIGIN
+                                            Same, in a space zks opens itself in the capture-profile
+                                            (not the agent's session) at URL, closed afterwards
 zks audit list [--limit N] [--project P]    Show audit records (metadata only)
 zks audit verify                            Check the audit hash chain
 zks audit sync                              Push pending audit records to Google Sheets
@@ -77,6 +82,8 @@ zks trust remove <key>                      Stop trusting a destination (no dial
 zks config show
 zks config set sheets-webhook <url>         Apps Script /exec URL for the audit mirror
 zks config unset sheets-webhook
+zks config set capture-profile <profileId>  Separate ego-browser profile for capture --isolated
+zks config unset capture-profile
 zks doctor                                  Check tools, tokens, audit and install integrity
 zks --version | zks help
 ```
@@ -148,6 +155,27 @@ zks capture fill --space 7 --page p1 --selector "#password" --from indec/passwor
 - One-time codes that are not secrets worth keeping (an e-mail verification code) are not captured: the agent types them with normal ego actions.
 - Service `zks` (any case) is reserved: only `zks/vercel` (`--origin https://vercel.com`), `zks/railway` (`https://railway.com`), `zks/supabase` (`https://supabase.com`) and `zks/sheets-hmac` (`https://script.google.com`) can be captured, only with `read` and only from that origin. `fill` never uses service `zks`.
 - Replacing an existing Keychain item (`read`, `fill --generate`) opens an approval dialog first; denial exits 3 and runs nothing. The first capture into a new item, `zks/*` included, needs no approval (see [What is guaranteed, and what is not](#what-is-guaranteed-and-what-is-not)).
+### Isolated capture (`--isolated`)
+
+By default the secret step runs in the agent's own TaskSpace, so the agent's ego session could look at the page while the token is on it. `--isolated` closes that window: zks opens its own space in a separate ego-browser profile that holds only your provider logins, does the secret step there, and closes the space.
+
+One-time setup (the human, once):
+
+1. In Ego Lite, create a separate profile (for example `zks-capture`), not the default one the agent uses.
+2. Open that profile once and log in to each provider you capture from (Vercel, Railway, Supabase, Google Apps Script, API sites). The sessions stay in that profile.
+3. Tell zks its id, the `id` that ego-browser's `profiles()` lists for it (`echo 'console.log(JSON.stringify(await profiles()))' | ego-browser nodejs`): `zks config set capture-profile zks-capture`. The change opens an approval dialog; so does `zks config unset capture-profile`. `zks config show` shows it.
+
+```sh
+zks capture read --isolated --url https://vercel.com/account/settings/tokens --click "text=Create" \
+  --selector "[role=dialog] input[readonly]" --store zks/vercel --origin https://vercel.com
+```
+
+- `--isolated` replaces `--space`/`--page` (combining them is a usage error) and needs `--url` (http or https, at most 1000 printable ASCII characters) and `--origin`; the URL must be on that origin.
+- Inside the ego script, zks checks `profiles()`: the configured id must be listed (else `isolated_profile_missing`) and must not be the default profile (`isDefault` must be `false`, else `isolated_profile_not_isolated`). It then creates the space `zks-capture-<16 random hex>` with `taskSpace(name, { profileId })`, opens a page, goes to `--url` and requires the page to land on `--origin`; a redirect to a login page or anywhere else is `login_required` (log in once in that profile, then retry). Then the usual `read` or `fill` steps run, and the space is always closed with `task.finish({ keep: [] })` in a `finally`, on success and on every failure.
+- No profile configured (or an invalid id in `config.json`) is `isolated_profile_unset`, before any dialog, Keychain write or browser step. All four errors exit 1 and are audited `failed`; nothing is read or filled. A refused isolated `fill --generate` removes the item zks had just created for it.
+- Output adds `isolated: true`. A replacement dialog says `New value: read from <origin> (isolated ego-browser profile <id>)`.
+- Honest limit: the agent never gets the space id and never drives that space, but it runs as the same macOS user. While the capture runs, a same-user agent can still list and claim the space by id through ego-browser, or edit `config.json` to point at another non-default profile. `--isolated` narrows the window; a hard boundary still needs a dedicated macOS user for the agent.
+
 - Every capture is audited: `provider: "keychain"`, `action: "capture"`, `target: "<service>/<account>"`, `environment: <origin>`, `sourceKind: capture-read|capture-generate|capture-from`, result `applied`, `failed` or `denied`. Like `apply`, every capture then pushes pending records to the Sheets mirror (best effort) and reports it in `mirror`.
 
 ## Exit codes

@@ -38,6 +38,8 @@ export type TokenAccount = (typeof TOKEN_ACCOUNTS)[number];
 
 export interface ZksConfig {
   sheets?: { webhookUrl?: string };
+  /** ego-browser profile for `zks capture --isolated`; never the default profile. */
+  capture?: { profileId?: string };
 }
 
 export interface Deps {
@@ -113,6 +115,7 @@ const FLAGS_WITH_VALUE = [
   "--origin",
   "--generate",
   "--from",
+  "--url",
 ];
 
 /** Options each command uses; any other option is refused. --help and --version are global. */
@@ -122,8 +125,8 @@ const COMMAND_FLAGS: Record<string, string[]> = {
   plan: ["--policy", "--only", "--target"],
   apply: ["--policy", "--only", "--target", "--agent"],
   "audit list": ["--limit", "--project"],
-  "capture read": ["--space", "--page", "--selector", "--store", "--click", "--origin"],
-  "capture fill": ["--space", "--page", "--selector", "--store", "--generate", "--from", "--origin"],
+  "capture read": ["--space", "--page", "--selector", "--store", "--click", "--origin", "--isolated", "--url"],
+  "capture fill": ["--space", "--page", "--selector", "--store", "--generate", "--from", "--origin", "--isolated", "--url"],
 };
 const SUBCOMMANDS: Record<string, string[]> = {
   auth: ["status", "set", "delete"],
@@ -154,6 +157,11 @@ function parseArgs(argv: string[]): ParsedArgs {
       throw new UsageError(
         "zks never accepts secret values on the command line; declare a source in zks.policy.json or use `zks auth set`",
       );
+    }
+    if (flag === "--isolated") {
+      if (inline !== undefined) throw new UsageError("option --isolated takes no value");
+      flags.set(flag, "true");
+      continue;
     }
     if (flag === "--help" || flag === "--version") {
       flags.set(flag, "true");
@@ -633,7 +641,22 @@ async function config(deps: Deps, sub: string | undefined, key: string | undefin
     case "show":
       return json(EXIT_OK, { ok: true, config: current });
     case "set": {
-      if (key !== "sheets-webhook") throw new UsageError("usage: zks config set sheets-webhook <https://script.google.com/macros/s/.../exec>");
+      if (key === "capture-profile") {
+        if (value === undefined || !CAPTURE_PROFILE.test(value)) {
+          throw new UsageError("capture-profile must be an ego-browser profile id (letters, digits, space, _ . -; at most 64)");
+        }
+        if (!(await deps.human.approve("zks: approve config change", [`Run isolated captures in the ego-browser profile ${value} (set capture-profile)?`]))) {
+          return configNotApproved();
+        }
+        const next = { ...current, capture: { ...current.capture, profileId: value } };
+        await deps.writeConfig(next);
+        return json(EXIT_OK, { ok: true, config: next });
+      }
+      if (key !== "sheets-webhook") {
+        throw new UsageError(
+          "usage: zks config set sheets-webhook <https://script.google.com/macros/s/.../exec> | zks config set capture-profile <profileId>",
+        );
+      }
       if (!value || !SHEETS_WEBHOOK_URL.test(value)) throw new UsageError("sheets-webhook must be a deployed Apps Script URL ending in /exec");
       if (!(await deps.human.approve("zks: approve config change", [`Mirror the audit log to ${value} (set sheets-webhook)?`]))) {
         return configNotApproved();
@@ -643,7 +666,15 @@ async function config(deps: Deps, sub: string | undefined, key: string | undefin
       return json(EXIT_OK, { ok: true, config: next });
     }
     case "unset": {
-      if (key !== "sheets-webhook") throw new UsageError("usage: zks config unset sheets-webhook");
+      if (key === "capture-profile") {
+        if (!(await deps.human.approve("zks: approve config change", ["Stop isolated captures (unset capture-profile)?"]))) {
+          return configNotApproved();
+        }
+        const next = { ...current, capture: {} };
+        await deps.writeConfig(next);
+        return json(EXIT_OK, { ok: true, config: next });
+      }
+      if (key !== "sheets-webhook") throw new UsageError("usage: zks config unset sheets-webhook | zks config unset capture-profile");
       if (!(await deps.human.approve("zks: approve config change", ["Stop mirroring the audit log to Google Sheets (unset sheets-webhook)?"]))) {
         return configNotApproved();
       }
@@ -652,7 +683,10 @@ async function config(deps: Deps, sub: string | undefined, key: string | undefin
       return json(EXIT_OK, { ok: true, config: next });
     }
     default:
-      throw new UsageError("usage: zks config show | zks config set sheets-webhook <url> | zks config unset sheets-webhook");
+      throw new UsageError(
+        "usage: zks config show | zks config set sheets-webhook <url> | zks config set capture-profile <profileId> | " +
+          "zks config unset sheets-webhook | zks config unset capture-profile",
+      );
   }
 }
 
@@ -669,6 +703,11 @@ const CAPTURE_SELECTOR = /^[\x20-\x7E]{1,300}$/;
 const KEYCHAIN_ID = /^[A-Za-z0-9_.-]{1,128}$/;
 const CAPTURE_ORIGIN = /^(?:https:\/\/[a-z0-9.-]+|http:\/\/(?:127\.0\.0\.1|localhost))(?::\d{1,5})?$/;
 const MAX_CAPTURE_ORIGIN = 200;
+const CAPTURE_URL = /^[\x21-\x7E]{1,1000}$/;
+/** An ego-browser profile id as `zks config set capture-profile` accepts it. */
+const CAPTURE_PROFILE = /^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$/;
+/** Script refusals of an isolated capture: nothing was read or filled. */
+const ISOLATION_REFUSALS: readonly CaptureErrorCode[] = ["isolated_profile_missing", "isolated_profile_not_isolated", "login_required"];
 
 /** The only zks tokens a capture may write, each only from its provider's own site. */
 export const PINNED_CAPTURE_ORIGINS: Record<TokenAccount, string> = {
@@ -678,20 +717,30 @@ export const PINNED_CAPTURE_ORIGINS: Record<TokenAccount, string> = {
   "sheets-hmac": "https://script.google.com",
 };
 
-const CAPTURE_ERRORS: Record<CaptureErrorCode | "not_approved", string> = {
+type CaptureFailure = CaptureErrorCode | "not_approved" | "isolated_profile_unset";
+
+const CAPTURE_ERRORS: Record<CaptureFailure, string> = {
   origin_mismatch: "the page is not on --origin; nothing was read or filled",
   not_found: "the element or the Keychain item was not found",
   not_password_field: "the selector does not match exactly one password input in the page's main frame; nothing was filled",
   keychain_failed: "the macOS Keychain did not accept or return the item",
   browser_failed: "ego-browser failed or returned no result",
   not_approved: "replacing the Keychain item was not approved",
+  isolated_profile_unset:
+    "no capture-profile is configured; run `zks config set capture-profile <profileId>` with a separate ego-browser profile",
+  isolated_profile_missing: "the configured capture-profile is not an ego-browser profile; nothing was read or filled",
+  isolated_profile_not_isolated: "the configured capture-profile is the default ego-browser profile; pick a separate profile",
+  login_required: "the isolated page did not stay on --origin; log in to the site once in the capture profile; nothing was read or filled",
 };
 
 interface CaptureRequest {
   mode: "read" | "fill";
   sourceKind: CaptureSourceKind;
-  space: number;
-  page: string;
+  /** null for --isolated. */
+  space: number | null;
+  page: string | null;
+  /** --isolated: the page zks opens in its own space; its origin equals origin. */
+  isolated: { url: string } | null;
   selector: string;
   click: string | null;
   origin: string | null;
@@ -707,10 +756,19 @@ function parseCapture(sub: string | undefined, flags: Map<string, string>): Capt
   const space = flags.get("--space");
   const page = flags.get("--page");
   const selector = flags.get("--selector");
-  if (space === undefined || page === undefined || selector === undefined) throw new UsageError(CAPTURE_USAGE);
-  if (sub === "read" && !flags.has("--store")) throw new UsageError(CAPTURE_USAGE);
-  if (!CAPTURE_SPACE.test(space)) throw new UsageError("--space must be a positive integer (the TaskSpace id)");
-  if (!CAPTURE_PAGE.test(page)) throw new UsageError("--page must be an ego page label (letters, digits, _ or -, at most 32)");
+  const isolated = flags.has("--isolated");
+  const url = flags.get("--url");
+  if (isolated) {
+    if (space !== undefined || page !== undefined) throw new UsageError("--isolated cannot be combined with --space or --page");
+    if (selector === undefined || (sub === "read" && !flags.has("--store"))) throw new UsageError(CAPTURE_USAGE);
+    if (url === undefined || !flags.has("--origin")) throw new UsageError("--isolated needs --url and --origin");
+  } else {
+    if (url !== undefined) throw new UsageError("--url needs --isolated");
+    if (space === undefined || page === undefined || selector === undefined) throw new UsageError(CAPTURE_USAGE);
+    if (sub === "read" && !flags.has("--store")) throw new UsageError(CAPTURE_USAGE);
+    if (!CAPTURE_SPACE.test(space)) throw new UsageError("--space must be a positive integer (the TaskSpace id)");
+    if (!CAPTURE_PAGE.test(page)) throw new UsageError("--page must be an ego page label (letters, digits, _ or -, at most 32)");
+  }
   if (!CAPTURE_SELECTOR.test(selector)) throw new UsageError("--selector must be 1-300 printable ASCII characters");
   const click = flags.get("--click") ?? null;
   if (click !== null && !CAPTURE_SELECTOR.test(click)) throw new UsageError("--click must be 1-300 printable ASCII characters");
@@ -718,7 +776,15 @@ function parseCapture(sub: string | undefined, flags: Map<string, string>): Capt
   if (origin !== null && (origin.length > MAX_CAPTURE_ORIGIN || !CAPTURE_ORIGIN.test(origin))) {
     throw new UsageError("--origin must be https://host[:port] or http://127.0.0.1|localhost[:port]");
   }
-  const common = { space: Number(space), page, selector, click, origin };
+  if (isolated && new URL(checkedCaptureUrl(url as string)).origin !== origin) throw new UsageError("--url must be on --origin");
+  const common = {
+    space: isolated ? null : Number(space),
+    page: isolated ? null : (page as string),
+    isolated: isolated ? { url: url as string } : null,
+    selector,
+    click,
+    origin,
+  };
 
   if (sub === "read") {
     const { service, account } = keychainRef(flags.get("--store") as string, "--store");
@@ -752,6 +818,26 @@ function parseCapture(sub: string | undefined, flags: Map<string, string>): Capt
   return { mode: "fill", sourceKind: "capture-generate", service, account, generateBytes: bytes, ...common };
 }
 
+/** An http(s) URL of printable ASCII; never echoed. */
+function checkedCaptureUrl(value: string): string {
+  const message = "--url must be an http(s) URL of at most 1000 printable ASCII characters";
+  if (!CAPTURE_URL.test(value)) throw new UsageError(message);
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new UsageError(message);
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") throw new UsageError(message);
+  return value;
+}
+
+/** The configured isolated-capture profile, or null when unset or not a valid id (config.json is not trusted). */
+function captureProfile(config: ZksConfig): string | null {
+  const id = config.capture?.profileId;
+  return typeof id === "string" && CAPTURE_PROFILE.test(id) ? id : null;
+}
+
 function keychainRef(value: string, flag: string): { service: string; account: string } {
   const parts = value.split("/");
   if (parts.length !== 2 || !parts.every((part) => KEYCHAIN_ID.test(part))) {
@@ -769,13 +855,13 @@ function keychainRef(value: string, flag: string): { service: string; account: s
 async function capture(deps: Deps, sub: string | undefined, flags: Map<string, string>, redactor: Redactor): Promise<RunOutput> {
   const req = parseCapture(sub, flags);
   const store = `${req.service}/${req.account}`;
-  const base = { command: "capture", mode: req.mode, store, origin: req.origin };
+  const base = { command: "capture", mode: req.mode, store, origin: req.origin, ...(req.isolated ? { isolated: true } : {}) };
   const audit = deps.openAudit();
   try {
     let approval: ApprovalMode | undefined;
     const finish = async (
       result: AuditResult,
-      outcome: { code: CaptureErrorCode | "not_approved"; message?: string } | { length: number },
+      outcome: { code: CaptureFailure; message?: string } | { length: number },
     ) => {
       const errorCode = "code" in outcome ? outcome.code : "";
       // A successful read or generate records the stored item's modification time, which a later
@@ -818,6 +904,10 @@ async function capture(deps: Deps, sub: string | undefined, flags: Map<string, s
 
     const egoBrowser = deps.tools.egoBrowser;
     if (!egoBrowser) return await finish("failed", { code: "browser_failed" });
+    // Isolated: checked before any dialog or Keychain write, so a refusal stores nothing.
+    const profileId = req.isolated ? captureProfile(await deps.readConfig()) : null;
+    if (req.isolated && profileId === null) return await finish("failed", { code: "isolated_profile_unset" });
+    let existed = false;
 
     if (req.sourceKind === "capture-from") {
       if (!(await deps.keychain.has(req.service, req.account))) return await finish("failed", { code: "not_found" });
@@ -841,8 +931,11 @@ async function capture(deps: Deps, sub: string | undefined, flags: Map<string, s
         }
       }
     } else if (await deps.keychain.has(req.service, req.account)) {
+      existed = true;
       approval = "dialog";
-      const where = `${req.origin ?? "the current page, origin not checked"} (TaskSpace ${req.space}, page ${req.page})`;
+      const where = req.isolated
+        ? `${req.origin} (isolated ego-browser profile ${profileId})`
+        : `${req.origin ?? "the current page, origin not checked"} (TaskSpace ${req.space}, page ${req.page})`;
       const lines = [
         `Replace the Keychain item ${store}?`,
         req.mode === "read" ? `New value: read from ${where}` : `New value: a random password zks generates, filled into ${where}`,
@@ -874,7 +967,20 @@ async function capture(deps: Deps, sub: string | undefined, flags: Map<string, s
       service: req.service,
       account: req.account,
       waitMs: CAPTURE_WAIT_MS,
+      ...(req.isolated && profileId !== null
+        ? {
+            isolated: {
+              profileId,
+              url: req.isolated.url,
+              name: `zks-capture-${(deps.randomBytes ?? nodeRandomBytes)(8).toString("hex")}`,
+            },
+          }
+        : {}),
     });
+    // A refused isolated fill --generate filled nothing: drop the item zks just created for it.
+    if (!outcome.ok && req.generateBytes !== null && !existed && ISOLATION_REFUSALS.includes(outcome.code)) {
+      await deps.keychain.remove(req.service, req.account).catch(() => false);
+    }
     // Awaited inside the try: the audit store must stay open until finish has synced the mirror.
     return await finish(outcome.ok ? "applied" : "failed", outcome.ok ? { length: outcome.length } : { code: outcome.code });
   } finally {

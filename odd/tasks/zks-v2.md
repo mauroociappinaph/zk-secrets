@@ -45,7 +45,7 @@ Each spec quotes the list item the user selected by number, then the user's deci
 
 - T1 [S2] pin gh/op/ego-browser binaries by sha256 in tools.json; refuse and warn on change — P1 — inline — 42ccc92 — done
 - T2 [S1] `install.sh --system` root-owned install under /usr/local/libexec/zks — P1 — inline — 5429b77 — done (launcher in /usr/local/libexec/zks/bin: /usr/local/bin is uid 501 here)
-- T3 [S3] capture in an isolated ego-browser profile/space — P1 — pending
+- T3 [S3] capture in an isolated ego-browser profile/space — P1 — worker — COMMIT — done (page p1 confirmed against real ego; isolated flow not run against a real second profile)
 - T4 [S4] SBOM, npm audit in install/CI, pinned lockfile check — P1 — inline — 464388e — done (socket.dev skipped: needs account+token)
 - T5 [S5,S6] formatted generators and derived sources — P2 — pending
 - T6 [S7] `zks rotate NAME` — P2 — pending
@@ -84,3 +84,4 @@ Each spec quotes the list item the user selected by number, then the user's deci
   - T17: `zks mcp`: hand-written stdio JSON-RPC 2.0 MCP server (no SDK dependency); tools `zks_plan`, `zks_apply`, `zks_capture_read`, `zks_capture_fill`, `zks_inventory`; each maps to `run([...argv], deps)` so the same gate, trust and redactor apply; input schemas have no value fields and `additionalProperties:false`.
   - T18: `zks init --detect`: reads `.env.example` names only (values never read into output), `vercel.json` → vercel target stub, `railway.toml|railway.json` → railway target stub; every variable `sensitive:true` with `{kind:"prompt"}`; refuses to overwrite an existing policy; prints what it detected.
 - L5 (runtime): parent context backstop reached after T1/T2/T4; remaining tasks are delegated one worker at a time on the shared tree.
+- L6 (incident, T3 worker): one run of test/isolated-capture.test.ts executed a generated capture script with the real /usr/bin/security and stored the test canary as login Keychain item app/key. Metadata (cdat 2026-11-12T15:14:11Z, created during the run) shows it did not pre-exist, so no user item was overwritten; the parent deleted it. Helper fixed by the worker to always swap in a fake security and assert the swap.

@@ -24,6 +24,11 @@ Usage:
                                               Fill a new random (16-128 bytes) or a stored password
                                               into one password input of an ego-browser page; --from
                                               into another origin than the item came from asks first
+  zks capture read --isolated --url URL --selector CSS --store SERVICE/ACCOUNT [--click SELECTOR] --origin ORIGIN
+  zks capture fill --isolated --url URL --selector CSS (--store SERVICE/ACCOUNT --generate BYTES
+                   | --from SERVICE/ACCOUNT) --origin ORIGIN
+                                              Same, in a space zks opens itself in the capture-profile
+                                              (not the agent's session) at URL, closed afterwards
   zks audit list [--limit N] [--project P]    Show audit records (metadata only)
   zks audit verify                            Check the audit hash chain
   zks audit sync                              Push pending audit records to Google Sheets
@@ -32,6 +37,8 @@ Usage:
   zks config show
   zks config set sheets-webhook <url>         Apps Script /exec URL for the audit mirror
   zks config unset sheets-webhook
+  zks config set capture-profile <profileId>  Separate ego-browser profile for capture --isolated
+  zks config unset capture-profile
   zks doctor                                  Check tools, tokens, audit and install integrity
   zks --version | zks help
 
