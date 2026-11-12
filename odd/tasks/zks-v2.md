@@ -52,9 +52,9 @@ Each spec quotes the list item the user selected by number, then the user's deci
 - T7 [S8] `zks inventory` — P2 — worker — 7ae4f28 — done
 - T8 [S9] plan effects — P2 — worker — 7ae4f28 — done
 - T9 [S10] `zks doctor --fix` — P2 — worker — 7ae4f28 — done
-- T10 [S11] Netlify sink — P3 — worker — implemented, uncommitted (parent commits)
-- T11 [S12] Docker Swarm / Compose secret sinks — P3 — worker — implemented, uncommitted (parent commits)
-- T12 [S13] dotenv file sink (mode 600) — P3 — worker — implemented, uncommitted (parent commits)
+- T10 [S11] Netlify sink — P3 — worker — 0558bc4 — implemented, verify pending
+- T11 [S12] Docker Swarm / Compose secret sinks — P3 — worker — 0558bc4 — implemented, verify pending
+- T12 [S13] dotenv file sink (mode 600) — P3 — worker — 0558bc4 — implemented, verify pending
 - T13 [S14] capture recipes — P4 — pending
 - T14 [S15] Playwright/Chrome capture backend — P4 — pending
 - T15 [S16] capture from a downloaded file — P4 — pending
@@ -99,3 +99,4 @@ Each spec quotes the list item the user selected by number, then the user's deci
 - L18 (verify mwdrgqfw-b-o579 of 5d4278f): invalid UTF-8 fails closed against the real Keychain (61ff, c3, surrogate, overlong); valid values exact. Blocker B1: fatal TextDecoder dropped a leading UTF-8 BOM (typed abc with ok). Fixed with ignoreBOM: true plus the verifier's regression test (RED then GREEN); 252/252; reinstalled.
 - L19 (verify mwdrly1s-c-y0z1 of 3507403): met — installed script has ignoreBOM; 11 real throwaway items exact or keychain_failed; BOM test RED on 5d4278f, GREEN on 3507403; 252/252. Verifier's extra regression tests added (BOM mid/double/newline, overlong/surrogate/truncated). Phases 1-2 closed locally; push still blocked by the RDD gate (L17).
 - L20 (user, verbatim): "Se puede empezar por el punto 3 ?" — read as Phase 3 (T10-T12, sinks). Branch feature/zks-v2-sinks from develop (23dec93). One worker, one commit per task, L4 designs apply; CTO authority L3 continues.
+- L21 (P3 implement): T10-T12 in 0558bc4 (one commit, 1087 lines: per-task hunks in shared files (types, validate, describe, trust, index, run, help, README) would not typecheck in isolation, same delivery as P2 in L10). npm run check 279/279. Smoke: dev launcher plan on zks.policy.example.json shows netlify/docker-swarm/compose/dotenv effects. Worker deviations from L4, kept: Netlify GET then PATCH/POST, refuses PATCH of a non-secret variable with netlify_not_secret; compose refuses an existing dir with group/other bits (insecure_dir) instead of chmodding; dotenv target requires a .env* name and no dir creation. Known: dotenv escaping of \ " $ is not decoded by the zks dotenv source (resolve.ts:289); trust key docker-swarm:current-context follows the current docker context. Risk: item 1 (rewrites user .env/compose files), item 3 (tools.ts parser shared with gh/op/ego pins).
