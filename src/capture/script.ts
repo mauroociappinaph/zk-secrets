@@ -224,7 +224,7 @@ async function fill(page) {
   else if (hex && hex[1].length % 2 === 0) {
     // fatal: bytes that are not UTF-8 fail closed instead of being typed as U+FFFD.
     try {
-      value = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(hex[1], "hex"));
+      value = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(Buffer.from(hex[1], "hex"));
     } catch {
       value = null;
     }

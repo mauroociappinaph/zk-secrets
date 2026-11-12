@@ -1047,3 +1047,16 @@ test("v2 S3 (L14): fill fails closed on a Keychain value that is not valid UTF-8
   assert.deepEqual(printed, ['ZKS_RESULT {"ok":false,"code":"keychain_failed"}']);
   assert.equal(input.value, "");
 });
+
+test("v2 S3 (L16): fill keeps a leading UTF-8 BOM of a Keychain value", async () => {
+  for (const [hex, value] of [["EFBBBF616263", "﻿abc"], ["EFBBBF", "﻿"]] as const) {
+    const path = join(tempDir(), "security");
+    writeFileSync(path, `#!/bin/sh\nprintf 'password: 0x${hex}  "x"\\n' >&2\nexit 0\n`);
+    chmodSync(path, 0o700);
+    const input = Object.assign(new FakeInput(), { type: "password" });
+    const { page } = domPage({ nodes: [input] });
+    const { printed } = await runScript(buildCaptureScript(fillSpec(), path), page);
+    assert.deepEqual(printed, [`ZKS_RESULT {"ok":true,"length":${value.length}}`], hex);
+    assert.equal(input.value, value);
+  }
+});
