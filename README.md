@@ -19,7 +19,7 @@
 
 - Values transit the zks process memory briefly: read, send, zero. zks zeroes its buffers and disables core dumps, but it cannot stop the OS from paging memory to swap, and the short-lived JavaScript strings sent to provider APIs cannot be zeroed.
 - An agent running as the **same macOS user** has the same file and Keychain access as you:
-  - the install integrity check (`zks doctor`) is **tamper-evident, not tamper-proof**: it detects a modified install, it cannot prevent one;
+  - with the default user install, the install integrity check (`zks doctor`) is **tamper-evident, not tamper-proof**: it detects a modified install, it cannot prevent one. `sudo ./install.sh --system` makes the app, its node, the launcher and the manifest root-owned and read-only, so the user cannot modify them (see [System install](#system-install)); a same-user agent can still put another `zks` earlier on `PATH`, so agents should call `/usr/local/libexec/zks/bin/zks`;
   - Keychain items (provider tokens, the audit anchor) can be read with `/usr/bin/security find-generic-password -w` by any process of the same user. The skill and `~/AGENTS.md` rule forbid this; they cannot enforce it. For a hard boundary, run the agent as a dedicated macOS user;
   - it can edit the files zks trusts after `env -i`: `~/.aws/config` (`credential_process`), `~/.config/gh` (the login token zks reads) and the Homebrew binaries on the fixed `PATH` (`/opt/homebrew/bin/gh`, `op`);
   - it can read the `trust-hmac` Keychain item and forge `~/.config/zks/trust.json`, so trusted destinations stop a confused or prompt-injected agent, not a same-user agent that attacks zks itself.
@@ -166,6 +166,22 @@ Every apply appends one record per variable × target to `~/.local/state/zks/aud
 - `zks audit list` — read records.
 - `zks audit verify` — check the chain, and check it against the anchor (record count and last hash) that every apply stores in the Keychain item `zks`/`audit-head`; a deleted tail fails with `brokenAt: "truncated"`.
 - `zks audit sync` — push to the optional Google Sheets mirror; setup in [docs/apps-script](./docs/apps-script/README.md). `zks config set|unset sheets-webhook` asks for your approval in a dialog.
+
+## System install
+
+```sh
+./install.sh --system --dry-run   # print the layout, write nothing
+sudo ./install.sh --system        # once, from your own account
+```
+
+| Path | Owner, mode |
+|---|---|
+| `/usr/local/libexec/zks/<version>/` (app, production `node_modules`, `tools.json`, `sbom.cdx.json`, and its own copy of `node`) | `root:wheel`, read-only |
+| `/usr/local/libexec/zks/bin/zks` (launcher) | `root:wheel`, `555` |
+| `/usr/local/libexec/zks/integrity.json` | `root:wheel`, `444` |
+| `/etc/paths.d/zks` (puts the launcher on `PATH` for new shells) | `root:wheel`, `644` |
+
+The build, the skill and the `~/AGENTS.md` block still run and write as you (`$SUDO_USER`), never as root. The launcher is not written to `/usr/local/bin` because Homebrew often makes that directory user-owned; the install refuses to proceed when `/usr`, `/usr/local`, `/usr/local/libexec` or the zks prefix is not root-owned or is group/other-writable. The user-level launcher `~/.local/bin/zks` is removed so it cannot shadow the system one. `zks doctor` reports `install.mode: "system"` and an `ownership` check of the whole prefix (every entry root-owned, not group/other-writable, no symlink); a failed check turns `install.status` into `"ownership"`. Remove it with `sudo ./uninstall.sh --system`.
 
 ## Uninstall
 

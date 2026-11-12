@@ -1,7 +1,23 @@
 #!/bin/sh
 # Removes the zks launcher, the installed app, the agent skill and the ~/AGENTS.md block.
 # Keeps the audit log, the config and the Keychain tokens, and says so.
+# sudo ./uninstall.sh --system removes the root-owned install (/usr/local/libexec/zks and
+# /etc/paths.d/zks) instead; the skill and ~/AGENTS.md block are removed by a plain ./uninstall.sh.
 set -eu
+
+if [ "${1:-}" = "--system" ]; then
+  [ "$(id -u)" = 0 ] || { printf 'uninstall.sh: --system needs root: run sudo ./uninstall.sh --system\n' >&2; exit 1; }
+  if [ -d /usr/local/libexec/zks ]; then
+    chmod -R u+w /usr/local/libexec/zks
+    rm -rf /usr/local/libexec/zks
+    printf 'removed /usr/local/libexec/zks\n'
+  fi
+  if [ -f /etc/paths.d/zks ]; then
+    rm -f /etc/paths.d/zks
+    printf 'removed /etc/paths.d/zks\n'
+  fi
+  exit 0
+fi
 
 USER_HOME="$(eval echo "~$(id -un)")"
 BIN_LAUNCHER="$USER_HOME/.local/bin/zks"

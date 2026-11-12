@@ -8,9 +8,9 @@ import { createSheetsMirror } from "./audit/mirror.ts";
 import { openAuditStore } from "./audit/store.ts";
 import { createMacDialogs } from "./gate/dialog.ts";
 import { createExec } from "./platform/exec.ts";
-import { checkIntegrity } from "./platform/integrity.ts";
+import { checkIntegrity, checkOwnership } from "./platform/integrity.ts";
 import { ZKS_KEYCHAIN_SERVICE, createKeychain } from "./platform/keychain.ts";
-import { zksPaths } from "./platform/paths.ts";
+import { SYSTEM_LIBEXEC, installLayout, zksPaths } from "./platform/paths.ts";
 import { NO_PINS, TOOLS_FILE, parseToolPins, pinnedExec, resolveTools, sha256File, type ToolPaths, type ToolPins } from "./platform/tools.ts";
 import { loadTrust, type TrustFile } from "./policy/trust.ts";
 import { TOKEN_ACCOUNTS, run, type Deps, type ZksConfig } from "./run.ts";
@@ -149,7 +149,16 @@ export async function main(identity: Identity): Promise<number> {
         platform: process.platform,
         node: process.versions.node,
         approvalDialog: process.platform === "darwin" ? "macOS osascript" : "unavailable: every apply is denied",
-        install: { root: appRoot, ...checkIntegrity(paths.integrityFile, appRoot) },
+        install: (() => {
+          const layout = installLayout(appRoot, identity.home);
+          const integrity = checkIntegrity(layout.integrityFile, appRoot);
+          if (layout.mode === "user") return { root: appRoot, mode: layout.mode, ...integrity };
+          // A system install is only "ok" while the user cannot modify it: root-owned, read-only.
+          // The whole prefix: every version, bin/zks (the launcher) and integrity.json.
+          const ownership = checkOwnership(SYSTEM_LIBEXEC);
+          const status = integrity.status === "ok" && !ownership.ok ? "ownership" : integrity.status;
+          return { root: appRoot, mode: layout.mode, ...integrity, status, ownership };
+        })(),
         tools: {
           source: toolsSource,
           "ego-browser": tools.egoBrowser !== null && isExecutableFile(tools.egoBrowser),
