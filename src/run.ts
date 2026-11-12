@@ -1,21 +1,40 @@
 import { randomBytes as nodeRandomBytes } from "node:crypto";
 import { readAuditAnchor, writeAuditAnchor } from "./audit/anchor.ts";
 import { SHEETS_WEBHOOK_URL } from "./audit/mirror.ts";
-import type { ApprovalMode, AuditRecord, AuditResult, AuditStore, CaptureSourceKind, Mirror, MirrorResult } from "./audit/types.ts";
+import type {
+  ApprovalMode,
+  AuditRecord,
+  AuditResult,
+  AuditStore,
+  CaptureSourceKind,
+  Mirror,
+  MirrorResult,
+  WrittenDestination,
+} from "./audit/types.ts";
 import { runCapture } from "./capture/run.ts";
-import { CAPTURE_WAIT_MS, type CaptureErrorCode } from "./capture/script.ts";
+import { CAPTURE_WAIT_MS, type CaptureErrorCode, type CaptureOutcome } from "./capture/script.ts";
 import type { HumanChannel } from "./gate/dialog.ts";
 import type { Exec } from "./platform/exec.ts";
 import { ZKS_KEYCHAIN_SERVICE, type Keychain } from "./platform/keychain.ts";
+import type { PermissionFix } from "./platform/permissions.ts";
 import type { ToolPaths } from "./platform/tools.ts";
-import { describeDestination } from "./policy/describe.ts";
+import { describeDestination, describeEffect, summarizeEffects } from "./policy/describe.ts";
 import { describeTrustKey, loadTrust, saveTrust, trustKeyOf, type TrustFile, type TrustIo } from "./policy/trust.ts";
-import { PolicyError, describeSource, planOperations, validatePolicy } from "./policy/validate.ts";
+import {
+  PROJECT_NAME,
+  PolicyError,
+  dependentsOf,
+  describeSource,
+  generatedDependencies,
+  planOperations,
+  sourceKindOf,
+  validatePolicy,
+} from "./policy/validate.ts";
 import type { Operation, Policy, Provider, TargetConfig } from "./policy/types.ts";
 import { Redactor } from "./secret/redactor.ts";
 import { SecretBuffer } from "./secret/secret-buffer.ts";
 import { SinkError, type AwsClientFactory, type Sink } from "./sinks/types.ts";
-import { SourceError, resolveValue } from "./sources/resolve.ts";
+import { SourceError, createResolver } from "./sources/resolve.ts";
 import { HELP_TEXT } from "./help.ts";
 import { resolve as resolvePath } from "node:path";
 
@@ -38,6 +57,8 @@ export type TokenAccount = (typeof TOKEN_ACCOUNTS)[number];
 
 export interface ZksConfig {
   sheets?: { webhookUrl?: string };
+  /** ego-browser profile for `zks capture --isolated`; never the default profile. */
+  capture?: { profileId?: string };
 }
 
 export interface Deps {
@@ -65,6 +86,8 @@ export interface Deps {
   readTrust(): Promise<TrustFile | null>;
   writeTrust(file: TrustFile): Promise<void>;
   doctor(): Promise<Record<string, unknown>>;
+  /** `zks doctor --fix`: directory and file modes of ~/.config/zks and ~/.local/state/zks only. */
+  fixPermissions(): Promise<PermissionFix>;
   randomBytes?: (size: number) => Buffer;
 }
 
@@ -113,6 +136,7 @@ const FLAGS_WITH_VALUE = [
   "--origin",
   "--generate",
   "--from",
+  "--url",
 ];
 
 /** Options each command uses; any other option is refused. --help and --version are global. */
@@ -121,9 +145,12 @@ const COMMAND_FLAGS: Record<string, string[]> = {
   validate: ["--policy"],
   plan: ["--policy", "--only", "--target"],
   apply: ["--policy", "--only", "--target", "--agent"],
+  rotate: ["--policy", "--target"],
+  inventory: ["--policy", "--project"],
+  doctor: ["--fix"],
   "audit list": ["--limit", "--project"],
-  "capture read": ["--space", "--page", "--selector", "--store", "--click", "--origin"],
-  "capture fill": ["--space", "--page", "--selector", "--store", "--generate", "--from", "--origin"],
+  "capture read": ["--space", "--page", "--selector", "--store", "--click", "--origin", "--isolated", "--url"],
+  "capture fill": ["--space", "--page", "--selector", "--store", "--generate", "--from", "--origin", "--isolated", "--url"],
 };
 const SUBCOMMANDS: Record<string, string[]> = {
   auth: ["status", "set", "delete"],
@@ -132,7 +159,7 @@ const SUBCOMMANDS: Record<string, string[]> = {
   trust: ["list", "remove"],
   capture: ["read", "fill"],
 };
-const COMMANDS = ["init", "validate", "plan", "apply", "doctor", ...Object.keys(SUBCOMMANDS)];
+const COMMANDS = ["init", "validate", "plan", "apply", "rotate", "inventory", "doctor", ...Object.keys(SUBCOMMANDS)];
 
 interface ParsedArgs {
   positionals: string[];
@@ -155,6 +182,11 @@ function parseArgs(argv: string[]): ParsedArgs {
         "zks never accepts secret values on the command line; declare a source in zks.policy.json or use `zks auth set`",
       );
     }
+    if (flag === "--isolated" || flag === "--fix") {
+      if (inline !== undefined) throw new UsageError(`option ${flag} takes no value`);
+      flags.set(flag, "true");
+      continue;
+    }
     if (flag === "--help" || flag === "--version") {
       flags.set(flag, "true");
       continue;
@@ -174,8 +206,11 @@ function positionalLimit(command: string, sub: string | undefined): number | und
     case "validate":
     case "plan":
     case "apply":
+    case "inventory":
     case "doctor":
       return 1;
+    case "rotate":
+      return 2;
     case "audit":
       return 2;
     case "auth":
@@ -244,12 +279,13 @@ function describeOperation(op: Operation, cwd: string): Record<string, unknown> 
     destination: describeDestination(op),
     sensitive: op.variable.sensitive,
     source: describeSource(op.variable.source, cwd),
+    effect: describeEffect(op),
   };
 }
 
 /** Every write in full; writes to a destination that is not trusted yet end with [NEW destination]. */
-function approvalLines(policy: Policy, ops: Operation[], cwd: string, newKeys: Set<string>): string[] {
-  const lines = [`Project: ${policy.project}`, `Write ${ops.length} value(s):`, ""];
+function approvalLines(policy: Policy, ops: Operation[], cwd: string, newKeys: Set<string>, header: string[] = []): string[] {
+  const lines = [...header, `Project: ${policy.project}`, `Write ${ops.length} value(s):`, ""];
   for (const op of ops) {
     lines.push(
       `- ${op.name} -> ${describeDestination(op)} ` +
@@ -307,10 +343,19 @@ async function dispatch(argv: string[], deps: Deps, redactor: Redactor): Promise
     case "plan": {
       const policy = await loadPolicy(deps, flags.get("--policy"));
       const ops = planOperations(policy, selection(flags));
-      return json(EXIT_OK, { ok: true, project: policy.project, operations: ops.map((op) => describeOperation(op, deps.cwd)) });
+      return json(EXIT_OK, {
+        ok: true,
+        project: policy.project,
+        operations: ops.map((op) => describeOperation(op, deps.cwd)),
+        effects: summarizeEffects(ops),
+      });
     }
     case "apply":
       return apply(deps, flags, redactor);
+    case "rotate":
+      return rotate(deps, sub, flags, redactor);
+    case "inventory":
+      return inventory(deps, flags);
     case "auth":
       return auth(deps, sub, arg);
     case "audit":
@@ -321,11 +366,49 @@ async function dispatch(argv: string[], deps: Deps, redactor: Redactor): Promise
       return trust(deps, sub, arg);
     case "capture":
       return capture(deps, sub, flags, redactor);
-    case "doctor":
-      return json(EXIT_OK, { ok: true, ...(await deps.doctor()) });
+    case "doctor": {
+      if (!flags.has("--fix")) return json(EXIT_OK, { ok: true, ...(await deps.doctor()) });
+      // Fix first, so the report shows the repaired state.
+      const fix = await deps.fixPermissions();
+      const report = await deps.doctor();
+      return json(EXIT_OK, { ok: true, ...report, fixed: fix.fixed, notFixable: notFixable(fix, report) });
+    }
     default:
       throw new UsageError(`unknown command ${command}; run \`zks help\``);
   }
+}
+
+interface NotFixable {
+  check: string;
+  status: string;
+  command: string;
+}
+
+const field = (value: unknown, key: string): unknown =>
+  typeof value === "object" && value !== null ? (value as Record<string, unknown>)[key] : undefined;
+
+/** What `doctor --fix` leaves alone (integrity, pins, trust, audit chain, Keychain), each with the command to run. */
+function notFixable(fix: PermissionFix, report: Record<string, unknown>): NotFixable[] {
+  const out: NotFixable[] = fix.failed.map((f) => ({ check: `permissions ${f.path}`, status: f.reason, command: `ls -l ${f.path}` }));
+  const install = field(report, "install");
+  const reinstall = field(install, "mode") === "system" ? "sudo ./install.sh --system" : "./install.sh";
+  const installStatus = field(install, "status");
+  if (typeof installStatus === "string" && installStatus !== "ok") out.push({ check: "install", status: installStatus, command: reinstall });
+  const pins = field(field(report, "tools"), "pins");
+  for (const [tool, status] of Object.entries(typeof pins === "object" && pins !== null ? pins : {})) {
+    if (status === "changed") out.push({ check: `tools.pins.${tool}`, status, command: reinstall });
+  }
+  if (field(report, "trust") === "invalid") {
+    out.push({ check: "trust", status: "invalid", command: "zks trust list, then choose Always allow in the next apply to sign trust.json again" });
+  }
+  if (field(field(report, "audit"), "ok") === false) out.push({ check: "audit", status: "broken", command: "zks audit verify" });
+  const tokens = field(report, "tokens");
+  for (const account of TOKEN_ACCOUNTS) {
+    // The HMAC token only matters once a Sheets mirror is configured.
+    if (account === "sheets-hmac" && field(field(report, "mirror"), "sheetsWebhook") !== true) continue;
+    if (field(tokens, account) === false) out.push({ check: `tokens.${account}`, status: "missing", command: `zks auth set ${account}` });
+  }
+  return out;
 }
 
 function selection(flags: Map<string, string>) {
@@ -336,6 +419,237 @@ async function apply(deps: Deps, flags: Map<string, string>, redactor: Redactor)
   const policy = await loadPolicy(deps, flags.get("--policy"));
   const ops = planOperations(policy, selection(flags));
   if (ops.length === 0) return json(EXIT_OK, { ok: true, project: policy.project, results: [] });
+  return writeOperations(deps, redactor, policy, ops, {
+    agent: flags.get("--agent") ?? deps.agentId,
+    action: "set",
+    alwaysAsk: false,
+    title: "zks: approve secret changes",
+    header: [],
+    extra: {},
+  });
+}
+
+const ROTATE_USAGE = "usage: zks rotate NAME [--target t1,t2] [--policy FILE]";
+
+/**
+ * Writes a NEW value of a generated variable to its targets (or the --target subset) and rewrites
+ * the variables derived from it, in one apply that always shows the approval dialog. Nothing is
+ * revoked at the provider the old value came from.
+ */
+async function rotate(deps: Deps, name: string | undefined, flags: Map<string, string>, redactor: Redactor): Promise<RunOutput> {
+  if (name === undefined) throw new UsageError(ROTATE_USAGE);
+  const policy = await loadPolicy(deps, flags.get("--policy"));
+  // The name is only echoed once it is known: it might be a pasted secret.
+  if (!Object.hasOwn(policy.variables, name)) throw new UsageError("not a variable of the policy; see `zks plan`");
+  const variable = policy.variables[name] as Policy["variables"][string];
+  const subset = list(flags.get("--target"));
+  if (subset) {
+    const unknown = subset.filter((t) => !Object.hasOwn(policy.targets, t));
+    if (unknown.length > 0) throw new PolicyError(unknown.map((t) => `--target: unknown target "${t}"`));
+    const foreign = subset.find((t) => !variable.targets.includes(t));
+    if (foreign !== undefined) throw new UsageError(`--target: "${foreign}" is not a target of ${name}`);
+  }
+
+  let refusal: string | null = null;
+  if (variable.source?.kind !== "generate") {
+    refusal = `${name} is not generated by zks; only variables with a generate source can be rotated`;
+  }
+  const dependents = refusal === null ? dependentsOf(policy, name) : [];
+  for (const dependent of dependents) {
+    const other = generatedDependencies(policy, dependent).find((dep) => dep !== name);
+    if (other !== undefined && refusal === null) {
+      refusal = `${dependent} also uses ${other}, another generated value; rotating ${name} alone would replace it too`;
+    }
+  }
+  const agent = deps.agentId;
+  // Nothing is resolved or written; every write the rotation would have made is audited failed.
+  const refuse = async (refused: Operation[], error: { code: string; message: string; [k: string]: unknown }) => {
+    const store = deps.openAudit();
+    try {
+      const results = refused.map((op) => {
+        const entry = appendOperation(deps, store, { project: policy.project, agent, action: "rotate" }, op, "failed", {
+          errorCode: error.code,
+        });
+        return toResult(op, entry, "failed", undefined, { code: error.code, message: error.message });
+      });
+      const anchorError = await saveAnchor(deps, store);
+      const mirror = await deps.mirror.sync(store);
+      return json(EXIT_USAGE, { ok: false, project: policy.project, error, results, mirror, ...anchorError });
+    } finally {
+      store.close();
+    }
+  };
+  if (refusal !== null) {
+    const refused: Operation[] = variable.targets
+      .filter((targetKey) => !subset || subset.includes(targetKey))
+      .map((targetKey) => ({ name, targetKey, target: policy.targets[targetKey] as TargetConfig, variable, sourceKind: sourceKindOf(variable) }));
+    return refuse(refused, { code: "not_rotatable", message: refusal });
+  }
+
+  const ops = planOperations(policy, { only: [name, ...dependents], targets: subset });
+  if (subset) {
+    // A derived value written elsewhere would keep the old value there: rotate all of it or none.
+    const outside = dependents
+      .map((dependent) => ({
+        dependent,
+        targets: (policy.variables[dependent] as Policy["variables"][string]).targets.filter((t) => !subset.includes(t)),
+      }))
+      .filter((d) => d.targets.length > 0);
+    if (outside.length > 0) {
+      const shown = outside.map((d) => `${d.dependent} (${d.targets.join(", ")})`).join(", ");
+      return refuse(ops, {
+        code: "dependents_outside_selection",
+        message:
+          `rotating ${name} on --target ${subset.join(",")} would leave derived values stale on other targets: ${shown}; ` +
+          "rerun without --target or include those targets",
+        dependents: outside,
+      });
+    }
+  }
+  const written = [...new Set(ops.map((op) => op.name))].filter((n) => n !== name);
+  return writeOperations(deps, redactor, policy, ops, {
+    agent,
+    action: "rotate",
+    alwaysAsk: true,
+    title: "zks: approve secret rotation",
+    header: [
+      `Rotate ${name}: a NEW value replaces the current one${written.length > 0 ? `; derived ${written.join(", ")} rewritten with it` : ""}.`,
+      "The old value is not revoked anywhere.",
+      "",
+    ],
+    extra: { rotated: name, dependents: written },
+  });
+}
+
+const DAY_MS = 86_400_000;
+
+interface InventoryEntry {
+  variable: string;
+  provider: string;
+  target: string;
+  environment: string;
+  lastWrittenAt: string | null;
+  ageDays: number | null;
+  writes: number;
+  status: "written" | "never_written" | "not_in_policy";
+}
+
+/**
+ * Which variable was written to which destination and when, from the local audit log only (no
+ * network, no values). Compared with the policy of the same project when there is one.
+ */
+async function inventory(deps: Deps, flags: Map<string, string>): Promise<RunOutput> {
+  const project = flags.get("--project");
+  if (project !== undefined && !PROJECT_NAME.test(project)) throw new UsageError(`--project must match ${PROJECT_NAME}`);
+  const policyFlag = flags.get("--policy");
+  const policyFile = resolvePath(deps.cwd, policyFlag ?? "zks.policy.json");
+  // With --project and no --policy, a missing default policy only means there is nothing to compare with.
+  const readPolicy =
+    policyFlag !== undefined || project === undefined || (await deps.readFile(policyFile).then(() => true, () => false));
+  const loaded = readPolicy ? await loadPolicy(deps, policyFlag) : null;
+  const name = project ?? (loaded as Policy).project;
+  const policy = loaded !== null && loaded.project === name ? loaded : null;
+
+  const store = deps.openAudit();
+  let rows: WrittenDestination[];
+  try {
+    rows = store.writtenDestinations(name);
+  } finally {
+    store.close();
+  }
+  const now = deps.now().getTime();
+  const key = (variable: string, target: string, provider: string) => `${variable}\u0000${target}\u0000${provider}`;
+  const planned = new Map((policy ? planOperations(policy) : []).map((op) => [key(op.name, op.targetKey, op.target.provider), op]));
+  const entries: InventoryEntry[] = rows.map((row) => {
+    const age = Math.floor((now - Date.parse(row.lastWrittenAt)) / DAY_MS);
+    const k = key(row.variableName, row.target, row.provider);
+    const inPolicy = planned.delete(k) || policy === null;
+    return {
+      variable: row.variableName,
+      provider: row.provider,
+      target: row.target,
+      environment: row.environment,
+      lastWrittenAt: row.lastWrittenAt,
+      ageDays: Number.isFinite(age) ? age : null,
+      writes: row.writes,
+      status: inPolicy ? "written" : "not_in_policy",
+    };
+  });
+  for (const op of planned.values()) {
+    entries.push({
+      variable: op.name,
+      provider: op.target.provider,
+      target: op.targetKey,
+      environment: environmentOf(op.target),
+      lastWrittenAt: null,
+      ageDays: null,
+      writes: 0,
+      status: "never_written",
+    });
+  }
+  const order = (e: InventoryEntry) => [e.variable, e.target, e.provider];
+  entries.sort((a, b) => {
+    const [x, y] = [order(a), order(b)];
+    for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return (x[i] as string) < (y[i] as string) ? -1 : 1;
+    return 0;
+  });
+  return json(EXIT_OK, { ok: true, project: name, policy: policy ? policyFile : null, entries });
+}
+
+interface AuditContext {
+  project: string;
+  agent: string;
+  action: "set" | "rotate";
+}
+
+function appendOperation(
+  deps: Deps,
+  store: AuditStore,
+  ctx: AuditContext,
+  op: Operation,
+  result: OperationResult["result"],
+  extra: { version?: string; errorCode?: string },
+  approval?: ApprovalMode,
+): AuditRecord {
+  return store.append({
+    ts: deps.now().toISOString(),
+    actorHuman: deps.user,
+    actorAgent: ctx.agent,
+    project: ctx.project,
+    provider: op.target.provider,
+    target: op.targetKey,
+    environment: environmentOf(op.target),
+    variableName: op.name,
+    action: ctx.action,
+    sensitive: op.variable.sensitive,
+    sourceKind: op.sourceKind,
+    result,
+    providerVersion: extra.version ?? "",
+    errorCode: extra.errorCode ?? "",
+    ...(approval ? { approval } : {}),
+  });
+}
+
+interface WriteOptions {
+  agent: string;
+  action: "set" | "rotate";
+  /** Show the dialog even when every destination is trusted. */
+  alwaysAsk: boolean;
+  title: string;
+  /** Lines shown above the writes in the dialog. */
+  header: string[];
+  /** Fields added to the JSON output. */
+  extra: Record<string, unknown>;
+}
+
+/** Approves, resolves and writes ops in one apply; every write is audited with opts.action. */
+async function writeOperations(
+  deps: Deps,
+  redactor: Redactor,
+  policy: Policy,
+  ops: Operation[],
+  opts: WriteOptions,
+): Promise<RunOutput> {
   if (ops.length > MAX_OPERATIONS_PER_APPROVAL) {
     return json(EXIT_USAGE, {
       ok: false,
@@ -349,7 +663,7 @@ async function apply(deps: Deps, flags: Map<string, string>, redactor: Redactor)
   const trustState = await loadTrust(trustIo(deps));
   const trustedKeys = new Set(trustState.destinations.map((d) => d.key));
   const newKeys = [...new Set(ops.map(trustKeyOf))].filter((key) => !trustedKeys.has(key));
-  const lines = approvalLines(policy, ops, deps.cwd, new Set(newKeys));
+  const lines = approvalLines(policy, ops, deps.cwd, new Set(newKeys), opts.header);
   if (lines.some((line) => line.length > MAX_DIALOG_LINE) || lines.join("\n").length > MAX_DIALOG_TEXT) {
     return json(EXIT_USAGE, {
       ok: false,
@@ -358,32 +672,18 @@ async function apply(deps: Deps, flags: Map<string, string>, redactor: Redactor)
   }
   const trustReport = trustState.valid ? {} : { trust: "invalid" as const };
 
-  const agent = flags.get("--agent") ?? deps.agentId;
-  // Every destination already trusted: no dialog. Otherwise the human sees every write.
-  const approval: ApprovalMode = newKeys.length === 0 ? "trusted" : "dialog";
+  const agent = opts.agent;
+  const extra = opts.extra;
+  // Every destination already trusted: no dialog (unless the command always asks). Otherwise the human sees every write.
+  const approval: ApprovalMode = newKeys.length === 0 && !opts.alwaysAsk ? "trusted" : "dialog";
   const store = deps.openAudit();
   const results: OperationResult[] = [];
   try {
+    const ctx: AuditContext = { project: policy.project, agent, action: opts.action };
     const record = (op: Operation, result: OperationResult["result"], extra: { version?: string; errorCode?: string }) =>
-      store.append({
-        ts: deps.now().toISOString(),
-        actorHuman: deps.user,
-        actorAgent: agent,
-        project: policy.project,
-        provider: op.target.provider,
-        target: op.targetKey,
-        environment: environmentOf(op.target),
-        variableName: op.name,
-        action: "set",
-        sensitive: op.variable.sensitive,
-        sourceKind: op.sourceKind,
-        result,
-        providerVersion: extra.version ?? "",
-        errorCode: extra.errorCode ?? "",
-        approval,
-      });
+      appendOperation(deps, store, ctx, op, result, extra, approval);
 
-    const decision = approval === "trusted" ? "once" : await deps.human.approveWithTrust("zks: approve secret changes", lines);
+    const decision = approval === "trusted" ? "once" : await deps.human.approveWithTrust(opts.title, lines);
     if (decision === "deny") {
       for (const op of ops) {
         const entry = record(op, "denied", { errorCode: "not_approved" });
@@ -391,7 +691,7 @@ async function apply(deps: Deps, flags: Map<string, string>, redactor: Redactor)
       }
       const anchorError = await saveAnchor(deps, store);
       const mirror = await deps.mirror.sync(store);
-      return json(EXIT_DENIED, { ok: false, project: policy.project, approval, results, mirror, ...trustReport, ...anchorError });
+      return json(EXIT_DENIED, { ok: false, project: policy.project, ...extra, approval, results, mirror, ...trustReport, ...anchorError });
     }
 
     let trustChange: { trusted?: string[]; trustError?: string } = {};
@@ -408,21 +708,28 @@ async function apply(deps: Deps, flags: Map<string, string>, redactor: Redactor)
     const byVariable = new Map<string, Operation[]>();
     for (const op of ops) byVariable.set(op.name, [...(byVariable.get(op.name) ?? []), op]);
 
+    // One resolver per apply: each value is resolved once, in dependency order, and shared by the
+    // templates and public keys derived from it. Every resolved value is zeroed in the finally below.
+    const resolver = createResolver(
+      policy.variables,
+      {
+        exec: deps.exec,
+        tools: deps.tools,
+        keychain: deps.keychain,
+        human: deps.human,
+        cwd: deps.cwd,
+        readFile: deps.readFile,
+        randomBytes: deps.randomBytes,
+      },
+      (_name, spec, value) => {
+        if (spec.sensitive) redactor.register(value);
+      },
+    );
     try {
       for (const [name, variableOps] of byVariable) {
-        const variable = (variableOps[0] as Operation).variable;
-        let value: SecretBuffer | null = null;
+        let value: SecretBuffer;
         try {
-          value = await resolveValue(name, variable, {
-            exec: deps.exec,
-            tools: deps.tools,
-            keychain: deps.keychain,
-            human: deps.human,
-            cwd: deps.cwd,
-            readFile: deps.readFile,
-            randomBytes: deps.randomBytes,
-          });
-          if (variable.sensitive) redactor.register(value);
+          value = await resolver.resolve(name);
         } catch (error) {
           const code = error instanceof SourceError ? error.code : "source_failed";
           const message = redactor.scrub(error instanceof Error ? error.message : String(error));
@@ -432,7 +739,7 @@ async function apply(deps: Deps, flags: Map<string, string>, redactor: Redactor)
           }
           continue;
         }
-        try {
+        {
           for (const op of variableOps) {
             let version: string | undefined;
             try {
@@ -459,15 +766,15 @@ async function apply(deps: Deps, flags: Map<string, string>, redactor: Redactor)
             }
             results.push(toResult(op, entry, "applied", version));
           }
-        } finally {
-          value.dispose();
         }
       }
     } catch (error) {
       if (!(error instanceof AuditWriteError)) throw error;
       // Stop: further writes would go unaudited.
       await saveAnchor(deps, store);
-      return json(EXIT_FAILED, { ok: false, error: { code: "audit_failed", message: error.message }, approval, results, ...trustChange });
+      return json(EXIT_FAILED, { ok: false, error: { code: "audit_failed", message: error.message }, ...extra, approval, results, ...trustChange });
+    } finally {
+      resolver.dispose();
     }
 
     const anchorError = await saveAnchor(deps, store);
@@ -476,6 +783,7 @@ async function apply(deps: Deps, flags: Map<string, string>, redactor: Redactor)
     return json(ok ? EXIT_OK : EXIT_FAILED, {
       ok,
       project: policy.project,
+      ...extra,
       approval,
       results,
       mirror,
@@ -633,7 +941,22 @@ async function config(deps: Deps, sub: string | undefined, key: string | undefin
     case "show":
       return json(EXIT_OK, { ok: true, config: current });
     case "set": {
-      if (key !== "sheets-webhook") throw new UsageError("usage: zks config set sheets-webhook <https://script.google.com/macros/s/.../exec>");
+      if (key === "capture-profile") {
+        if (value === undefined || !CAPTURE_PROFILE.test(value)) {
+          throw new UsageError("capture-profile must be an ego-browser profile id (letters, digits, space, _ . -; at most 64)");
+        }
+        if (!(await deps.human.approve("zks: approve config change", [`Run isolated captures in the ego-browser profile ${value} (set capture-profile)?`]))) {
+          return configNotApproved();
+        }
+        const next = { ...current, capture: { ...current.capture, profileId: value } };
+        await deps.writeConfig(next);
+        return json(EXIT_OK, { ok: true, config: next });
+      }
+      if (key !== "sheets-webhook") {
+        throw new UsageError(
+          "usage: zks config set sheets-webhook <https://script.google.com/macros/s/.../exec> | zks config set capture-profile <profileId>",
+        );
+      }
       if (!value || !SHEETS_WEBHOOK_URL.test(value)) throw new UsageError("sheets-webhook must be a deployed Apps Script URL ending in /exec");
       if (!(await deps.human.approve("zks: approve config change", [`Mirror the audit log to ${value} (set sheets-webhook)?`]))) {
         return configNotApproved();
@@ -643,7 +966,15 @@ async function config(deps: Deps, sub: string | undefined, key: string | undefin
       return json(EXIT_OK, { ok: true, config: next });
     }
     case "unset": {
-      if (key !== "sheets-webhook") throw new UsageError("usage: zks config unset sheets-webhook");
+      if (key === "capture-profile") {
+        if (!(await deps.human.approve("zks: approve config change", ["Stop isolated captures (unset capture-profile)?"]))) {
+          return configNotApproved();
+        }
+        const next = { ...current, capture: {} };
+        await deps.writeConfig(next);
+        return json(EXIT_OK, { ok: true, config: next });
+      }
+      if (key !== "sheets-webhook") throw new UsageError("usage: zks config unset sheets-webhook | zks config unset capture-profile");
       if (!(await deps.human.approve("zks: approve config change", ["Stop mirroring the audit log to Google Sheets (unset sheets-webhook)?"]))) {
         return configNotApproved();
       }
@@ -652,7 +983,10 @@ async function config(deps: Deps, sub: string | undefined, key: string | undefin
       return json(EXIT_OK, { ok: true, config: next });
     }
     default:
-      throw new UsageError("usage: zks config show | zks config set sheets-webhook <url> | zks config unset sheets-webhook");
+      throw new UsageError(
+        "usage: zks config show | zks config set sheets-webhook <url> | zks config set capture-profile <profileId> | " +
+          "zks config unset sheets-webhook | zks config unset capture-profile",
+      );
   }
 }
 
@@ -669,6 +1003,11 @@ const CAPTURE_SELECTOR = /^[\x20-\x7E]{1,300}$/;
 const KEYCHAIN_ID = /^[A-Za-z0-9_.-]{1,128}$/;
 const CAPTURE_ORIGIN = /^(?:https:\/\/[a-z0-9.-]+|http:\/\/(?:127\.0\.0\.1|localhost))(?::\d{1,5})?$/;
 const MAX_CAPTURE_ORIGIN = 200;
+const CAPTURE_URL = /^[\x21-\x7E]{1,1000}$/;
+/** An ego-browser profile id as `zks config set capture-profile` accepts it. */
+const CAPTURE_PROFILE = /^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$/;
+/** Script refusals of an isolated capture: nothing was read or filled. */
+const ISOLATION_REFUSALS: readonly CaptureErrorCode[] = ["isolated_profile_missing", "isolated_profile_not_isolated", "login_required"];
 
 /** The only zks tokens a capture may write, each only from its provider's own site. */
 export const PINNED_CAPTURE_ORIGINS: Record<TokenAccount, string> = {
@@ -678,20 +1017,31 @@ export const PINNED_CAPTURE_ORIGINS: Record<TokenAccount, string> = {
   "sheets-hmac": "https://script.google.com",
 };
 
-const CAPTURE_ERRORS: Record<CaptureErrorCode | "not_approved", string> = {
+type CaptureFailure = CaptureErrorCode | "not_approved" | "isolated_profile_unset" | "restore_failed";
+
+const CAPTURE_ERRORS: Record<CaptureFailure, string> = {
   origin_mismatch: "the page is not on --origin; nothing was read or filled",
   not_found: "the element or the Keychain item was not found",
   not_password_field: "the selector does not match exactly one password input in the page's main frame; nothing was filled",
   keychain_failed: "the macOS Keychain did not accept or return the item",
   browser_failed: "ego-browser failed or returned no result",
   not_approved: "replacing the Keychain item was not approved",
+  isolated_profile_unset:
+    "no capture-profile is configured; run `zks config set capture-profile <profileId>` with a separate ego-browser profile",
+  isolated_profile_missing: "the configured capture-profile is not an ego-browser profile; nothing was read or filled",
+  isolated_profile_not_isolated: "the configured capture-profile is the default ego-browser profile; pick a separate profile",
+  login_required: "the isolated page did not stay on --origin; log in to the site once in the capture profile; nothing was read or filled",
+  restore_failed: "the previous value of the Keychain item could not be written back",
 };
 
 interface CaptureRequest {
   mode: "read" | "fill";
   sourceKind: CaptureSourceKind;
-  space: number;
-  page: string;
+  /** null for --isolated. */
+  space: number | null;
+  page: string | null;
+  /** --isolated: the page zks opens in its own space; its origin equals origin. */
+  isolated: { url: string } | null;
   selector: string;
   click: string | null;
   origin: string | null;
@@ -707,10 +1057,19 @@ function parseCapture(sub: string | undefined, flags: Map<string, string>): Capt
   const space = flags.get("--space");
   const page = flags.get("--page");
   const selector = flags.get("--selector");
-  if (space === undefined || page === undefined || selector === undefined) throw new UsageError(CAPTURE_USAGE);
-  if (sub === "read" && !flags.has("--store")) throw new UsageError(CAPTURE_USAGE);
-  if (!CAPTURE_SPACE.test(space)) throw new UsageError("--space must be a positive integer (the TaskSpace id)");
-  if (!CAPTURE_PAGE.test(page)) throw new UsageError("--page must be an ego page label (letters, digits, _ or -, at most 32)");
+  const isolated = flags.has("--isolated");
+  const url = flags.get("--url");
+  if (isolated) {
+    if (space !== undefined || page !== undefined) throw new UsageError("--isolated cannot be combined with --space or --page");
+    if (selector === undefined || (sub === "read" && !flags.has("--store"))) throw new UsageError(CAPTURE_USAGE);
+    if (url === undefined || !flags.has("--origin")) throw new UsageError("--isolated needs --url and --origin");
+  } else {
+    if (url !== undefined) throw new UsageError("--url needs --isolated");
+    if (space === undefined || page === undefined || selector === undefined) throw new UsageError(CAPTURE_USAGE);
+    if (sub === "read" && !flags.has("--store")) throw new UsageError(CAPTURE_USAGE);
+    if (!CAPTURE_SPACE.test(space)) throw new UsageError("--space must be a positive integer (the TaskSpace id)");
+    if (!CAPTURE_PAGE.test(page)) throw new UsageError("--page must be an ego page label (letters, digits, _ or -, at most 32)");
+  }
   if (!CAPTURE_SELECTOR.test(selector)) throw new UsageError("--selector must be 1-300 printable ASCII characters");
   const click = flags.get("--click") ?? null;
   if (click !== null && !CAPTURE_SELECTOR.test(click)) throw new UsageError("--click must be 1-300 printable ASCII characters");
@@ -718,7 +1077,15 @@ function parseCapture(sub: string | undefined, flags: Map<string, string>): Capt
   if (origin !== null && (origin.length > MAX_CAPTURE_ORIGIN || !CAPTURE_ORIGIN.test(origin))) {
     throw new UsageError("--origin must be https://host[:port] or http://127.0.0.1|localhost[:port]");
   }
-  const common = { space: Number(space), page, selector, click, origin };
+  if (isolated && new URL(checkedCaptureUrl(url as string)).origin !== origin) throw new UsageError("--url must be on --origin");
+  const common = {
+    space: isolated ? null : Number(space),
+    page: isolated ? null : (page as string),
+    isolated: isolated ? { url: url as string } : null,
+    selector,
+    click,
+    origin,
+  };
 
   if (sub === "read") {
     const { service, account } = keychainRef(flags.get("--store") as string, "--store");
@@ -752,6 +1119,26 @@ function parseCapture(sub: string | undefined, flags: Map<string, string>): Capt
   return { mode: "fill", sourceKind: "capture-generate", service, account, generateBytes: bytes, ...common };
 }
 
+/** An http(s) URL of printable ASCII; never echoed. */
+function checkedCaptureUrl(value: string): string {
+  const message = "--url must be an http(s) URL of at most 1000 printable ASCII characters";
+  if (!CAPTURE_URL.test(value)) throw new UsageError(message);
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new UsageError(message);
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") throw new UsageError(message);
+  return value;
+}
+
+/** The configured isolated-capture profile, or null when unset or not a valid id (config.json is not trusted). */
+function captureProfile(config: ZksConfig): string | null {
+  const id = config.capture?.profileId;
+  return typeof id === "string" && CAPTURE_PROFILE.test(id) ? id : null;
+}
+
 function keychainRef(value: string, flag: string): { service: string; account: string } {
   const parts = value.split("/");
   if (parts.length !== 2 || !parts.every((part) => KEYCHAIN_ID.test(part))) {
@@ -769,13 +1156,13 @@ function keychainRef(value: string, flag: string): { service: string; account: s
 async function capture(deps: Deps, sub: string | undefined, flags: Map<string, string>, redactor: Redactor): Promise<RunOutput> {
   const req = parseCapture(sub, flags);
   const store = `${req.service}/${req.account}`;
-  const base = { command: "capture", mode: req.mode, store, origin: req.origin };
+  const base = { command: "capture", mode: req.mode, store, origin: req.origin, ...(req.isolated ? { isolated: true } : {}) };
   const audit = deps.openAudit();
   try {
     let approval: ApprovalMode | undefined;
     const finish = async (
       result: AuditResult,
-      outcome: { code: CaptureErrorCode | "not_approved"; message?: string } | { length: number },
+      outcome: { code: CaptureFailure; message?: string; restored?: true } | { length: number },
     ) => {
       const errorCode = "code" in outcome ? outcome.code : "";
       // A successful read or generate records the stored item's modification time, which a later
@@ -810,6 +1197,7 @@ async function capture(deps: Deps, sub: string | undefined, flags: Map<string, s
         ok: false,
         ...base,
         error: { code: outcome.code, message: outcome.message ?? CAPTURE_ERRORS[outcome.code] },
+        ...(outcome.restored ? { restored: true } : {}),
         auditId: entry.auditId,
         mirror,
         ...anchorError,
@@ -818,6 +1206,10 @@ async function capture(deps: Deps, sub: string | undefined, flags: Map<string, s
 
     const egoBrowser = deps.tools.egoBrowser;
     if (!egoBrowser) return await finish("failed", { code: "browser_failed" });
+    // Isolated: checked before any dialog or Keychain write, so a refusal stores nothing.
+    const profileId = req.isolated ? captureProfile(await deps.readConfig()) : null;
+    if (req.isolated && profileId === null) return await finish("failed", { code: "isolated_profile_unset" });
+    let existed = false;
 
     if (req.sourceKind === "capture-from") {
       if (!(await deps.keychain.has(req.service, req.account))) return await finish("failed", { code: "not_found" });
@@ -841,8 +1233,11 @@ async function capture(deps: Deps, sub: string | undefined, flags: Map<string, s
         }
       }
     } else if (await deps.keychain.has(req.service, req.account)) {
+      existed = true;
       approval = "dialog";
-      const where = `${req.origin ?? "the current page, origin not checked"} (TaskSpace ${req.space}, page ${req.page})`;
+      const where = req.isolated
+        ? `${req.origin} (isolated ego-browser profile ${profileId})`
+        : `${req.origin ?? "the current page, origin not checked"} (TaskSpace ${req.space}, page ${req.page})`;
       const lines = [
         `Replace the Keychain item ${store}?`,
         req.mode === "read" ? `New value: read from ${where}` : `New value: a random password zks generates, filled into ${where}`,
@@ -850,34 +1245,95 @@ async function capture(deps: Deps, sub: string | undefined, flags: Map<string, s
       if (!(await deps.human.approve("zks: replace Keychain item", lines))) return await finish("denied", { code: "not_approved" });
     }
 
-    if (req.generateBytes !== null) {
-      const random = (deps.randomBytes ?? nodeRandomBytes)(req.generateBytes);
-      const value = SecretBuffer.adopt(Buffer.from(random.toString("base64url"), "utf8"));
-      random.fill(0);
-      redactor.register(value);
+    // An approved replacement keeps the old value in memory only, to write it back if the capture
+    // does not end ok (a read stores from inside the script, so this runs after the script returns).
+    let previous: SecretBuffer | null = null;
+    if (existed) {
       try {
-        await deps.keychain.set(req.service, req.account, value);
+        previous = await deps.keychain.get(req.service, req.account);
       } catch {
         return await finish("failed", { code: "keychain_failed" });
-      } finally {
-        value.dispose();
       }
+      if (previous !== null) redactor.register(previous);
     }
+    try {
+      /** Writes the old value back; false when that write failed. */
+      const restore = async (): Promise<boolean> => {
+        if (previous === null) return true;
+        try {
+          await deps.keychain.set(req.service, req.account, previous);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      /** A failure after the item may have been replaced: restore first, then audit it. */
+      const fail = async (code: CaptureFailure) => {
+        if (previous === null) return await finish("failed", { code });
+        if (await restore()) return await finish("failed", { code, restored: true });
+        return await finish("failed", {
+          code: "restore_failed",
+          message:
+            `the capture failed (${code}) and the previous value of the Keychain item could not be written back; ` +
+            "the item now holds whatever the capture left",
+        });
+      };
 
-    const outcome = await runCapture(deps.exec, egoBrowser, {
-      mode: req.mode,
-      space: req.space,
-      page: req.page,
-      selector: req.selector,
-      click: req.click,
-      origin: req.origin,
-      service: req.service,
-      account: req.account,
-      waitMs: CAPTURE_WAIT_MS,
-    });
-    // Awaited inside the try: the audit store must stay open until finish has synced the mirror.
-    return await finish(outcome.ok ? "applied" : "failed", outcome.ok ? { length: outcome.length } : { code: outcome.code });
+      let outcome: CaptureOutcome;
+      try {
+        if (req.generateBytes !== null) {
+          const random = (deps.randomBytes ?? nodeRandomBytes)(req.generateBytes);
+          const value = SecretBuffer.adopt(Buffer.from(random.toString("base64url"), "utf8"));
+          random.fill(0);
+          redactor.register(value);
+          try {
+            await deps.keychain.set(req.service, req.account, value);
+          } catch {
+            return await fail("keychain_failed");
+          } finally {
+            value.dispose();
+          }
+        }
+        outcome = await captureStep(deps, egoBrowser, req, profileId);
+      } catch (error) {
+        // A thrown error is still reported as before, after the old value is back.
+        if (!(await restore())) return await fail("browser_failed");
+        throw error;
+      }
+      // A refused isolated fill --generate filled nothing: drop the item zks just created for it.
+      if (!outcome.ok && req.generateBytes !== null && !existed && ISOLATION_REFUSALS.includes(outcome.code)) {
+        await deps.keychain.remove(req.service, req.account).catch(() => false);
+      }
+      // Awaited inside the try: the audit store must stay open until finish has synced the mirror.
+      return outcome.ok ? await finish("applied", { length: outcome.length }) : await fail(outcome.code);
+    } finally {
+      previous?.dispose();
+    }
   } finally {
     audit.close();
   }
+}
+
+/** Runs zks's capture script for req; the value never leaves it. */
+function captureStep(deps: Deps, egoBrowser: string, req: CaptureRequest, profileId: string | null): Promise<CaptureOutcome> {
+  return runCapture(deps.exec, egoBrowser, {
+    mode: req.mode,
+    space: req.space,
+    page: req.page,
+    selector: req.selector,
+    click: req.click,
+    origin: req.origin,
+    service: req.service,
+    account: req.account,
+    waitMs: CAPTURE_WAIT_MS,
+    ...(req.isolated && profileId !== null
+      ? {
+          isolated: {
+            profileId,
+            url: req.isolated.url,
+            name: `zks-capture-${(deps.randomBytes ?? nodeRandomBytes)(8).toString("hex")}`,
+          },
+        }
+      : {}),
+  });
 }

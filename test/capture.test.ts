@@ -52,10 +52,10 @@ const spec = (over: Partial<CaptureScriptSpec> = {}): CaptureScriptSpec => ({
 
 const AsyncFunction = Object.getPrototypeOf(async () => undefined).constructor as new (...args: string[]) => (...a: unknown[]) => Promise<void>;
 
-/** A stand-in for /usr/bin/security: `-i` swallows stdin, find-generic-password prints CANARY. */
+/** A stand-in for /usr/bin/security: `-i` swallows stdin, find-generic-password -g prints CANARY's password line on stderr. */
 function fakeSecurity(exitCode = 0): string {
   const path = join(tempDir(), "security");
-  writeFileSync(path, `#!/bin/sh\nif [ "$1" = "-i" ]; then cat >/dev/null; exit ${exitCode}; fi\nprintf '%s\\n' '${CANARY}'\nexit ${exitCode}\n`);
+  writeFileSync(path, `#!/bin/sh\nif [ "$1" = "-i" ]; then cat >/dev/null; exit ${exitCode}; fi\nprintf 'password: "%s"\\n' '${CANARY}' >&2\nexit ${exitCode}\n`);
   chmodSync(path, 0o700);
   return path;
 }
@@ -1012,4 +1012,38 @@ test("S1 (N4): a contenteditable that received the typed text is cleared too", a
   const { printed } = await runScript(buildCaptureScript(fillSpec(), fakeSecurity()), page);
   assert.deepEqual(printed, ['ZKS_RESULT {"ok":false,"code":"browser_failed"}']);
   assert.equal(editable.textContent, "");
+});
+
+/** Like the real security -g for a non-printable value: hex, two spaces, then the escaped form. */
+function fakeSecurityHex(value: string): string {
+  const path = join(tempDir(), "security");
+  const hex = Buffer.from(value, "utf8").toString("hex").toUpperCase();
+  writeFileSync(path, `#!/bin/sh\nprintf 'password: 0x%s  "x"\\n' '${hex}' >&2\nexit 0\n`);
+  chmodSync(path, 0o700);
+  return path;
+}
+
+test("v2 S3 (L14): fill types the exact value of a non-printable Keychain item (hex -g line)", async () => {
+  for (const value of ["contraseña", "a\tb", "x\ny"]) {
+    const input = Object.assign(new FakeInput(), { type: "password" });
+    const { page } = domPage({ nodes: [input] });
+    const { printed } = await runScript(buildCaptureScript(fillSpec(), fakeSecurityHex(value)), page);
+    assert.deepEqual(printed, [`ZKS_RESULT {"ok":true,"length":${value.length}}`], JSON.stringify(value));
+    assert.equal(input.value, value);
+  }
+});
+
+test("v2 S3 (L14): the generated script keeps the \\s of the hex regex", () => {
+  assert.ok(buildCaptureScript(fillSpec()).includes("(?:\\s|$)"));
+});
+
+test("v2 S3 (L14): fill fails closed on a Keychain value that is not valid UTF-8", async () => {
+  const path = join(tempDir(), "security");
+  writeFileSync(path, `#!/bin/sh\nprintf 'password: 0x61FF  "a\\\\377"\\n' >&2\nexit 0\n`);
+  chmodSync(path, 0o700);
+  const input = Object.assign(new FakeInput(), { type: "password" });
+  const { page } = domPage({ nodes: [input] });
+  const { printed } = await runScript(buildCaptureScript(fillSpec(), path), page);
+  assert.deepEqual(printed, ['ZKS_RESULT {"ok":false,"code":"keychain_failed"}']);
+  assert.equal(input.value, "");
 });

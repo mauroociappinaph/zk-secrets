@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 
 export interface IntegrityManifest {
@@ -44,4 +44,38 @@ export function checkIntegrity(manifestPath: string, appRoot: string): Record<st
     files: current.files,
     expectedFiles: manifest.files,
   };
+}
+
+export type OwnershipIssue = { path: string; code: "not_root_owned" | "writable_by_group_or_other" | "symlink" | "unreadable" };
+
+interface OwnershipFs {
+  lstat: (path: string) => { uid: number; mode: number; isDirectory(): boolean; isSymbolicLink(): boolean };
+  readdir: (path: string) => string[];
+}
+
+/**
+ * For a system install: every entry under root must be owned by root, not writable by group or
+ * other, and not a symlink (which could point into a user-writable place).
+ */
+export function checkOwnership(root: string, fs: OwnershipFs = { lstat: lstatSync, readdir: (p) => readdirSync(p) }): {
+  ok: boolean;
+  issues: OwnershipIssue[];
+} {
+  const issues: OwnershipIssue[] = [];
+  const visit = (path: string) => {
+    const rel = relative(root, path) || ".";
+    let stat: ReturnType<OwnershipFs["lstat"]>;
+    try {
+      stat = fs.lstat(path);
+    } catch {
+      issues.push({ path: rel, code: "unreadable" });
+      return;
+    }
+    if (stat.isSymbolicLink()) issues.push({ path: rel, code: "symlink" });
+    else if (stat.uid !== 0) issues.push({ path: rel, code: "not_root_owned" });
+    else if ((stat.mode & 0o022) !== 0) issues.push({ path: rel, code: "writable_by_group_or_other" });
+    if (stat.isDirectory() && !stat.isSymbolicLink()) for (const entry of fs.readdir(path).sort()) visit(join(path, entry));
+  };
+  visit(root);
+  return { ok: issues.length === 0, issues };
 }

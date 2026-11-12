@@ -1,7 +1,10 @@
-import { randomBytes as nodeRandomBytes } from "node:crypto";
+import { createPublicKey, generateKeyPair, randomBytes as nodeRandomBytes } from "node:crypto";
+import { promisify } from "node:util";
 import { readFile as nodeReadFile, realpath as nodeRealpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve as resolvePath } from "node:path";
-import type { SourceSpec, VariableSpec } from "../policy/types.ts";
+import type { GenerateSource, SourceSpec, VariableSpec } from "../policy/types.ts";
+import { parseTemplate } from "../policy/template.ts";
+import { PASSWORD_DEFAULT_LENGTH, RSA_DEFAULT_BITS } from "../policy/validate.ts";
 import type { HumanChannel } from "../gate/dialog.ts";
 import type { Exec } from "../platform/exec.ts";
 import type { Keychain } from "../platform/keychain.ts";
@@ -57,12 +60,11 @@ async function resolveSource(name: string, source: SourceSpec, deps: SourceDeps)
       if (!value) throw new SourceError("source_cancelled", `no value entered for ${name}`);
       return value;
     }
-    case "generate": {
-      const random = (deps.randomBytes ?? nodeRandomBytes)(source.bytes ?? 32);
-      const encoded = Buffer.from(random.toString(source.encoding ?? "base64url"), "utf8");
-      random.fill(0);
-      return SecretBuffer.adopt(encoded);
-    }
+    case "generate":
+      return generate(source, deps.randomBytes ?? nodeRandomBytes);
+    case "public-key":
+    case "template":
+      throw new SourceError("source_invalid", `${name}: a ${source.kind} source is resolved with createResolver`);
     case "dotenv": {
       const read = deps.readFile ?? nodeReadFile;
       const fullPath = resolvePath(deps.cwd, source.path);
@@ -85,6 +87,194 @@ async function resolveSource(name: string, source: SourceSpec, deps: SourceDeps)
       file.fill(0);
       if (value === null) throw new SourceError("source_missing", `key ${source.key ?? name} not found in ${source.path}`);
       return SecretBuffer.fromString(value);
+    }
+  }
+}
+
+/** Resolves policy variables at most once each; derived values read their dependencies from the cache. */
+export interface Resolver {
+  /** The returned buffer belongs to the resolver: do not dispose it, call resolver.dispose(). */
+  resolve(name: string): Promise<SecretBuffer>;
+  /** Zeroes every value resolved so far. */
+  dispose(): void;
+}
+
+/**
+ * One resolver per apply, so a generated value is shared by the variables derived from it.
+ * onResolved sees each value once, after it is resolved (the caller registers sensitive ones with the redactor).
+ */
+export function createResolver(
+  variables: Record<string, VariableSpec>,
+  deps: SourceDeps,
+  onResolved: (name: string, spec: VariableSpec, value: SecretBuffer) => void = () => {},
+): Resolver {
+  const cache = new Map<string, Promise<SecretBuffer>>();
+  const owned: SecretBuffer[] = [];
+
+  const dependency = async (name: string, ref: string): Promise<SecretBuffer> => {
+    try {
+      return await resolve(ref);
+    } catch (error) {
+      const code = error instanceof SourceError ? error.code : "source_failed";
+      const message = error instanceof Error ? error.message : String(error);
+      throw new SourceError(code, `${name} uses ${ref}: ${message}`);
+    }
+  };
+
+  const compute = async (name: string): Promise<SecretBuffer> => {
+    const spec = Object.hasOwn(variables, name) ? variables[name] : undefined;
+    if (!spec) throw new SourceError("source_invalid", `unknown variable ${name}`);
+    const source = spec.source;
+    if (source?.kind === "public-key") {
+      const privateKey = await dependency(name, source.of);
+      const pem = createPublicKey(privateKey.reveal()).export({ type: "spki", format: "pem" });
+      return SecretBuffer.fromString(String(pem));
+    }
+    if (source?.kind === "template") {
+      const chunks: Buffer[] = [];
+      try {
+        for (const part of parseTemplate(source.template)) {
+          if ("literal" in part) {
+            chunks.push(Buffer.from(part.literal, "utf8"));
+            continue;
+          }
+          const value = (await dependency(name, part.ref)).reveal();
+          chunks.push(Buffer.from(part.url ? encodeURIComponent(value) : value, "utf8"));
+        }
+        return SecretBuffer.adopt(Buffer.concat(chunks));
+      } finally {
+        for (const chunk of chunks) chunk.fill(0);
+      }
+    }
+    return resolveValue(name, spec, deps);
+  };
+
+  const resolve = (name: string): Promise<SecretBuffer> => {
+    let pending = cache.get(name);
+    if (!pending) {
+      pending = compute(name).then((value) => {
+        owned.push(value);
+        onResolved(name, variables[name] as VariableSpec, value);
+        return value;
+      });
+      cache.set(name, pending);
+    }
+    return pending;
+  };
+
+  return {
+    resolve,
+    dispose() {
+      for (const value of owned) value.dispose();
+      owned.length = 0;
+    },
+  };
+}
+
+const LOWER = "abcdefghijklmnopqrstuvwxyz";
+const UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+const DIGITS = "0123456789";
+/** Printable ASCII symbols without quotes, backslash, backtick or space, so values survive .env and shell quoting. */
+const SYMBOLS = "!#$%&()*+,-./:;<=>?@[]^_{|}~";
+/** A random source that keeps failing the rejection test is broken, not unlucky. */
+const MAX_RANDOM_DRAWS = 100_000;
+
+/** Uniform integers below n (n <= 256) by rejection sampling over random bytes. */
+class UniformIndex {
+  #random: (size: number) => Buffer;
+  #pool: Buffer = Buffer.alloc(0);
+  #pos = 0;
+  #draws = 0;
+
+  constructor(random: (size: number) => Buffer) {
+    this.#random = random;
+  }
+
+  below(n: number): number {
+    const limit = 256 - (256 % n);
+    for (;;) {
+      if (++this.#draws > MAX_RANDOM_DRAWS) throw new SourceError("source_failed", "the random source returned unusable bytes");
+      if (this.#pos >= this.#pool.length) {
+        this.#pool.fill(0);
+        this.#pool = this.#random(64);
+        this.#pos = 0;
+      }
+      const byte = this.#pool[this.#pos++] as number;
+      if (byte < limit) return byte % n;
+    }
+  }
+
+  dispose(): void {
+    this.#pool.fill(0);
+  }
+}
+
+function password(source: GenerateSource, random: (size: number) => Buffer): SecretBuffer {
+  const length = source.length ?? PASSWORD_DEFAULT_LENGTH;
+  const classes = [
+    source.lower !== false ? LOWER : "",
+    source.upper !== false ? UPPER : "",
+    source.digits !== false ? DIGITS : "",
+    source.symbols !== false ? SYMBOLS : "",
+  ].filter(Boolean);
+  const all = classes.join("");
+  const index = new UniformIndex(random);
+  const out = Buffer.alloc(length);
+  try {
+    // One character of each enabled class, the rest from all of them, then a Fisher-Yates shuffle.
+    let k = 0;
+    for (const cls of classes) out[k++] = cls.charCodeAt(index.below(cls.length));
+    while (k < length) out[k++] = all.charCodeAt(index.below(all.length));
+    for (let i = length - 1; i > 0; i--) {
+      const j = index.below(i + 1);
+      const tmp = out[i] as number;
+      out[i] = out[j] as number;
+      out[j] = tmp;
+    }
+  } catch (error) {
+    out.fill(0);
+    throw error;
+  } finally {
+    index.dispose();
+  }
+  return SecretBuffer.adopt(out);
+}
+
+function uuid(random: (size: number) => Buffer): SecretBuffer {
+  const bytes = Buffer.from(random(16));
+  bytes[6] = ((bytes[6] as number) & 0x0f) | 0x40;
+  bytes[8] = ((bytes[8] as number) & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  bytes.fill(0);
+  return SecretBuffer.fromString(`${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`);
+}
+
+function encodedRandom(random: (size: number) => Buffer, size: number, encoding: "base64url" | "hex"): SecretBuffer {
+  const bytes = random(size);
+  const encoded = Buffer.from(bytes.toString(encoding), "utf8");
+  bytes.fill(0);
+  return SecretBuffer.adopt(encoded);
+}
+
+const generateKeyPairAsync = promisify(generateKeyPair);
+
+async function generate(source: GenerateSource, random: (size: number) => Buffer): Promise<SecretBuffer> {
+  switch (source.format ?? "random") {
+    case "random":
+      return encodedRandom(random, source.bytes ?? 32, source.encoding ?? "base64url");
+    case "uuid":
+      return uuid(random);
+    case "jwt-secret":
+      return encodedRandom(random, 64, "base64url");
+    case "password":
+      return password(source, random);
+    case "rsa-private-key": {
+      const { privateKey } = await generateKeyPairAsync("rsa", { modulusLength: source.bits ?? RSA_DEFAULT_BITS });
+      return SecretBuffer.fromString(String(privateKey.export({ type: "pkcs8", format: "pem" })));
+    }
+    case "ed25519-private-key": {
+      const { privateKey } = await generateKeyPairAsync("ed25519");
+      return SecretBuffer.fromString(String(privateKey.export({ type: "pkcs8", format: "pem" })));
     }
   }
 }

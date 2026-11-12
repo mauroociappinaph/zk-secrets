@@ -14,6 +14,24 @@ export interface Keychain {
 
 const KEYCHAIN_ITEM_NOT_FOUND = 44;
 
+/**
+ * The password from `security find-generic-password -g` (stderr): `password: "text"` when every
+ * byte is printable, otherwise `password: 0xHEX  "..."`. `-w` prints that hex for non-printable
+ * values too, which is indistinguishable from a literal hex-looking value, so zks parses -g.
+ * Returns null when the line is missing or malformed.
+ */
+export function parseSecurityPassword(stderr: Buffer): Buffer | null {
+  const text = stderr.toString("latin1");
+  const match = /^password: (.*)$/m.exec(text);
+  if (!match) return null;
+  const rest = match[1] ?? "";
+  if (rest === "") return Buffer.alloc(0);
+  const hex = /^0x([0-9A-Fa-f]*)(?:\s|$)/.exec(rest);
+  if (hex) return (hex[1] ?? "").length % 2 === 0 ? Buffer.from(hex[1] ?? "", "hex") : null;
+  if (rest.length >= 2 && rest.startsWith('"') && rest.endsWith('"')) return Buffer.from(rest.slice(1, -1), "latin1");
+  return null;
+}
+
 function stripTrailingNewline(bytes: Buffer): Buffer {
   return bytes.length > 0 && bytes[bytes.length - 1] === 0x0a ? bytes.subarray(0, bytes.length - 1) : bytes;
 }
@@ -27,12 +45,13 @@ function quoteForSecurityShell(value: string): string {
 export function createKeychain(exec: Exec): Keychain {
   return {
     async get(service, account) {
-      const res = await exec("/usr/bin/security", ["find-generic-password", "-s", service, "-a", account, "-w"]);
+      const res = await exec("/usr/bin/security", ["find-generic-password", "-s", service, "-a", account, "-g"]);
       if (res.code === KEYCHAIN_ITEM_NOT_FOUND) return null;
       if (res.code !== 0) throw new Error(`keychain read failed for ${service}/${account} (exit ${res.code})`);
-      const copy = Buffer.from(stripTrailingNewline(res.stdout));
-      res.stdout.fill(0);
-      return SecretBuffer.adopt(copy);
+      const parsed = parseSecurityPassword(res.stderr);
+      res.stderr.fill(0);
+      if (parsed === null) throw new Error(`keychain read failed for ${service}/${account} (unparsable output)`);
+      return SecretBuffer.adopt(parsed);
     },
     async set(service, account, value) {
       // `security -i` reads commands from stdin; -X takes hex so no quoting of the value is needed.

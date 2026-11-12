@@ -11,7 +11,13 @@
     "allowImportingTsExtensions": true,
     "rewriteRelativeImportExtensions": true,
     "skipLibCheck": true,
-    "types": ["node"]
+    "types": [
+      "node"
+    ]
   },
-  "include": ["src", "test"]
+  "include": [
+    "src",
+    "test",
+    "scripts"
+  ]
 }

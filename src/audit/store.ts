@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { AuditAnchor, AuditEntryInput, AuditRecord, AuditStore, AuditVerification } from "./types.ts";
+import type { AuditAnchor, AuditEntryInput, AuditRecord, AuditStore, AuditVerification, WrittenDestination } from "./types.ts";
 
 export const GENESIS_HASH = "0".repeat(64);
 const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -115,6 +115,11 @@ export function openAuditStore(dbPath: string): AuditStore {
     "SELECT environment, ts, provider_version FROM audit WHERE action = 'capture' AND result = 'applied' AND target = ? " +
       "AND source_kind IN ('capture-read', 'capture-generate') ORDER BY seq DESC LIMIT 1",
   );
+  const writtenDestinations = db.prepare(
+    "SELECT a.provider, a.target, a.environment, a.variable_name, a.ts, g.writes FROM audit a JOIN (" +
+      "SELECT MAX(seq) AS seq, COUNT(*) AS writes FROM audit WHERE project = ? AND result = 'applied' AND action IN ('set', 'rotate') " +
+      "GROUP BY provider, target, variable_name) g ON a.seq = g.seq ORDER BY a.variable_name, a.target, a.provider",
+  );
 
   return {
     append(entry: AuditEntryInput): AuditRecord {
@@ -175,6 +180,16 @@ export function openAuditStore(dbPath: string): AuditStore {
       return row === undefined
         ? null
         : { origin: String(row.environment ?? ""), ts: String(row.ts ?? ""), itemModified: String(row.provider_version ?? "") };
+    },
+    writtenDestinations(project): WrittenDestination[] {
+      return (writtenDestinations.all(project) as Row[]).map((row) => ({
+        provider: String(row.provider ?? ""),
+        target: String(row.target ?? ""),
+        environment: String(row.environment ?? ""),
+        variableName: String(row.variable_name ?? ""),
+        lastWrittenAt: String(row.ts ?? ""),
+        writes: Number(row.writes),
+      }));
     },
     pendingMirror(limit) {
       const rows = db.prepare("SELECT * FROM audit WHERE mirrored_at = '' ORDER BY seq ASC LIMIT ?").all(limit);

@@ -20,4 +20,11 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+      - run: npm run deps:check -- --strict
+      - run: npm audit signatures
       - run: npm run build
+      - run: npm run --silent sbom > sbom.cdx.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.cdx.json

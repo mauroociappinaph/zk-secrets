@@ -1,16 +1,22 @@
 {
   "name": "zk-secrets",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Zero-knowledge secrets and env var sync for Vercel, AWS, GitHub, Railway and Supabase, built for AI agents that must never see secret values.",
   "private": true,
   "type": "module",
-  "bin": { "zks": "bin/zks" },
-  "engines": { "node": ">=22.18" },
+  "bin": {
+    "zks": "bin/zks"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --disable-warning=ExperimentalWarning --test 'test/**/*.test.ts'",
-    "check": "npm run typecheck && npm test"
+    "check": "npm run typecheck && npm test",
+    "deps:check": "node --disable-warning=ExperimentalWarning scripts/deps-check.ts",
+    "sbom": "npm sbom --sbom-format cyclonedx --omit dev --package-lock-only"
   },
   "dependencies": {
     "@aws-sdk/client-secrets-manager": "3.1161.0",

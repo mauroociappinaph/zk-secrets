@@ -6,7 +6,19 @@ export const CAPTURE_MARKER = "ZKS_RESULT ";
 /** The only binary the script moves a value through. */
 export const SECURITY_PATH = "/usr/bin/security";
 
-export const CAPTURE_ERROR_CODES = ["origin_mismatch", "not_found", "not_password_field", "keychain_failed", "browser_failed"] as const;
+/** Page label of the page zks opens in its own isolated space. */
+export const ISOLATED_PAGE = "p1"; // ego-browser: a new space starts with managed Page p1
+
+export const CAPTURE_ERROR_CODES = [
+  "origin_mismatch",
+  "not_found",
+  "not_password_field",
+  "keychain_failed",
+  "browser_failed",
+  "isolated_profile_missing",
+  "isolated_profile_not_isolated",
+  "login_required",
+] as const;
 export type CaptureErrorCode = (typeof CAPTURE_ERROR_CODES)[number];
 export type CaptureOutcome = { ok: true; length: number } | { ok: false; code: CaptureErrorCode };
 
@@ -15,8 +27,9 @@ const MAX_LENGTH = 100_000;
 export interface CaptureScriptSpec {
   /** read: take the element's value into the Keychain item; fill: put the Keychain item into the element. */
   mode: "read" | "fill";
-  space: number;
-  page: string;
+  /** The agent's TaskSpace and page; null for an isolated capture. */
+  space: number | null;
+  page: string | null;
   selector: string;
   /** read only: clicked first, inside the script, so the agent never sees the revealed value. */
   click: string | null;
@@ -25,6 +38,11 @@ export interface CaptureScriptSpec {
   service: string;
   account: string;
   waitMs: number;
+  /**
+   * Isolated capture: zks checks the profile with profiles(), creates its own space `name` with
+   * it, goes to `url` and always finishes the space with keep: []. Absent for --space/--page.
+   */
+  isolated?: { profileId: string; url: string; name: string };
 }
 
 /**
@@ -193,13 +211,28 @@ async function fill(page) {
   const prepared = pageResult(await page.evaluate(preparePassword, { selector: spec.selector, expected: spec.origin }));
   if (!prepared.ok) return prepared;
   if (!(await originMatches(page))) return { ok: false, code: "origin_mismatch" };
-  const found = spawnSync(SECURITY, ["find-generic-password", "-s", spec.service, "-a", spec.account, "-w"], { timeout: 15000 });
+  // -g, not -w: -w prints non-printable values as hex, indistinguishable from a hex-looking value.
+  const found = spawnSync(SECURITY, ["find-generic-password", "-s", spec.service, "-a", spec.account, "-g"], { timeout: 15000 });
   if (found.status === 44) return { ok: false, code: "not_found" };
-  if (found.status !== 0 || !found.stdout) return { ok: false, code: "keychain_failed" };
-  const bytes = found.stdout;
-  const end = bytes.length > 0 && bytes[bytes.length - 1] === 10 ? bytes.length - 1 : bytes.length;
-  let value = bytes.subarray(0, end).toString("utf8");
+  if (found.status !== 0 || !found.stderr) return { ok: false, code: "keychain_failed" };
+  const bytes = found.stderr;
+  const line = /^password: (.*)$/m.exec(bytes.toString("latin1"));
+  const rest = line ? line[1] : null;
+  const hex = rest === null ? null : /^0x([0-9A-Fa-f]*)(?:\\s|$)/.exec(rest);
+  let value = null;
+  if (rest === "") value = "";
+  else if (hex && hex[1].length % 2 === 0) {
+    // fatal: bytes that are not UTF-8 fail closed instead of being typed as U+FFFD.
+    try {
+      value = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(hex[1], "hex"));
+    } catch {
+      value = null;
+    }
+  }
+  else if (rest !== null && rest.length >= 2 && rest.startsWith('"') && rest.endsWith('"')) value = rest.slice(1, -1);
   bytes.fill(0);
+  if (found.stdout) found.stdout.fill(0);
+  if (value === null) return { ok: false, code: "keychain_failed" };
   if (value.length === 0) return { ok: false, code: "not_found" };
   const length = value.length;
   let typed = false;
@@ -225,11 +258,37 @@ async function fill(page) {
   return confirmed.ok ? { ok: true, length } : confirmed;
 }
 
+// Isolated: the profile must exist and must not be the default one (the agent's own session).
+// zks creates the space itself, lands on --url and, whatever happens, finishes it keeping nothing.
+async function isolated(iso) {
+  const list = await profiles();
+  const profile = Array.isArray(list)
+    ? list.find((p) => p !== null && typeof p === "object" && p.id === iso.profileId)
+    : undefined;
+  if (profile === undefined) return { ok: false, code: "isolated_profile_missing" };
+  if (profile.isDefault !== false) return { ok: false, code: "isolated_profile_not_isolated" };
+  const task = await taskSpace(iso.name, { profileId: iso.profileId });
+  try {
+    const page = task.page(ISOLATED_PAGE);
+    await page.goto(iso.url);
+    if (!(await originMatches(page))) return { ok: false, code: "login_required" };
+    return spec.mode === "read" ? await read(page) : await fill(page);
+  } finally {
+    try {
+      await task.finish({ keep: [] });
+    } catch {}
+  }
+}
+
 let result;
 try {
-  const task = await taskSpace(spec.space);
-  const page = task.page(spec.page);
-  result = spec.mode === "read" ? await read(page) : await fill(page);
+  if (spec.isolated) {
+    result = await isolated(spec.isolated);
+  } else {
+    const task = await taskSpace(spec.space);
+    const page = task.page(spec.page);
+    result = spec.mode === "read" ? await read(page) : await fill(page);
+  }
 } catch {
   result = { ok: false, code: "browser_failed" };
 }
@@ -251,10 +310,14 @@ export function buildCaptureScript(spec: CaptureScriptSpec, security: string = S
     service: spec.service,
     account: spec.account,
     waitMs: spec.waitMs,
+    ...(spec.isolated
+      ? { isolated: { profileId: spec.isolated.profileId, url: spec.isolated.url, name: spec.isolated.name } }
+      : {}),
   };
   return (
     "// zks capture script (generated). Prints exactly one line: ZKS_RESULT <metadata json>.\n" +
-    `const spec = ${JSON.stringify(embedded)};\nconst SECURITY = ${JSON.stringify(security)};\n${BODY}`
+    `const spec = ${JSON.stringify(embedded)};\nconst SECURITY = ${JSON.stringify(security)};\n` +
+    `const ISOLATED_PAGE = ${JSON.stringify(ISOLATED_PAGE)};\n${BODY}`
   );
 }
 
