@@ -138,7 +138,8 @@ fi
 if [ "$MODE" = system ]; then umask 022; fi
 mkdir -p "$DEST"
 cp -R dist bin package.json package-lock.json "$DEST/"
-(cd "$DEST" && npm ci --omit=dev --ignore-scripts)
+# --no-bin-links: no node_modules/.bin symlinks (zks runs none, and a system install allows no symlink).
+(cd "$DEST" && npm ci --omit=dev --ignore-scripts --no-bin-links)
 # CycloneDX SBOM of the production dependencies, inside the install so the digest covers it.
 as_user npm run --silent sbom >"$DEST/sbom.cdx.json" || die "could not write the SBOM"
 if [ "$MODE" = system ]; then
@@ -237,8 +238,36 @@ as_user cp "$REPO/skill/SKILL.md" "$SKILL_DIR/SKILL.md"
 as_user chmod 644 "$SKILL_DIR/SKILL.md"
 
 printf '==> Updating global agent rule in %s\n' "$AGENTS"
-BLOCK="$TMP_DIR/block.md"
-cat >"$BLOCK" <<'EOF'
+# The whole update runs as the user (never as root, which would follow a symlink the user planted
+# in place of ~/AGENTS.md into a root-owned location); the block arrives on stdin.
+AGENTS_UPDATE='set -eu
+AGENTS="$1"; BEGIN_MARK="$2"; END_MARK="$3"
+WORK="$(mktemp -d)"
+trap '\''rm -rf "$WORK"'\'' EXIT INT TERM
+BLOCK="$WORK/block.md"
+cat >"$BLOCK"
+if [ ! -e "$AGENTS" ]; then
+  (umask 022 && cp "$BLOCK" "$AGENTS")
+elif ! grep -qxF "$BEGIN_MARK" "$AGENTS"; then
+  # Append after one blank line, adding the missing final newline first if needed.
+  if [ -s "$AGENTS" ] && [ "$(tail -c 1 "$AGENTS" | od -An -c | tr -d " ")" != "\\n" ]; then
+    printf "\\n" >>"$AGENTS"
+  fi
+  if [ -s "$AGENTS" ]; then printf "\\n" >>"$AGENTS"; fi
+  cat "$BLOCK" >>"$AGENTS"
+else
+  grep -qxF "$END_MARK" "$AGENTS" || { printf "install.sh: %s has %s without %s; fix it by hand\\n" "$AGENTS" "$BEGIN_MARK" "$END_MARK" >&2; exit 1; }
+  awk -v blockfile="$BLOCK" -v begin="$BEGIN_MARK" -v end="$END_MARK" "
+    BEGIN { while ((getline line < blockfile) > 0) block = block line \"\\n\" }
+    !done && \$0 == begin { printf \"%s\", block; skip = 1; next }
+    skip && \$0 == end { skip = 0; done = 1; next }
+    skip { next }
+    { print }
+  " "$AGENTS" >"$WORK/AGENTS.md"
+  # cat keeps the file inode, mode and any symlink in place.
+  cat "$WORK/AGENTS.md" >"$AGENTS"
+fi'
+as_user /bin/sh -c "$AGENTS_UPDATE" sh "$AGENTS" "$BEGIN_MARK" "$END_MARK" <<'EOF'
 <!-- zks:begin -->
 ## Secrets and environment variables
 
@@ -249,28 +278,6 @@ cat >"$BLOCK" <<'EOF'
 - zks writes to a new destination need the human's approval in a native dialog; never try to bypass or automate that dialog.
 <!-- zks:end -->
 EOF
-if [ ! -e "$AGENTS" ]; then
-  (umask 022 && cp "$BLOCK" "$AGENTS")
-  if [ "$(id -u)" = 0 ]; then chown "$USER_NAME" "$AGENTS"; fi
-elif ! grep -qxF "$BEGIN_MARK" "$AGENTS"; then
-  # Append after one blank line, adding the missing final newline first if needed.
-  if [ -s "$AGENTS" ] && [ "$(tail -c 1 "$AGENTS" | od -An -c | tr -d ' ')" != '\n' ]; then
-    printf '\n' >>"$AGENTS"
-  fi
-  if [ -s "$AGENTS" ]; then printf '\n' >>"$AGENTS"; fi
-  cat "$BLOCK" >>"$AGENTS"
-else
-  grep -qxF "$END_MARK" "$AGENTS" || die "$AGENTS has $BEGIN_MARK without $END_MARK; fix it by hand"
-  awk -v blockfile="$BLOCK" -v begin="$BEGIN_MARK" -v end="$END_MARK" '
-    BEGIN { while ((getline line < blockfile) > 0) block = block line "\n" }
-    !done && $0 == begin { printf "%s", block; skip = 1; next }
-    skip && $0 == end { skip = 0; done = 1; next }
-    skip { next }
-    { print }
-  ' "$AGENTS" >"$TMP_DIR/AGENTS.md"
-  # cat keeps the file's inode, mode and any symlink in place.
-  cat "$TMP_DIR/AGENTS.md" >"$AGENTS"
-fi
 
 printf '==> zks doctor\n'
 DOCTOR="$(as_user "$LAUNCHER" doctor)" || die "zks doctor failed"

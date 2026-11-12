@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { checkOwnership } from "../src/platform/integrity.ts";
@@ -101,4 +103,50 @@ test("v2 S1: install.sh --dry-run without --system prints the user layout; an un
   assert.equal(bad.code, 1);
   assert.equal(bad.stdout, "");
   assert.equal(bad.stderr, "install.sh: unknown option --bogus (use --system and/or --dry-run)\n");
+});
+
+/** The AGENTS_UPDATE script install.sh runs as the user (never as root) to write ~/AGENTS.md. */
+function agentsUpdate(file: string, block: string) {
+  const source = readFileSync(join(REPO, "install.sh"), "utf8");
+  const start = source.indexOf("AGENTS_UPDATE='");
+  const end = source.indexOf("\nfi'\n", start) + "\nfi'\n".length;
+  const script = `${source.slice(start, end)}\nprintf '%s' "$BLOCK" | /bin/sh -c "$AGENTS_UPDATE" sh "$1" '<!-- zks:begin -->' '<!-- zks:end -->'\n`;
+  return spawnSync("/bin/sh", ["-c", script, "sh", file], { env: { PATH: "/usr/bin:/bin", BLOCK: block }, encoding: "utf8" });
+}
+
+test("v2 S1 (review R1): install.sh writes ~/AGENTS.md only through the user-run AGENTS_UPDATE script", () => {
+  const source = readFileSync(join(REPO, "install.sh"), "utf8");
+  assert.match(source, /^as_user \/bin\/sh -c "\$AGENTS_UPDATE" sh "\$AGENTS" "\$BEGIN_MARK" "\$END_MARK" <<'EOF'$/m);
+  const start = source.indexOf("AGENTS_UPDATE='");
+  const outside = source.slice(0, start) + source.slice(source.indexOf("\nfi'\n", start));
+  assert.equal(outside.match(/>>?\s*"\$AGENTS"|cp [^\n]*"\$AGENTS"/g)?.length ?? 0, 0, "no root-shell write to $AGENTS outside the script");
+  assert.doesNotMatch(source, /chown "\$USER_NAME" "\$AGENTS"/);
+
+  const dir = mkdtempSync(join(tmpdir(), "zks-agents-"));
+  const block = "<!-- zks:begin -->\nNEW\n<!-- zks:end -->\n";
+  const fresh = join(dir, "a.md");
+  assert.equal(agentsUpdate(fresh, block).status, 0);
+  assert.equal(readFileSync(fresh, "utf8"), block);
+
+  const append = join(dir, "b.md");
+  writeFileSync(append, "hello");
+  assert.equal(agentsUpdate(append, block).status, 0);
+  assert.equal(readFileSync(append, "utf8"), `hello\n\n${block}`);
+
+  const replace = join(dir, "c.md");
+  writeFileSync(replace, "x\n<!-- zks:begin -->\nOLD\n<!-- zks:end -->\ny\n");
+  assert.equal(agentsUpdate(replace, block).status, 0);
+  assert.equal(readFileSync(replace, "utf8"), `x\n${block}y\n`);
+
+  const broken = join(dir, "d.md");
+  writeFileSync(broken, "<!-- zks:begin -->\nno end\n");
+  const r = agentsUpdate(broken, block);
+  assert.equal(r.status, 1);
+  assert.equal(r.stderr, `install.sh: ${broken} has <!-- zks:begin --> without <!-- zks:end -->; fix it by hand\n`);
+  assert.equal(readFileSync(broken, "utf8"), "<!-- zks:begin -->\nno end\n");
+});
+
+test("v2 S1 (review R3): the production install creates no node_modules/.bin symlinks", () => {
+  const source = readFileSync(join(REPO, "install.sh"), "utf8");
+  assert.match(source, /\(cd "\$DEST" && npm ci --omit=dev --ignore-scripts --no-bin-links\)/);
 });
