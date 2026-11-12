@@ -39,6 +39,18 @@ Usage:
                    | --from SERVICE/ACCOUNT) --origin ORIGIN
                                               Same, in a space zks opens itself in the capture-profile
                                               (not the agent's session) at URL, closed afterwards
+  zks capture login --origin ORIGIN --url URL --user USERNAME --user-selector CSS --password-selector CSS
+                    --submit-selector SELECTOR --from SERVICE/ACCOUNT [--success-selector CSS] [--recipe NAME]
+                    [--agent LABEL] (--isolated | --space ID --page LABEL)
+                                              Log the browser into a site: sets the user field, types the
+                                              stored password (never shown), submits; always asks first.
+                                              Exit 0 with loggedIn true, or false with pending 2fa|captcha|
+                                              unknown (the human finishes in the browser; --isolated keeps
+                                              that page open and adds space and page); login_redirected
+                                              (exit 1) when the page leaves --origin
+  zks capture recipes                         List login recipes (hostgator, cpanel); --recipe NAME fills
+                                              the flags not given; verified:false = selectors not yet
+                                              confirmed on a real run
   zks audit list [--limit N] [--project P]    Show audit records (metadata only)
   zks audit verify                            Check the audit hash chain
   zks audit sync                              Push pending audit records to Google Sheets
