@@ -52,9 +52,9 @@ Each spec quotes the list item the user selected by number, then the user's deci
 - T7 [S8] `zks inventory` — P2 — worker — 7ae4f28 — done
 - T8 [S9] plan effects — P2 — worker — 7ae4f28 — done
 - T9 [S10] `zks doctor --fix` — P2 — worker — 7ae4f28 — done
-- T10 [S11] Netlify sink — P3 — pending
-- T11 [S12] Docker Swarm / Compose secret sinks — P3 — pending
-- T12 [S13] dotenv file sink (mode 600) — P3 — pending
+- T10 [S11] Netlify sink — P3 — worker — in_progress
+- T11 [S12] Docker Swarm / Compose secret sinks — P3 — worker — in_progress
+- T12 [S13] dotenv file sink (mode 600) — P3 — worker — in_progress
 - T13 [S14] capture recipes — P4 — pending
 - T14 [S15] Playwright/Chrome capture backend — P4 — pending
 - T15 [S16] capture from a downloaded file — P4 — pending
@@ -98,3 +98,4 @@ Each spec quotes the list item the user selected by number, then the user's deci
 - L17 (delivery, user: "Al final pasa tooo a la rama principal y cerremos sesion"): merged feature/zks-v2-lifecycle into develop (af8d5b9, --no-ff) and fast-forwarded main locally; version 0.2.0. Push blocked by the RDD pre-delivery gate (review due). Native review START for the whole P1+P2 range (79a2cf4..HEAD) stopped with lens_context_budget_exceeded (terminal: split into smaller candidates or the user disables RDD for this clone with `gentle-ai review mode disable --scope clone`). Reinstalled with ./install.sh: zks 0.2.0, doctor install ok, pins ok for ego-browser, gh, op. Not pushed: main ahead of origin by 20, develop and both feature branches local only.
 - L18 (verify mwdrgqfw-b-o579 of 5d4278f): invalid UTF-8 fails closed against the real Keychain (61ff, c3, surrogate, overlong); valid values exact. Blocker B1: fatal TextDecoder dropped a leading UTF-8 BOM (typed abc with ok). Fixed with ignoreBOM: true plus the verifier's regression test (RED then GREEN); 252/252; reinstalled.
 - L19 (verify mwdrly1s-c-y0z1 of 3507403): met — installed script has ignoreBOM; 11 real throwaway items exact or keychain_failed; BOM test RED on 5d4278f, GREEN on 3507403; 252/252. Verifier's extra regression tests added (BOM mid/double/newline, overlong/surrogate/truncated). Phases 1-2 closed locally; push still blocked by the RDD gate (L17).
+- L20 (user, verbatim): "Se puede empezar por el punto 3 ?" — read as Phase 3 (T10-T12, sinks). Branch feature/zks-v2-sinks from develop (23dec93). One worker, one commit per task, L4 designs apply; CTO authority L3 continues.
