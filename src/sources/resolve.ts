@@ -297,7 +297,8 @@ export function findDotenvValue(text: string, key: string): string | null {
     const quote = value[0];
     if ((quote === '"' || quote === "'") && value.endsWith(quote) && value.length >= 2) {
       value = value.slice(1, -1);
-      if (quote === '"') value = value.replace(/\\n/g, "\n").replace(/\\"/g, '"');
+      // Double quotes decode the escapes the dotenv target writes: \\ \" \$ \n \r.
+      if (quote === '"') value = value.replace(/\\([\\"$nr])/g, (_, c: string) => (c === "n" ? "\n" : c === "r" ? "\r" : c));
     } else {
       value = value.replace(/\s+#.*$/, "");
     }

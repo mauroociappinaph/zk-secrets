@@ -11,6 +11,7 @@ import { HELP_TEXT } from "../src/help.ts";
 import { run } from "../src/run.ts";
 import { SecretBuffer } from "../src/secret/secret-buffer.ts";
 import { dotenvLine, dotenvSink, upsertDotenv } from "../src/sinks/dotenv.ts";
+import { findDotenvValue } from "../src/sources/resolve.ts";
 import { SinkError, type SinkContext } from "../src/sinks/types.ts";
 import { CANARY, TEST_TOOLS, auditBytes, fakeAws, fakeExec, fakeFetch, fakeKeychain, harness, parse, tempDir } from "./helpers.ts";
 
@@ -61,6 +62,35 @@ test("S13: dotenv upserts the key, keeps every other line and tightens the mode 
   // CRLF files keep CRLF.
   assert.equal(upsertDotenv("A=1\r\nAPI_KEY=x\r\n", "API_KEY", 'API_KEY="n"'), 'A=1\r\nAPI_KEY="n"\r\n');
   assert.equal(upsertDotenv("", "API_KEY", 'API_KEY="n"'), 'API_KEY="n"\n');
+});
+
+test("S13: dotenv refuses a non-UTF-8 file and leaves it unchanged, never writing U+FFFD", async () => {
+  const dir = tempDir();
+  const path = join(dir, ".env");
+  const before = Buffer.concat([Buffer.from([0x23, 0x20, 0x63, 0x61, 0x66, 0xe9, 0x0a]), Buffer.from("API_KEY=old\n")]);
+  writeFileSync(path, before, { mode: 0o600 });
+  await rejects(write(path, "new"), "file_not_utf8", `${path} is not UTF-8 text; zks does not rewrite it`);
+  assert.ok(readFileSync(path).equals(before));
+  assert.deepEqual(readdirSync(dir), [".env"]);
+});
+
+test("S13: dotenv keeps each line's own ending and replaces the key once in a mixed-endings file", () => {
+  assert.equal(upsertDotenv("A=1\nAPI_KEY=old\r\nB=2\r\n", "API_KEY", 'API_KEY="n"'), 'A=1\nAPI_KEY="n"\r\nB=2\r\n');
+  assert.equal(upsertDotenv("A=1\r\nB=2\n", "API_KEY", 'API_KEY="n"'), 'A=1\r\nB=2\nAPI_KEY="n"\n');
+});
+
+test("S13: dotenv leaves a key-shaped line inside another key's multi-line value alone", () => {
+  const text = 'OTHER="x\nAPI_KEY=inside\ny"\nAPI_KEY=old\n';
+  assert.equal(upsertDotenv(text, "API_KEY", 'API_KEY="n"'), 'OTHER="x\nAPI_KEY=inside\ny"\nAPI_KEY="n"\n');
+});
+
+test("S13: what the dotenv target writes, the zks dotenv source reads back exactly", () => {
+  for (const value of ['a\\b"c$d\ne', "x\\ny", "pw!#$%&", "cr\rx", "plain"]) {
+    assert.equal(findDotenvValue(upsertDotenv("", "K", dotenvLine("K", value)), "K"), value);
+  }
+  // Existing source behaviour: plain, single-quoted and inline-comment values are unchanged.
+  assert.equal(findDotenvValue("K=raw # note\n", "K"), "raw");
+  assert.equal(findDotenvValue("K='a\\nb'\n", "K"), "a\\nb");
 });
 
 test("S13: dotenv escapes backslash, double quote, newline, carriage return and $", () => {

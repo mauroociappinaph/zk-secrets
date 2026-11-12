@@ -10,8 +10,23 @@ export function dotenvLine(key: string, value: string): string {
   return `${key}="${escaped}"`;
 }
 
+type Line = { text: string; eol: string };
+
+/** Splits text into lines that keep their own ending; the last line gets `eol` when it has none. */
+function splitLines(text: string): Line[] {
+  const lines: Line[] = [];
+  const parts = text.split(/(\r?\n)/);
+  for (let i = 0; i < parts.length; i += 2) {
+    const body = parts[i] as string;
+    const eol = parts[i + 1] ?? "";
+    if (i === parts.length - 1 && body.length === 0) break;
+    lines.push({ text: body, eol });
+  }
+  return lines;
+}
+
 /** Index of the last line of a quoted value that starts on line `start` after `=`; `start` when it is not multi-line. */
-function valueEnd(lines: string[], start: number, rest: string): number {
+function valueEnd(lines: Line[], start: number, rest: string): number {
   const quote = rest[0];
   if (quote !== '"' && quote !== "'") return start;
   const closes = (text: string, from: number): boolean => {
@@ -22,35 +37,48 @@ function valueEnd(lines: string[], start: number, rest: string): number {
     return false;
   };
   if (closes(rest, 1)) return start;
-  for (let i = start + 1; i < lines.length; i++) if (closes(lines[i] as string, 0)) return i;
+  for (let i = start + 1; i < lines.length; i++) if (closes((lines[i] as Line).text, 0)) return i;
   return start;
 }
 
+const DEFINITION = /^(\s*)(export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/;
+
 /**
  * Sets key to `line` in a dotenv text: the first definition is replaced in place (keeping
- * `export`), later ones are dropped, a missing key is appended. Every other line is kept.
+ * `export` and the line's own ending), later ones are dropped, a missing key is appended. Every
+ * other line is kept byte for byte, including the lines of other keys' multi-line values.
  */
 export function upsertDotenv(text: string, key: string, line: string): string {
-  const eol = text.includes("\r\n") ? "\r\n" : "\n";
-  const lines = text.length === 0 ? [] : text.split(eol);
-  if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
-  const definition = new RegExp(`^(\\s*)(export\\s+)?${key}\\s*=\\s*(.*)$`);
+  const lines = splitLines(text);
+  const lastEol = lines.length > 0 ? (lines[lines.length - 1] as Line).eol || "\n" : "\n";
   const out: string[] = [];
   let found = false;
   for (let i = 0; i < lines.length; i++) {
-    const match = definition.exec(lines[i] as string);
+    const current = lines[i] as Line;
+    const match = DEFINITION.exec(current.text);
     if (!match) {
-      out.push(lines[i] as string);
+      out.push(current.text + current.eol);
       continue;
     }
-    const end = valueEnd(lines, i, match[3] ?? "");
-    if (!found) out.push(`${match[1] ?? ""}${match[2] ? "export " : ""}${line}`);
+    const end = valueEnd(lines, i, match[4] ?? "");
+    if (match[3] !== key) {
+      for (let j = i; j <= end; j++) out.push((lines[j] as Line).text + (lines[j] as Line).eol);
+      i = end;
+      continue;
+    }
+    if (!found) out.push(`${match[1] ?? ""}${match[2] ? "export " : ""}${line}${(lines[end] as Line).eol || "\n"}`);
     found = true;
     i = end;
   }
-  if (!found) out.push(line);
-  return `${out.join(eol)}${eol}`;
+  if (!found) {
+    const last = out[out.length - 1];
+    if (last !== undefined && !/\r?\n$/.test(last)) out.push(lastEol);
+    out.push(line + lastEol);
+  }
+  return out.join("");
 }
+
+const STRICT_UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 /** Reads the current file without following a symlink; empty when it does not exist. */
 async function readCurrent(path: string): Promise<Buffer> {
@@ -72,8 +100,15 @@ export const dotenvSink: Sink = {
   async apply(op, value) {
     const target = op.target as DotenvTarget;
     const current = await readCurrent(target.path);
-    const next = Buffer.from(upsertDotenv(current.toString("utf8"), op.name, dotenvLine(op.name, value.reveal())), "utf8");
-    current.fill(0);
+    let text: string;
+    try {
+      text = STRICT_UTF8.decode(current);
+    } catch {
+      throw new SinkError("file_not_utf8", `${target.path} is not UTF-8 text; zks does not rewrite it`);
+    } finally {
+      current.fill(0);
+    }
+    const next = Buffer.from(upsertDotenv(text, op.name, dotenvLine(op.name, value.reveal())), "utf8");
     try {
       await writeFileAtomic(target.path, next);
     } finally {
