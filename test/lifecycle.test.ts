@@ -63,12 +63,53 @@ test("S7: rotate writes a new value to every target plus its dependents, with th
 });
 
 test("S7: rotate --target writes only that subset", async () => {
-  const h = harness({ policy, keychain: tokens });
-  const out = await run(["rotate", "DB_PASSWORD", "--target", "v2"], h.deps);
+  const h = harness({
+    policy: { ...policy, variables: { SOLO: { sensitive: true, source: { kind: "generate" }, targets: ["v1", "v2"] } } },
+    keychain: tokens,
+  });
+  const out = await run(["rotate", "SOLO", "--target", "v2"], h.deps);
   assert.equal(out.exitCode, 0, out.stdout);
-  assert.deepEqual(writes(h), ["prj_2/DB_PASSWORD"]);
+  assert.deepEqual(writes(h), ["prj_2/SOLO"]);
   assert.deepEqual(parse(out.stdout).dependents, []);
 });
+
+test("S7 (L12): rotate --target that covers every dependent's targets rewrites them in the same apply", async () => {
+  const h = harness({ policy, keychain: tokens });
+  const out = await run(["rotate", "DB_PASSWORD", "--target", "v1"], h.deps);
+  assert.equal(out.exitCode, 0, out.stdout);
+  assert.deepEqual(writes(h).sort(), ["prj_1/DATABASE_URL", "prj_1/DB_PASSWORD"]);
+  assert.deepEqual(parse(out.stdout).dependents, ["DATABASE_URL"]);
+});
+
+for (const [name, target, outside] of [
+  ["DB_PASSWORD", "v2", [{ dependent: "DATABASE_URL", targets: ["v1"] }]],
+  ["SIGNING_KEY", "v1", [{ dependent: "SIGNING_PUB", targets: ["v2"] }]],
+] as const) {
+  test(`S7 (L12): rotate ${name} --target ${target} with a dependent elsewhere is dependents_outside_selection`, async () => {
+    const h = harness({ policy, keychain: { ...tokens, "app/api": CANARY }, prompt: CANARY });
+    const out = await run(["rotate", name, "--target", target], h.deps);
+    assert.equal(out.exitCode, 2, out.stdout);
+    const body = parse(out.stdout);
+    assert.equal(body.ok, false);
+    const shown = outside.map((d) => `${d.dependent} (${d.targets.join(", ")})`).join(", ");
+    assert.deepEqual(body.error, {
+      code: "dependents_outside_selection",
+      message: `rotating ${name} on --target ${target} would leave derived values stale on other targets: ${shown}; rerun without --target or include those targets`,
+      dependents: outside,
+    });
+    assert.equal(h.fetch.calls.length, 0);
+    assert.equal(h.human.approvals.length + h.human.prompts.length, 0);
+    const records = await auditList(h);
+    assert.equal(records.length, 1);
+    assert.ok(
+      records.every(
+        (r) => r.action === "rotate" && r.result === "failed" && r.errorCode === "dependents_outside_selection" && r.variableName === name && r.target === target,
+      ),
+    );
+    assert.equal(body.results.length, 1);
+    assert.ok(!out.stdout.includes(CANARY));
+  });
+}
 
 test("S7: rotating a private key rewrites its public key", async () => {
   const h = harness({ policy, keychain: tokens });

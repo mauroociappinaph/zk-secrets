@@ -12,7 +12,7 @@ import type {
   WrittenDestination,
 } from "./audit/types.ts";
 import { runCapture } from "./capture/run.ts";
-import { CAPTURE_WAIT_MS, type CaptureErrorCode } from "./capture/script.ts";
+import { CAPTURE_WAIT_MS, type CaptureErrorCode, type CaptureOutcome } from "./capture/script.ts";
 import type { HumanChannel } from "./gate/dialog.ts";
 import type { Exec } from "./platform/exec.ts";
 import { ZKS_KEYCHAIN_SERVICE, type Keychain } from "./platform/keychain.ts";
@@ -462,35 +462,50 @@ async function rotate(deps: Deps, name: string | undefined, flags: Map<string, s
     }
   }
   const agent = deps.agentId;
-  if (refusal !== null) {
-    // Nothing is resolved or written; every write the rotation would have made is audited failed.
+  // Nothing is resolved or written; every write the rotation would have made is audited failed.
+  const refuse = async (refused: Operation[], error: { code: string; message: string; [k: string]: unknown }) => {
     const store = deps.openAudit();
     try {
-      const refused: Operation[] = variable.targets
-        .filter((targetKey) => !subset || subset.includes(targetKey))
-        .map((targetKey) => ({ name, targetKey, target: policy.targets[targetKey] as TargetConfig, variable, sourceKind: sourceKindOf(variable) }));
       const results = refused.map((op) => {
         const entry = appendOperation(deps, store, { project: policy.project, agent, action: "rotate" }, op, "failed", {
-          errorCode: "not_rotatable",
+          errorCode: error.code,
         });
-        return toResult(op, entry, "failed", undefined, { code: "not_rotatable", message: refusal as string });
+        return toResult(op, entry, "failed", undefined, { code: error.code, message: error.message });
       });
       const anchorError = await saveAnchor(deps, store);
       const mirror = await deps.mirror.sync(store);
-      return json(EXIT_USAGE, {
-        ok: false,
-        project: policy.project,
-        error: { code: "not_rotatable", message: refusal },
-        results,
-        mirror,
-        ...anchorError,
-      });
+      return json(EXIT_USAGE, { ok: false, project: policy.project, error, results, mirror, ...anchorError });
     } finally {
       store.close();
     }
+  };
+  if (refusal !== null) {
+    const refused: Operation[] = variable.targets
+      .filter((targetKey) => !subset || subset.includes(targetKey))
+      .map((targetKey) => ({ name, targetKey, target: policy.targets[targetKey] as TargetConfig, variable, sourceKind: sourceKindOf(variable) }));
+    return refuse(refused, { code: "not_rotatable", message: refusal });
   }
 
   const ops = planOperations(policy, { only: [name, ...dependents], targets: subset });
+  if (subset) {
+    // A derived value written elsewhere would keep the old value there: rotate all of it or none.
+    const outside = dependents
+      .map((dependent) => ({
+        dependent,
+        targets: (policy.variables[dependent] as Policy["variables"][string]).targets.filter((t) => !subset.includes(t)),
+      }))
+      .filter((d) => d.targets.length > 0);
+    if (outside.length > 0) {
+      const shown = outside.map((d) => `${d.dependent} (${d.targets.join(", ")})`).join(", ");
+      return refuse(ops, {
+        code: "dependents_outside_selection",
+        message:
+          `rotating ${name} on --target ${subset.join(",")} would leave derived values stale on other targets: ${shown}; ` +
+          "rerun without --target or include those targets",
+        dependents: outside,
+      });
+    }
+  }
   const written = [...new Set(ops.map((op) => op.name))].filter((n) => n !== name);
   return writeOperations(deps, redactor, policy, ops, {
     agent,
@@ -1002,7 +1017,7 @@ export const PINNED_CAPTURE_ORIGINS: Record<TokenAccount, string> = {
   "sheets-hmac": "https://script.google.com",
 };
 
-type CaptureFailure = CaptureErrorCode | "not_approved" | "isolated_profile_unset";
+type CaptureFailure = CaptureErrorCode | "not_approved" | "isolated_profile_unset" | "restore_failed";
 
 const CAPTURE_ERRORS: Record<CaptureFailure, string> = {
   origin_mismatch: "the page is not on --origin; nothing was read or filled",
@@ -1016,6 +1031,7 @@ const CAPTURE_ERRORS: Record<CaptureFailure, string> = {
   isolated_profile_missing: "the configured capture-profile is not an ego-browser profile; nothing was read or filled",
   isolated_profile_not_isolated: "the configured capture-profile is the default ego-browser profile; pick a separate profile",
   login_required: "the isolated page did not stay on --origin; log in to the site once in the capture profile; nothing was read or filled",
+  restore_failed: "the previous value of the Keychain item could not be written back",
 };
 
 interface CaptureRequest {
@@ -1146,7 +1162,7 @@ async function capture(deps: Deps, sub: string | undefined, flags: Map<string, s
     let approval: ApprovalMode | undefined;
     const finish = async (
       result: AuditResult,
-      outcome: { code: CaptureFailure; message?: string } | { length: number },
+      outcome: { code: CaptureFailure; message?: string; restored?: true } | { length: number },
     ) => {
       const errorCode = "code" in outcome ? outcome.code : "";
       // A successful read or generate records the stored item's modification time, which a later
@@ -1181,6 +1197,7 @@ async function capture(deps: Deps, sub: string | undefined, flags: Map<string, s
         ok: false,
         ...base,
         error: { code: outcome.code, message: outcome.message ?? CAPTURE_ERRORS[outcome.code] },
+        ...(outcome.restored ? { restored: true } : {}),
         auditId: entry.auditId,
         mirror,
         ...anchorError,
@@ -1228,47 +1245,95 @@ async function capture(deps: Deps, sub: string | undefined, flags: Map<string, s
       if (!(await deps.human.approve("zks: replace Keychain item", lines))) return await finish("denied", { code: "not_approved" });
     }
 
-    if (req.generateBytes !== null) {
-      const random = (deps.randomBytes ?? nodeRandomBytes)(req.generateBytes);
-      const value = SecretBuffer.adopt(Buffer.from(random.toString("base64url"), "utf8"));
-      random.fill(0);
-      redactor.register(value);
+    // An approved replacement keeps the old value in memory only, to write it back if the capture
+    // does not end ok (a read stores from inside the script, so this runs after the script returns).
+    let previous: SecretBuffer | null = null;
+    if (existed) {
       try {
-        await deps.keychain.set(req.service, req.account, value);
+        previous = await deps.keychain.get(req.service, req.account);
       } catch {
         return await finish("failed", { code: "keychain_failed" });
-      } finally {
-        value.dispose();
       }
+      if (previous !== null) redactor.register(previous);
     }
+    try {
+      /** Writes the old value back; false when that write failed. */
+      const restore = async (): Promise<boolean> => {
+        if (previous === null) return true;
+        try {
+          await deps.keychain.set(req.service, req.account, previous);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      /** A failure after the item may have been replaced: restore first, then audit it. */
+      const fail = async (code: CaptureFailure) => {
+        if (previous === null) return await finish("failed", { code });
+        if (await restore()) return await finish("failed", { code, restored: true });
+        return await finish("failed", {
+          code: "restore_failed",
+          message:
+            `the capture failed (${code}) and the previous value of the Keychain item could not be written back; ` +
+            "the item now holds whatever the capture left",
+        });
+      };
 
-    const outcome = await runCapture(deps.exec, egoBrowser, {
-      mode: req.mode,
-      space: req.space,
-      page: req.page,
-      selector: req.selector,
-      click: req.click,
-      origin: req.origin,
-      service: req.service,
-      account: req.account,
-      waitMs: CAPTURE_WAIT_MS,
-      ...(req.isolated && profileId !== null
-        ? {
-            isolated: {
-              profileId,
-              url: req.isolated.url,
-              name: `zks-capture-${(deps.randomBytes ?? nodeRandomBytes)(8).toString("hex")}`,
-            },
+      let outcome: CaptureOutcome;
+      try {
+        if (req.generateBytes !== null) {
+          const random = (deps.randomBytes ?? nodeRandomBytes)(req.generateBytes);
+          const value = SecretBuffer.adopt(Buffer.from(random.toString("base64url"), "utf8"));
+          random.fill(0);
+          redactor.register(value);
+          try {
+            await deps.keychain.set(req.service, req.account, value);
+          } catch {
+            return await fail("keychain_failed");
+          } finally {
+            value.dispose();
           }
-        : {}),
-    });
-    // A refused isolated fill --generate filled nothing: drop the item zks just created for it.
-    if (!outcome.ok && req.generateBytes !== null && !existed && ISOLATION_REFUSALS.includes(outcome.code)) {
-      await deps.keychain.remove(req.service, req.account).catch(() => false);
+        }
+        outcome = await captureStep(deps, egoBrowser, req, profileId);
+      } catch (error) {
+        // A thrown error is still reported as before, after the old value is back.
+        if (!(await restore())) return await fail("browser_failed");
+        throw error;
+      }
+      // A refused isolated fill --generate filled nothing: drop the item zks just created for it.
+      if (!outcome.ok && req.generateBytes !== null && !existed && ISOLATION_REFUSALS.includes(outcome.code)) {
+        await deps.keychain.remove(req.service, req.account).catch(() => false);
+      }
+      // Awaited inside the try: the audit store must stay open until finish has synced the mirror.
+      return outcome.ok ? await finish("applied", { length: outcome.length }) : await fail(outcome.code);
+    } finally {
+      previous?.dispose();
     }
-    // Awaited inside the try: the audit store must stay open until finish has synced the mirror.
-    return await finish(outcome.ok ? "applied" : "failed", outcome.ok ? { length: outcome.length } : { code: outcome.code });
   } finally {
     audit.close();
   }
+}
+
+/** Runs zks's capture script for req; the value never leaves it. */
+function captureStep(deps: Deps, egoBrowser: string, req: CaptureRequest, profileId: string | null): Promise<CaptureOutcome> {
+  return runCapture(deps.exec, egoBrowser, {
+    mode: req.mode,
+    space: req.space,
+    page: req.page,
+    selector: req.selector,
+    click: req.click,
+    origin: req.origin,
+    service: req.service,
+    account: req.account,
+    waitMs: CAPTURE_WAIT_MS,
+    ...(req.isolated && profileId !== null
+      ? {
+          isolated: {
+            profileId,
+            url: req.isolated.url,
+            name: `zks-capture-${(deps.randomBytes ?? nodeRandomBytes)(8).toString("hex")}`,
+          },
+        }
+      : {}),
+  });
 }

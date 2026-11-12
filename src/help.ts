@@ -15,6 +15,7 @@ Usage:
   zks rotate NAME [--target t1,t2] [--policy FILE]
                                               Write a NEW value of a generated variable to its targets
                                               and its derived variables; always asks (no revocation)
+                                              --target must cover every derived variable's targets
   zks inventory [--project P] [--policy FILE] Which variable is in which destination and how old
                                               (audit log metadata, no network)
   zks auth status                             Show which provider tokens are in the Keychain
@@ -57,7 +58,8 @@ Sources (variables.<NAME>.source.kind): op, keychain, prompt, generate, dotenv, 
 Non-sensitive env vars may use "value" instead of a source. Sensitive ones never can.
 Targets (targets.<key>.provider): vercel, aws-ssm, aws-sm, github, railway, supabase.
 Capture: zks/<vercel|railway|supabase|sheets-hmac> only from their own site (--origin https://vercel.com,
-https://railway.com, https://supabase.com, https://script.google.com); replacing an item asks first.
+https://railway.com, https://supabase.com, https://script.google.com); replacing an item asks first,
+and a replaced item gets its old value back when the capture fails.
 
 Exit codes: 0 ok, 1 a write or check failed, 2 usage or policy error, 3 not approved.
 `;
