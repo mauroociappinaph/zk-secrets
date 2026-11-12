@@ -1036,3 +1036,14 @@ test("v2 S3 (L14): fill types the exact value of a non-printable Keychain item (
 test("v2 S3 (L14): the generated script keeps the \\s of the hex regex", () => {
   assert.ok(buildCaptureScript(fillSpec()).includes("(?:\\s|$)"));
 });
+
+test("v2 S3 (L14): fill fails closed on a Keychain value that is not valid UTF-8", async () => {
+  const path = join(tempDir(), "security");
+  writeFileSync(path, `#!/bin/sh\nprintf 'password: 0x61FF  "a\\\\377"\\n' >&2\nexit 0\n`);
+  chmodSync(path, 0o700);
+  const input = Object.assign(new FakeInput(), { type: "password" });
+  const { page } = domPage({ nodes: [input] });
+  const { printed } = await runScript(buildCaptureScript(fillSpec(), path), page);
+  assert.deepEqual(printed, ['ZKS_RESULT {"ok":false,"code":"keychain_failed"}']);
+  assert.equal(input.value, "");
+});

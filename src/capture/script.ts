@@ -221,7 +221,14 @@ async function fill(page) {
   const hex = rest === null ? null : /^0x([0-9A-Fa-f]*)(?:\\s|$)/.exec(rest);
   let value = null;
   if (rest === "") value = "";
-  else if (hex && hex[1].length % 2 === 0) value = Buffer.from(hex[1], "hex").toString("utf8");
+  else if (hex && hex[1].length % 2 === 0) {
+    // fatal: bytes that are not UTF-8 fail closed instead of being typed as U+FFFD.
+    try {
+      value = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(hex[1], "hex"));
+    } catch {
+      value = null;
+    }
+  }
   else if (rest !== null && rest.length >= 2 && rest.startsWith('"') && rest.endsWith('"')) value = rest.slice(1, -1);
   bytes.fill(0);
   if (found.stdout) found.stdout.fill(0);
