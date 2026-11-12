@@ -28,6 +28,7 @@
 - After the write, the provider's own access rules apply. Vercel `sensitive` variables and GitHub secrets cannot be read back; SSM SecureString and Secrets Manager values can be read by any principal with decrypt/read permission; Railway variables stay readable by every member of the Railway project.
 - `zks capture` trusts the same-user agent to follow the skill: while a page shows a revealed token, or after a fill while the password field holds the value, the agent's own ego-browser session could read it. zks shrinks that window (it clicks the reveal itself, blanks the element, leaves the page on `about:blank` after every reveal click, and fills only password inputs), it cannot close it. The ego-browser runtime holds the value in memory while the script runs.
 - The first capture into a `zks/*` token (`zks/vercel`, `zks/railway`, `zks/supabase`, `zks/netlify`, `zks/sheets-hmac`) needs no approval: only replacing an existing one does. The pinned origin limits it to the provider's own site, so an agent can only store a token that site issued to your logged-in session; a same-user agent could still store a token of its choosing there (same-user limit).
+- File destinations (`compose`, `dotenv`) are plaintext files the same-user agent can read once written. Prefer **Approve once** over **Always allow** for them: a standing trust on a local `.env` would let a prompt-injected agent route any secret it can name into that file without a dialog and read it back.
 - `fill --from` decides "same origin, no dialog" from the local audit log, which a same-user process can rewrite (tamper-evident through `zks audit verify`, not tamper-proof).
 - `tools.json` pins each tool by path and sha256: after upgrading `gh`, `op`, `docker` or ego-browser, rerun `./install.sh`, or zks refuses the changed binary and reports the tool unavailable (`zks doctor`: `"changed"`). The hash is checked once per zks process before the first run of each tool; a binary swapped between that check and the run is not caught (same-user limit).
 - The Google Sheets audit is a **mirror**. The source of truth is the local log (`zks audit verify`) and the providers' own audit logs.
@@ -47,6 +48,18 @@ zks apply --only STRIPE_SECRET_KEY --target vercel-prod
 ```
 
 A policy using every provider lives in [`zks.policy.example.json`](./zks.policy.example.json).
+
+## What 0.2.0 adds
+
+| Area | Feature | Where to read |
+| --- | --- | --- |
+| Hardening | `sudo ./install.sh --system` root-owned install; `gh`, `op`, `docker`, ego-browser pinned by sha256; both `npm ci` runs isolated from your npm config; SBOM and `npm audit` on every install and in CI | [System install](#system-install), [Supply chain](#supply-chain) |
+| Capture | `--isolated`: the browser script runs in a separate ego-browser profile without the agent's session | [Isolated capture](#isolated-capture---isolated) |
+| Sources | `generate` formats (`uuid`, `jwt-secret`, `password`, `rsa-private-key`, `ed25519-private-key`), `template` (`${NAME}`, `${NAME:url}`) and `public-key` derived in memory | [Sources](#sources) |
+| Lifecycle | `zks rotate NAME`, `zks inventory`, `plan` effects per provider, `zks doctor --fix` | [Rotate](#rotate), [Inventory](#inventory), [Plan effects](#plan-effects), [Doctor --fix](#doctor---fix) |
+| Destinations | `netlify`, `docker-swarm` (unix socket only), `compose` secret files, `dotenv` (`.env*` files, mode 600) | [Providers](#providers) |
+
+Planned next (not built yet): capture recipes per provider (`zks capture recipe vercel-token`), a Playwright/Chrome capture backend, reading tokens that arrive as a downloaded file, capture inside modals and shadow DOM, a `zks mcp` stdio server so any agent can call `plan`/`apply`/`capture` without a shell, and `zks init --detect` that drafts the policy from `.env.example`, `vercel.json` and `railway.toml`. Tracked in [`odd/tasks/zks-v2.md`](./odd/tasks/zks-v2.md).
 
 ## Commands
 
