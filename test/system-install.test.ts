@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -146,8 +146,42 @@ test("v2 S1 (review R1): install.sh writes ~/AGENTS.md only through the user-run
   assert.equal(readFileSync(broken, "utf8"), "<!-- zks:begin -->\nno end\n");
 });
 
-test("v2 S1 (review R3): the production install creates no node_modules/.bin symlinks", () => {
+test("v2 S1 (review R3, verify L11/B1): the root npm ci runs under $NODE_BIN with an isolated env and no bin links", () => {
   const source = readFileSync(join(REPO, "install.sh"), "utf8");
-  assert.match(source, /"\$NPM_BIN" ci --omit=dev --ignore-scripts --no-bin-links\)/);
-  assert.match(source, /env -i HOME="\$TMP_DIR" PATH="\$SAFE_PATH" npm_config_userconfig=\/dev\/null/);
+  const start = source.indexOf("NPM_CLI=");
+  const end = source.indexOf("--no-bin-links)", start) + "--no-bin-links)".length;
+  assert.ok(start > 0 && end > start);
+  const dir = mkdtempSync(join(tmpdir(), "zks-npmstep-"));
+  const fake = join(dir, "fakebin");
+  const dest = join(dir, "dest");
+  const tmp = join(dir, "tmp");
+  spawnSync("/bin/mkdir", ["-p", fake, dest, tmp, join(dir, "nodebin")]);
+  // npm on PATH is a symlink (as in real installs); $NODE_BIN is a fake node that records env and argv.
+  writeFileSync(join(fake, "npm-cli.js"), "", { mode: 0o755 });
+  spawnSync("/bin/ln", ["-s", join(fake, "npm-cli.js"), join(fake, "npm")]);
+  const nodeBin = join(dir, "nodebin", "node");
+  writeFileSync(nodeBin, `#!/bin/sh\n/usr/bin/env >"${dir}/env"\nprintf '%s\\n' "$@" >"${dir}/argv"\n`, { mode: 0o755 });
+  const script = `set -eu\nDEST="${dest}"; TMP_DIR="${tmp}"; SAFE_PATH=/usr/bin:/bin; NODE_BIN="${nodeBin}"\n${source.slice(start, end)}\n`;
+  const r = spawnSync("/bin/sh", ["-c", script], {
+    env: { PATH: `${fake}:${process.execPath.replace(/\/node$/, "")}:/usr/bin:/bin`, HOME: "/nonexistent-user-home" },
+    encoding: "utf8",
+  });
+  assert.equal(r.status, 0, r.stderr);
+  const env = Object.fromEntries(
+    readFileSync(join(dir, "env"), "utf8").trim().split("\n").map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]),
+  );
+  assert.equal(env.HOME, tmp);
+  assert.equal(env.PATH, `${join(dir, "nodebin")}:/usr/bin:/bin`);
+  assert.equal(env.npm_config_userconfig, "/dev/null");
+  assert.equal(env.npm_config_globalconfig, join(tmp, "globalnpmrc"));
+  assert.equal(readFileSync(join(tmp, "globalnpmrc"), "utf8"), "");
+  assert.ok(env.npm_config_cache?.startsWith(tmp) && env.npm_config_logs_dir?.startsWith(tmp));
+  assert.ok(!Object.values(env).some((v) => v.includes("/nonexistent-user-home")));
+  assert.deepEqual(readFileSync(join(dir, "argv"), "utf8").trim().split("\n"), [
+    realpathSync(join(fake, "npm-cli.js")),
+    "ci",
+    "--omit=dev",
+    "--ignore-scripts",
+    "--no-bin-links",
+  ]);
 });

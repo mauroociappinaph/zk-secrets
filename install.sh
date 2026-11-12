@@ -141,10 +141,15 @@ cp -R dist bin package.json package-lock.json "$DEST/"
 # --no-bin-links: no node_modules/.bin symlinks (zks runs none, and a system install allows no symlink).
 # Under sudo this npm runs as root: env -i with a private HOME, cache and logs keeps it away from
 # the user's ~/.npm and ~/.npmrc (root writes there would follow user-planted symlinks).
-NPM_BIN="$(command -v npm)"
-(cd "$DEST" && /usr/bin/env -i HOME="$TMP_DIR" PATH="$SAFE_PATH" npm_config_userconfig=/dev/null \
+# npm runs under the same checked node ($NODE_BIN), not whatever node SAFE_PATH would find; the
+# global npmrc is an empty private file (npm refuses /dev/null for both user and global config).
+# Root still executes the user's npm and node files here: same-user limit, see README.
+NPM_CLI="$(node -p 'require("node:fs").realpathSync(process.argv[1])' "$(command -v npm)")"
+: >"$TMP_DIR/globalnpmrc"
+(cd "$DEST" && /usr/bin/env -i HOME="$TMP_DIR" PATH="$(dirname "$NODE_BIN"):$SAFE_PATH" \
+  npm_config_userconfig=/dev/null npm_config_globalconfig="$TMP_DIR/globalnpmrc" \
   npm_config_cache="$TMP_DIR/npm-cache" npm_config_logs_dir="$TMP_DIR/npm-logs" npm_config_update_notifier=false \
-  "$NPM_BIN" ci --omit=dev --ignore-scripts --no-bin-links)
+  "$NODE_BIN" "$NPM_CLI" ci --omit=dev --ignore-scripts --no-bin-links)
 # CycloneDX SBOM of the production dependencies, inside the install so the digest covers it.
 as_user npm run --silent sbom >"$DEST/sbom.cdx.json" || die "could not write the SBOM"
 if [ "$MODE" = system ]; then
