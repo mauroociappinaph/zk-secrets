@@ -371,7 +371,9 @@ test("R3-002: an isolated pending login reports the space and page it left open;
     const body = parse(out.stdout);
     assert.deepEqual(body, {
       ok: true, command: "capture", mode: "login", origin: ORIGIN, from: ITEM, isolated: true,
-      loggedIn: false, finalOrigin: ORIGIN, pending, space: "zks-capture-0707070707070707", page: "p1",
+      loggedIn: false, finalOrigin: ORIGIN, pending,
+      // Only a human challenge leaves a page open; "unknown" (wrong password, selectors) closes the space.
+      ...(pending === "unknown" ? {} : { space: "zks-capture-0707070707070707", page: "p1" }),
       auditId: body.auditId, mirror: NO_MIRROR(1),
     });
     const own = withItem({ exec: marker });
@@ -701,7 +703,7 @@ test("R3-002: an isolated pending login keeps its page open; logged in or failed
   const stays = loginPage();
   const unknown = await runLogin(spec, stays.page);
   assert.deepEqual(unknown.printed, [`ZKS_RESULT {"ok":true,"loggedIn":false,"finalOrigin":"${ORIGIN}","pending":"unknown"}`]);
-  assert.equal((unknown.spaceEvents.at(-1) as [string, { keep: unknown[] }])[1].keep[0], stays.page);
+  assert.deepEqual(unknown.spaceEvents.at(-1), ["finish", { keep: [] }], "unknown (wrong password or selectors) keeps nothing");
 
   const failed = loginPage({ clickThrows: true });
   const notFound = await runLogin(spec, failed.page);

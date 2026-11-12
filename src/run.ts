@@ -1778,7 +1778,7 @@ async function captureLogin(deps: Deps, flags: Map<string, string>): Promise<Run
     });
     if (outcome.ok) {
       // A pending isolated login left its page open in the capture profile: name it for the human.
-      const left = outcome.pending !== undefined && spaceName !== null ? { space: spaceName, page: ISOLATED_PAGE } : undefined;
+      const left = outcome.pending !== undefined && outcome.pending !== "unknown" && spaceName !== null ? { space: spaceName, page: ISOLATED_PAGE } : undefined;
       return await finish("applied", { ...outcome, ...(left ? { left } : {}) });
     }
     if (outcome.code === "login_redirected") {

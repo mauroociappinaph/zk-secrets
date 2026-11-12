@@ -426,12 +426,13 @@ async function login(page, navigated) {
   const state = await settle(page, before);
   if (state.away) return { ok: false, code: "login_redirected", finalOrigin: state.origin };
   const loggedIn = L.successSelector !== null ? state.success : !state.password && !state.otp && !state.captcha;
-  if (loggedIn) return { ok: true, loggedIn: true, finalOrigin: state.origin };
-  // The click may not have submitted: never leave the typed password in a field the agent can read.
-  // The page itself stays, so the human can finish a captcha or 2FA step there.
+  // The click may not have submitted (or a success selector matched the login page itself): never
+  // leave the typed password in a field the agent can read, whatever the verdict.
   if (state.password) {
     try { await page.evaluate(clearAfterFailure, spec.selector); } catch {}
   }
+  if (loggedIn) return { ok: true, loggedIn: true, finalOrigin: state.origin };
+  // The page itself stays, so the human can finish a captcha or 2FA step there.
   return { ok: true, loggedIn: false, finalOrigin: state.origin, pending: state.captcha ? "captcha" : state.otp ? "2fa" : "unknown" };
 }
 
@@ -459,7 +460,8 @@ async function isolated(iso) {
     result = await step(page, true);
     return result;
   } finally {
-    const pending = spec.mode === "login" && page !== null && result !== null && result.ok === true && result.loggedIn === false;
+    // Only a real human challenge keeps the page: a wrong password or unmatched selectors (unknown) closes it.
+    const pending = spec.mode === "login" && page !== null && result !== null && result.ok === true && result.loggedIn === false && result.pending !== "unknown";
     try {
       await task.finish({ keep: pending ? [page] : [] });
     } catch {}
