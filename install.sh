@@ -95,10 +95,16 @@ chmod 555 "$LAUNCHER"
 # install, before it turns read-only, so the integrity digest covers them. Missing tool: null.
 # The stable `command -v` path is kept (not the versioned realpath) so upgrades keep working.
 printf '==> Recording tool paths %s/tools.json\n' "$DEST"
+# Each entry also pins the sha256 of the binary (symlinks followed): zks refuses to run a tool
+# whose binary changed since install and `zks doctor` reports it as "changed".
 tool_path() {
   found="$(command -v "$1" 2>/dev/null)" || found=""
   case "$found" in
-    /*) node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$found" 2>/dev/null || printf 'null' ;;
+    /*)
+      sum="$(shasum -a 256 <"$found" 2>/dev/null | cut -d ' ' -f 1)" || sum=""
+      node -e 'const [p, s] = process.argv.slice(1); if (!/^[0-9a-f]{64}$/.test(s)) throw 0; process.stdout.write(JSON.stringify({ path: p, sha256: s }))' \
+        "$found" "$sum" 2>/dev/null || printf 'null'
+      ;;
     *) printf 'null' ;;
   esac
 }

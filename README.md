@@ -13,7 +13,7 @@
 - GitHub writes go from zks straight to `https://api.github.com` (secrets sealed with the repository's libsodium public key). The `gh` CLI is only asked for your login token (`gh auth token --hostname github.com`), so its config (hosts, `http_unix_socket`) cannot redirect a write.
 - Provider tokens live in the macOS Keychain; AWS uses your existing SSO or profile credentials.
 - `zks capture` reads a token from a web page (or fills a password into one) inside a script zks builds and pipes to `ego-browser nodejs`; the value goes straight between the page and `/usr/bin/security`, and zks prints only its length. zks provider tokens (`zks/vercel`, `zks/railway`, `zks/supabase`, `zks/sheets-hmac`) are only captured from their pinned provider origin. See [Web token capture](#web-token-capture).
-- zks never looks `ego-browser`, `gh` or `op` up on `PATH`: `install.sh` records their real paths in the read-only install (`tools.json`, covered by the integrity digest).
+- zks never looks `ego-browser`, `gh` or `op` up on `PATH`: `install.sh` records their real paths and the sha256 of each binary in the read-only install (`tools.json`, covered by the integrity digest). zks runs a tool only while its binary still has that hash; a changed binary is refused with a stderr warning (`zks: gh changed since install (sha256 mismatch); rerun ./install.sh to pin the new binary`), the command reports the tool unavailable, and `zks doctor` shows `tools.pins.<tool>: "changed"`.
 
 **Honest limits**
 
@@ -29,7 +29,7 @@
 - `zks capture` trusts the same-user agent to follow the skill: while a page shows a revealed token, or after a fill while the password field holds the value, the agent's own ego-browser session could read it. zks shrinks that window (it clicks the reveal itself, blanks the element, leaves the page on `about:blank` after every reveal click, and fills only password inputs), it cannot close it. The ego-browser runtime holds the value in memory while the script runs.
 - The first capture into a `zks/*` token (`zks/vercel`, `zks/railway`, `zks/supabase`, `zks/sheets-hmac`) needs no approval: only replacing an existing one does. The pinned origin limits it to the provider's own site, so an agent can only store a token that site issued to your logged-in session; a same-user agent could still store a token of its choosing there (same-user limit).
 - `fill --from` decides "same origin, no dialog" from the local audit log, which a same-user process can rewrite (tamper-evident through `zks audit verify`, not tamper-proof).
-- `tools.json` stores real paths, which include version directories (Homebrew `Cellar`/`Caskroom`, ego's `Versions/<n>`): after upgrading `gh`, `op` or ego-browser, rerun `./install.sh`, or zks reports the tool unavailable.
+- `tools.json` pins each tool by path and sha256: after upgrading `gh`, `op` or ego-browser, rerun `./install.sh`, or zks refuses the changed binary and reports the tool unavailable (`zks doctor`: `"changed"`). The hash is checked once per zks process before the first run of each tool; a binary swapped between that check and the run is not caught (same-user limit).
 - The Google Sheets audit is a **mirror**. The source of truth is the local log (`zks audit verify`) and the providers' own audit logs.
 
 ## Quick start

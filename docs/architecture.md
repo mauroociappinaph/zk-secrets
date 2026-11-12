@@ -26,7 +26,7 @@ zks splits the work between an **untrusted planner** (the AI agent, which only e
  │    ├─ capture/script.ts    builds the ego-browser script, parses its one marker line │
  │    ├─ capture/run.ts       pipes the script to `ego-browser nodejs` (absolute path)  │
  │    └─ platform/*           exec (no shell, fixed env), keychain, integrity, paths,   │
- │                            tools (tools.json: ego-browser, gh, op real paths)        │
+ │                            tools (tools.json: ego-browser, gh, op paths + sha256)   │
  └──────┬──────────────┬───────────────┬──────────────────┬───────────────────────────┘
         ▼              ▼               ▼                  ▼
   1Password CLI   macOS Keychain   Provider APIs        ~/.local/state/zks/audit.db
@@ -39,7 +39,7 @@ Files on disk:
 
 | Path | Content | Mode |
 |---|---|---|
-| `~/.local/libexec/zks/<version>/` | `dist/`, `bin/`, `package.json`, production `node_modules`, `tools.json` (real paths of `ego-browser`, `gh`, `op` resolved at install time, `null` when missing; covered by the integrity digest) | read-only (`a-w`) |
+| `~/.local/libexec/zks/<version>/` | `dist/`, `bin/`, `package.json`, production `node_modules`, `tools.json` (paths and binary sha256 pins of `ego-browser`, `gh`, `op` resolved at install time, `null` when missing; covered by the integrity digest) | read-only (`a-w`) |
 | `~/.local/bin/zks` | launcher: `ulimit -c 0`, then `/usr/bin/env -i HOME=… USER=… LOGNAME=… LANG=en_US.UTF-8 PATH=<SAFE_PATH> ZKS_AGENT_LABEL=… <node> <install>/dist/cli.js "$@"`; node's real path and your home are fixed at install time | `555` |
 | `~/.config/zks/integrity.json` | `{version, root, digest, files}` of the install | `600` in `700` dir |
 | `~/.config/zks/config.json` | Sheets webhook URL | `600` |

@@ -11,7 +11,7 @@ import { createExec } from "./platform/exec.ts";
 import { checkIntegrity } from "./platform/integrity.ts";
 import { ZKS_KEYCHAIN_SERVICE, createKeychain } from "./platform/keychain.ts";
 import { zksPaths } from "./platform/paths.ts";
-import { TOOLS_FILE, resolveTools, type ToolPaths } from "./platform/tools.ts";
+import { NO_PINS, TOOLS_FILE, parseToolPins, pinnedExec, resolveTools, sha256File, type ToolPaths, type ToolPins } from "./platform/tools.ts";
 import { loadTrust, type TrustFile } from "./policy/trust.ts";
 import { TOKEN_ACCOUNTS, run, type Deps, type ZksConfig } from "./run.ts";
 import { createAwsClientFactory } from "./sinks/aws-clients.ts";
@@ -29,14 +29,32 @@ function isExecutableFile(path: string): boolean {
 }
 
 /** <install>/tools.json from install.sh; a development checkout has none and looks on SAFE_PATH. */
-function loadTools(): { tools: ToolPaths; source: "tools.json" | "safe-path" } {
+function loadTools(): { tools: ToolPaths; pins: ToolPins; source: "tools.json" | "safe-path" } {
   let text: string | null = null;
   try {
     text = readFileSync(join(appRoot, TOOLS_FILE), "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") text = "";
   }
-  return { tools: resolveTools(text, isExecutableFile), source: text === null ? "safe-path" : "tools.json" };
+  return {
+    tools: resolveTools(text, isExecutableFile),
+    pins: text === null ? { ...NO_PINS } : parseToolPins(text),
+    source: text === null ? "safe-path" : "tools.json",
+  };
+}
+
+/** Per tool: "ok" (hash matches), "changed", "unpinned" (legacy tools.json or dev run) or "missing". */
+async function pinStatus(tools: ToolPaths, pins: ToolPins): Promise<Record<string, string>> {
+  const names: Record<keyof ToolPaths, string> = { egoBrowser: "ego-browser", gh: "gh", op: "op" };
+  const status: Record<string, string> = {};
+  for (const key of Object.keys(names) as (keyof ToolPaths)[]) {
+    const path = tools[key];
+    const pin = pins[key];
+    if (path === null) status[names[key]] = "missing";
+    else if (pin === null) status[names[key]] = "unpinned";
+    else status[names[key]] = (await sha256File(path).catch(() => null)) === pin ? "ok" : "changed";
+  }
+  return status;
 }
 
 export interface Identity {
@@ -72,9 +90,13 @@ export async function main(identity: Identity): Promise<number> {
       return { version: 1, destinations: [], mac: "" };
     }
   };
-  const exec = createExec({ home: identity.home, user: identity.user });
+  const { tools, pins, source: toolsSource } = loadTools();
+  // gh, op and ego-browser run only while their binary keeps the sha256 install.sh pinned.
+  const exec = pinnedExec(createExec({ home: identity.home, user: identity.user }), tools, pins, {
+    hashFile: sha256File,
+    warn: (line) => void process.stderr.write(line),
+  });
   const keychain = createKeychain(exec);
-  const { tools, source: toolsSource } = loadTools();
   const pkg = JSON.parse(await readFile(join(appRoot, "package.json"), "utf8")) as { version: string };
 
   const deps: Deps = {
@@ -134,6 +156,7 @@ export async function main(identity: Identity): Promise<number> {
           op: tools.op !== null && isExecutableFile(tools.op),
           gh: tools.gh !== null && isExecutableFile(tools.gh),
           aws: await which("aws"),
+          pins: await pinStatus(tools, pins),
         },
         tokens,
         audit: { path: paths.auditDb, ...audit },

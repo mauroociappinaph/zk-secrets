@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { SAFE_PATH } from "../src/platform/exec.ts";
-import { NO_TOOLS, findOnSafePath, parseToolsFile, resolveTools } from "../src/platform/tools.ts";
+import { NO_TOOLS, findOnSafePath, parseToolPins, parseToolsFile, pinnedExec, resolveTools } from "../src/platform/tools.ts";
 import { run } from "../src/run.ts";
 import { githubSink } from "../src/sinks/github.ts";
 import { SecretBuffer } from "../src/secret/secret-buffer.ts";
@@ -91,4 +91,90 @@ test("S11: capture without a resolved ego-browser fails with browser_failed and 
   assert.equal(out.exitCode, 1, out.stdout);
   assert.equal(parse(out.stdout).error.code, "browser_failed");
   assert.equal(h.exec.calls.length, 0);
+});
+
+// S2 (odd/tasks/zks-v2.md): tools are pinned by the sha256 of their binary.
+const PIN_GH = "a".repeat(64);
+const PIN_OP = "b".repeat(64);
+
+test("v2 S2: tools.json entries may carry a sha256 pin; legacy string entries stay unpinned", () => {
+  const text = JSON.stringify({
+    "ego-browser": { path: EGO, sha256: "c".repeat(64) },
+    gh: { path: "/opt/homebrew/bin/gh", sha256: PIN_GH },
+    op: "/opt/homebrew/bin/op",
+  });
+  assert.deepEqual(parseToolsFile(text), { egoBrowser: EGO, gh: "/opt/homebrew/bin/gh", op: "/opt/homebrew/bin/op" });
+  assert.deepEqual(parseToolPins(text), { egoBrowser: "c".repeat(64), gh: PIN_GH, op: null });
+});
+
+test("v2 S2: a malformed pin makes the tool unavailable instead of unpinned", () => {
+  for (const bad of ["A".repeat(64), "a".repeat(63), "", 7, null]) {
+    const text = JSON.stringify({ "ego-browser": null, gh: { path: "/opt/homebrew/bin/gh", sha256: bad }, op: null });
+    assert.equal(parseToolsFile(text).gh, null, String(bad));
+  }
+});
+
+test("v2 S2: pinned exec runs a tool whose binary hash matches, hashing it once per process", async () => {
+  const hashed: string[] = [];
+  const warnings: string[] = [];
+  const base = fakeExec(() => ({ stdout: Buffer.from("ok") }));
+  const exec = pinnedExec(base.exec, { egoBrowser: null, gh: "/opt/homebrew/bin/gh", op: null }, { egoBrowser: null, gh: PIN_GH, op: null }, {
+    hashFile: async (path) => (hashed.push(path), PIN_GH),
+    warn: (line) => warnings.push(line),
+  });
+  assert.equal((await exec("/opt/homebrew/bin/gh", ["auth", "token"])).code, 0);
+  await exec("/opt/homebrew/bin/gh", ["auth", "token"]);
+  await exec("/usr/bin/security", ["help"]);
+  assert.deepEqual(hashed, ["/opt/homebrew/bin/gh"]);
+  assert.equal(base.calls.length, 3);
+  assert.deepEqual(warnings, []);
+});
+
+test("v2 S2: an unpinned (legacy) tool runs without hashing", async () => {
+  const hashed: string[] = [];
+  const base = fakeExec();
+  const exec = pinnedExec(base.exec, { egoBrowser: null, gh: "/opt/homebrew/bin/gh", op: null }, { egoBrowser: null, gh: null, op: null }, {
+    hashFile: async (path) => (hashed.push(path), PIN_GH),
+    warn: () => undefined,
+  });
+  await exec("/opt/homebrew/bin/gh", ["auth", "token"]);
+  assert.deepEqual(hashed, []);
+  assert.equal(base.calls.length, 1);
+});
+
+test("v2 S2: a tool whose binary changed since install is refused with a warning and never runs", async () => {
+  const warnings: string[] = [];
+  const base = fakeExec();
+  const exec = pinnedExec(base.exec, { egoBrowser: null, gh: null, op: "/opt/homebrew/bin/op" }, { egoBrowser: null, gh: null, op: PIN_OP }, {
+    hashFile: async () => "d".repeat(64),
+    warn: (line) => warnings.push(line),
+  });
+  await assert.rejects(exec("/opt/homebrew/bin/op", ["read", "op://v/i/f"]), { code: "tool_changed" });
+  await assert.rejects(exec("/opt/homebrew/bin/op", ["read", "op://v/i/f"]), { code: "tool_changed" });
+  assert.equal(base.calls.length, 0);
+  assert.deepEqual(warnings, ["zks: op changed since install (sha256 mismatch); rerun ./install.sh to pin the new binary\n"]);
+});
+
+test("v2 S2: a missing pinned binary is refused like a changed one", async () => {
+  const base = fakeExec();
+  const exec = pinnedExec(base.exec, { egoBrowser: null, gh: "/opt/homebrew/bin/gh", op: null }, { egoBrowser: null, gh: PIN_GH, op: null }, {
+    hashFile: async () => {
+      throw new Error("ENOENT");
+    },
+    warn: () => undefined,
+  });
+  await assert.rejects(exec("/opt/homebrew/bin/gh", []), { code: "tool_changed" });
+  assert.equal(base.calls.length, 0);
+});
+
+test("v2 S2: a changed op makes an op source fail as source_unavailable without running op", async () => {
+  const base = fakeExec(() => ({ stdout: Buffer.from(CANARY) }));
+  const exec = pinnedExec(base.exec, TEST_TOOLS, { egoBrowser: null, gh: null, op: PIN_OP }, {
+    hashFile: async () => "d".repeat(64),
+    warn: () => undefined,
+  });
+  const deps = { keychain: fakeKeychain().keychain, human: fakeHuman().human, cwd: "/w", exec, tools: TEST_TOOLS };
+  const spec = { sensitive: true, targets: [], source: { kind: "op" as const, ref: "op://v/i/f" } };
+  await assert.rejects(resolveValue("A", spec, deps), (e: Error & { code?: string }) => e.code === "source_unavailable");
+  assert.equal(base.calls.length, 0);
 });
