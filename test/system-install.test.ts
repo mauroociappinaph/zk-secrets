@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { type TestContext, test } from "node:test";
 import { checkOwnership } from "../src/platform/integrity.ts";
 import { SYSTEM_LIBEXEC, installLayout } from "../src/platform/paths.ts";
 
@@ -146,42 +146,100 @@ test("v2 S1 (review R1): install.sh writes ~/AGENTS.md only through the user-run
   assert.equal(readFileSync(broken, "utf8"), "<!-- zks:begin -->\nno end\n");
 });
 
-test("v2 S1 (review R3, verify L11/B1): the root npm ci runs under $NODE_BIN with an isolated env and no bin links", () => {
+/**
+ * Runs the install.sh slice that defines NPM_CLI and isolated_npm plus one `isolated_npm` call line
+ * under /bin/sh, with $NODE_BIN a fake node that records its env, argv and working directory.
+ */
+function isolatedNpmStep(t: TestContext, callPrefix: string) {
   const source = readFileSync(join(REPO, "install.sh"), "utf8");
   const start = source.indexOf("NPM_CLI=");
-  const end = source.indexOf("--no-bin-links)", start) + "--no-bin-links)".length;
-  assert.ok(start > 0 && end > start);
+  const fnEnd = source.indexOf("\n}\n", source.indexOf("isolated_npm() {", start)) + "\n}\n".length;
+  const callStart = source.indexOf(`\n${callPrefix} `, fnEnd) + 1;
+  const callEnd = source.indexOf("\n", callStart);
+  assert.ok(start > 0 && fnEnd > start && callStart > fnEnd && callEnd > callStart, `install.sh has NPM_CLI, isolated_npm and ${callPrefix}`);
   const dir = mkdtempSync(join(tmpdir(), "zks-npmstep-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
   const fake = join(dir, "fakebin");
   const dest = join(dir, "dest");
+  const repo = join(dir, "repo");
   const tmp = join(dir, "tmp");
-  spawnSync("/bin/mkdir", ["-p", fake, dest, tmp, join(dir, "nodebin")]);
-  // npm on PATH is a symlink (as in real installs); $NODE_BIN is a fake node that records env and argv.
+  const buildTmp = join(dir, "buildtmp");
+  spawnSync("/bin/mkdir", ["-p", fake, dest, repo, tmp, buildTmp, join(dir, "nodebin")]);
+  // npm on PATH is a symlink (as in real installs); $NODE_BIN is a fake node that records env, argv and cwd.
   writeFileSync(join(fake, "npm-cli.js"), "", { mode: 0o755 });
   spawnSync("/bin/ln", ["-s", join(fake, "npm-cli.js"), join(fake, "npm")]);
   const nodeBin = join(dir, "nodebin", "node");
-  writeFileSync(nodeBin, `#!/bin/sh\n/usr/bin/env >"${dir}/env"\nprintf '%s\\n' "$@" >"${dir}/argv"\n`, { mode: 0o755 });
-  const script = `set -eu\nDEST="${dest}"; TMP_DIR="${tmp}"; SAFE_PATH=/usr/bin:/bin; NODE_BIN="${nodeBin}"\n${source.slice(start, end)}\n`;
+  writeFileSync(nodeBin, `#!/bin/sh\n/usr/bin/env >"${dir}/env"\nprintf '%s\\n' "$@" >"${dir}/argv"\npwd -P >"${dir}/cwd"\n`, { mode: 0o755 });
+  // as_user stands in for sudo -u: it records the command it was given and runs it as is.
+  const script = [
+    "set -eu",
+    `REPO="${repo}"; DEST="${dest}"; TMP_DIR="${tmp}"; BUILD_TMP="${buildTmp}"; SAFE_PATH=/usr/bin:/bin; NODE_BIN="${nodeBin}"`,
+    `as_user() { printf '%s\\n' "$1" >>"${dir}/as_user"; "$@"; }`,
+    source.slice(start, fnEnd) + source.slice(callStart, callEnd),
+    "",
+  ].join("\n");
   const r = spawnSync("/bin/sh", ["-c", script], {
     env: { PATH: `${fake}:${process.execPath.replace(/\/node$/, "")}:/usr/bin:/bin`, HOME: "/nonexistent-user-home" },
     encoding: "utf8",
   });
   assert.equal(r.status, 0, r.stderr);
+  const read = (name: string) => (existsSync(join(dir, name)) ? readFileSync(join(dir, name), "utf8") : "");
   const env = Object.fromEntries(
-    readFileSync(join(dir, "env"), "utf8").trim().split("\n").map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]),
+    read("env").trim().split("\n").map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]),
   );
-  assert.equal(env.HOME, tmp);
-  assert.equal(env.PATH, `${join(dir, "nodebin")}:/usr/bin:/bin`);
-  assert.equal(env.npm_config_userconfig, "/dev/null");
-  assert.equal(env.npm_config_globalconfig, join(tmp, "globalnpmrc"));
-  assert.equal(readFileSync(join(tmp, "globalnpmrc"), "utf8"), "");
-  assert.ok(env.npm_config_cache?.startsWith(tmp) && env.npm_config_logs_dir?.startsWith(tmp));
-  assert.ok(!Object.values(env).some((v) => v.includes("/nonexistent-user-home")));
-  assert.deepEqual(readFileSync(join(dir, "argv"), "utf8").trim().split("\n"), [
-    realpathSync(join(fake, "npm-cli.js")),
-    "ci",
-    "--omit=dev",
-    "--ignore-scripts",
-    "--no-bin-links",
+  return {
+    env,
+    argv: read("argv").trim().split("\n"),
+    cwd: read("cwd").trim(),
+    asUser: read("as_user").trim().split("\n").filter(Boolean),
+    npmCli: realpathSync(join(fake, "npm-cli.js")),
+    nodeDir: join(dir, "nodebin"),
+    dest: realpathSync(dest),
+    repo: realpathSync(repo),
+    tmp,
+    buildTmp,
+  };
+}
+
+function assertIsolatedEnv(step: ReturnType<typeof isolatedNpmStep>, scratch: string) {
+  const { env } = step;
+  // PWD, SHLVL and _ are set by the fake node's own /bin/sh, not passed by env -i.
+  assert.deepEqual(Object.keys(env).filter((k) => !["PWD", "SHLVL", "_"].includes(k)).sort(), [
+    "HOME",
+    "PATH",
+    "npm_config_cache",
+    "npm_config_globalconfig",
+    "npm_config_logs_dir",
+    "npm_config_update_notifier",
+    "npm_config_userconfig",
   ]);
+  assert.equal(env.HOME, scratch);
+  assert.equal(env.PATH, `${step.nodeDir}:/usr/bin:/bin`);
+  assert.equal(env.npm_config_userconfig, "/dev/null");
+  assert.equal(env.npm_config_globalconfig, join(scratch, "globalnpmrc"));
+  assert.equal(readFileSync(join(scratch, "globalnpmrc"), "utf8"), "");
+  assert.equal(env.npm_config_cache, join(scratch, "npm-cache"));
+  assert.equal(env.npm_config_logs_dir, join(scratch, "npm-logs"));
+  assert.equal(env.npm_config_update_notifier, "false");
+  assert.ok(!Object.values(env).some((v) => v.includes("/nonexistent-user-home")));
+}
+
+test("v2 S1 (review R3, verify L11/B1): the root npm ci runs under $NODE_BIN with an isolated env and no bin links", (t) => {
+  const step = isolatedNpmStep(t, 'isolated_npm command "$TMP_DIR"');
+  assertIsolatedEnv(step, step.tmp);
+  assert.deepEqual(step.argv, [step.npmCli, "ci", "--omit=dev", "--ignore-scripts", "--no-bin-links"]);
+  assert.equal(step.cwd, step.dest);
+  assert.deepEqual(step.asUser, [], "the production npm ci does not run through as_user");
+  assert.ok(!existsSync(join(step.buildTmp, "globalnpmrc")), "the production step does not touch the build scratch");
+});
+
+test("v2 S1 (review R3-npm-ci-env-isolation-user-mode): the build npm ci runs as the user under $NODE_BIN with an isolated env", (t) => {
+  const step = isolatedNpmStep(t, 'isolated_npm as_user "$BUILD_TMP"');
+  assertIsolatedEnv(step, step.buildTmp);
+  assert.deepEqual(step.argv, [step.npmCli, "ci"]);
+  assert.equal(step.cwd, step.repo);
+  assert.ok(step.asUser.includes("/usr/bin/env"), "the build npm ci runs through as_user");
+  assert.ok(!existsSync(join(step.tmp, "globalnpmrc")), "the build step does not use the root-owned scratch");
+  const source = readFileSync(join(REPO, "install.sh"), "utf8");
+  assert.doesNotMatch(source, /^as_user npm ci\b/m, "no build npm ci with the user's npm config");
 });
