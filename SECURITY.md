@@ -5,10 +5,9 @@
 | Version | Supported |
 | --- | --- |
 | 0.3.x | yes |
-| 0.2.x | security fixes only |
 | < 0.2 | no |
 
-Fixes land on `develop` and ship in the next 0.3.x release.
+Fixes land on `develop` and ship in the next 0.3.x release; older minors get no backports.
 
 ## Reporting a vulnerability
 
