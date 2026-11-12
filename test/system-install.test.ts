@@ -81,7 +81,9 @@ test("v2 S1: install.sh --system refuses to run without root and writes nothing"
   assert.equal(r.stderr, "install.sh: --system installs as root: run sudo ./install.sh --system\n");
 });
 
-test("v2 S1: install.sh --system --dry-run prints the root-owned layout and writes nothing", { skip: process.getuid?.() === 0 }, () => {
+const NOT_MACOS = process.platform !== "darwin" ? "install.sh runs only on macOS" : false;
+
+test("v2 S1: install.sh --system --dry-run prints the root-owned layout and writes nothing", { skip: process.getuid?.() === 0 || NOT_MACOS }, () => {
   const r = install(["--system", "--dry-run"]);
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.stdout, /^mode: system$/m);
@@ -93,7 +95,7 @@ test("v2 S1: install.sh --system --dry-run prints the root-owned layout and writ
   assert.equal(r.stderr, "");
 });
 
-test("v2 S1: install.sh --dry-run without --system prints the user layout; an unknown option fails", () => {
+test("v2 S1: install.sh --dry-run without --system prints the user layout; an unknown option fails", { skip: NOT_MACOS }, () => {
   const r = install(["--dry-run"]);
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.stdout, /^mode: user$/m);

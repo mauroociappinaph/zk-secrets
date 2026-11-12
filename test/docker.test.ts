@@ -207,10 +207,11 @@ test("S12: install.sh pins docker found on SAFE_PATH and records null when it is
     assert.equal(r.status, 0, r.stderr);
     return JSON.parse(readFileSync(join(dir, "dest", "tools.json"), "utf8")) as Record<string, unknown>;
   };
-  assert.equal(step(`${safe}:/usr/bin:/bin`).docker, null);
+  // Only the fake dir is searched: a CI runner may have a real docker on /usr/bin.
+  assert.equal(step(safe).docker, null);
   writeFileSync(join(safe, "docker"), "#!/bin/sh\n", { mode: 0o755 });
   const sha = spawnSync("/usr/bin/shasum", ["-a", "256", join(safe, "docker")], { encoding: "utf8" }).stdout.split(" ")[0];
-  assert.deepEqual(step(`${safe}:/usr/bin:/bin`).docker, { path: join(safe, "docker"), sha256: sha });
+  assert.deepEqual(step(safe).docker, { path: join(safe, "docker"), sha256: sha });
 });
 
 // compose
