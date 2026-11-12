@@ -1,4 +1,4 @@
-# zks — zero-knowledge secrets for AI agents
+# zks — secrets for AI agents that never see them
 
 `zks` is a macOS CLI that writes secrets and env vars to Vercel, AWS SSM Parameter Store, AWS Secrets Manager, GitHub Actions, Railway, Supabase, Netlify, Docker Swarm, Compose secret files and local `.env` files **without the agent ever seeing a value**. The agent edits a policy file with names, targets and *sources* (1Password, Keychain, hidden dialog, generator, dotenv file). zks resolves each value itself, shows you one native approval dialog (or none, for a destination you already chose "Always allow" for), writes straight to the provider, and records metadata only in a hash-chained audit log. With `zks capture`, the agent also obtains web-issued tokens and API keys itself in ego-browser without seeing them: zks's own browser script moves the value between the page and the Keychain.
 
@@ -363,9 +363,26 @@ CI runs the same steps on every push and pull request to `main` and `develop`, p
 - `install.sh` runs `deps:check` before building (an offline registry only warns) and writes `sbom.cdx.json` into the read-only install, so the integrity digest covers it.
 - socket.dev is not wired in: it needs an account and an API token; `npm audit` plus `npm audit signatures` cover known advisories and registry signatures.
 
+## Contributing
+
+Contributions are welcome. Read [CONTRIBUTING.md](./CONTRIBUTING.md) before you start. In short:
+
+- Open an issue first for any change in behaviour. Then fork, branch from `develop` and open the pull request against `develop`. `main` and `develop` are protected: a merge needs a pull request, a review by the maintainer and a green CI `check`.
+- Conventional Commits with a DCO sign-off (`git commit -s`). Tests first (RED, then GREEN), one test per rule. Tests, docs and code of one behaviour go in the same commit. Keep a pull request to about 400 changed lines.
+- Never let a secret value reach argv, the environment, stdout, stderr, temp files or the audit log, and never write to a new destination without the approval dialog. A change to `src/sinks`, `src/gate`, `src/capture`, `src/platform` or `install.sh` explains its impact on the [threat model](./docs/architecture.md).
+- Follow the [Code of Conduct](./CODE_OF_CONDUCT.md). Report vulnerabilities privately as [SECURITY.md](./SECURITY.md) describes, never in a public issue.
+
+Changes are listed in [CHANGELOG.md](./CHANGELOG.md).
+
 ## Docs
 
 - [Architecture, trust boundaries and threat model](./docs/architecture.md)
 - [Agent flow and source decision table](./docs/agent-flow.md)
 - [Google Sheets audit mirror](./docs/apps-script/README.md)
 - [Agent skill](./skill/SKILL.md)
+
+## License
+
+Licensed under the [Apache License, Version 2.0](./LICENSE). See [NOTICE](./NOTICE).
+
+Copyright 2026 Mauro Ciappina
