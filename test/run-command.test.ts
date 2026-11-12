@@ -29,7 +29,8 @@ const policy = {
 };
 
 /** Names a shell may add to its own environment; they are not injected by zks. */
-const SHELL_NAMES = new Set(["PWD", "OLDPWD", "SHLVL", "_"]);
+// Added by the shell itself, or by GNU awk (AWKPATH, AWKLIBPATH on Linux CI), never by zks.
+const SHELL_NAMES = new Set(["PWD", "OLDPWD", "SHLVL", "_", "AWKPATH", "AWKLIBPATH"]);
 const BASE_NAMES = ["HOME", "LANG", "LOGNAME", "PATH", "USER"];
 
 /**
