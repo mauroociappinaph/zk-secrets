@@ -6,7 +6,7 @@ import sodium from "libsodium-wrappers";
 import { openAuditStore } from "../src/audit/store.ts";
 import type { Mirror } from "../src/audit/types.ts";
 import type { HumanChannel, TrustDecision } from "../src/gate/dialog.ts";
-import type { Exec, ExecOptions, ExecResult } from "../src/platform/exec.ts";
+import { createSpawnInherited, type Exec, type ExecOptions, type ExecResult } from "../src/platform/exec.ts";
 import type { Keychain } from "../src/platform/keychain.ts";
 import type { ToolPaths } from "../src/platform/tools.ts";
 import type { TrustFile } from "../src/policy/trust.ts";
@@ -260,6 +260,8 @@ export function harness(
     doctor: async () => ({ doctor: "fake" }),
     // Never the real fixer: it would chmod the user's ~/.config/zks.
     fixPermissions: async () => ({ fixed: [], failed: [] }),
+    // Real spawn, used only by `zks run` tests with a fake child script in the temp dir.
+    spawnInherited: createSpawnInherited({ home: dir, user: "tester" }),
     randomBytes: (n) => Buffer.alloc(n, 7),
   };
   return h;

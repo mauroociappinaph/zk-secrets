@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { accessSync, constants, readFileSync, statSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,7 +7,7 @@ import { readAuditAnchor } from "./audit/anchor.ts";
 import { createSheetsMirror } from "./audit/mirror.ts";
 import { openAuditStore } from "./audit/store.ts";
 import { createMacDialogs } from "./gate/dialog.ts";
-import { createExec } from "./platform/exec.ts";
+import { createExec, createSpawnInherited, isExecutableFile } from "./platform/exec.ts";
 import { checkIntegrity, checkOwnership } from "./platform/integrity.ts";
 import { ZKS_KEYCHAIN_SERVICE, createKeychain } from "./platform/keychain.ts";
 import { SYSTEM_LIBEXEC, installLayout, zksPaths } from "./platform/paths.ts";
@@ -19,15 +19,6 @@ import { createAwsClientFactory } from "./sinks/aws-clients.ts";
 import { createSinks } from "./sinks/index.ts";
 
 const appRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-
-function isExecutableFile(path: string): boolean {
-  try {
-    accessSync(path, constants.X_OK);
-    return statSync(path).isFile();
-  } catch {
-    return false;
-  }
-}
 
 /** <install>/tools.json from install.sh; a development checkout has none and looks on SAFE_PATH. */
 function loadTools(): { tools: ToolPaths; pins: ToolPins; source: "tools.json" | "safe-path" } {
@@ -177,6 +168,7 @@ export async function main(identity: Identity): Promise<number> {
       };
     },
     fixPermissions: () => fixPermissions(paths),
+    spawnInherited: createSpawnInherited({ home: identity.home, user: identity.user }),
     randomBytes,
   };
 

@@ -31,6 +31,7 @@
 - File destinations (`compose`, `dotenv`) are plaintext files the same-user agent can read once written. Prefer **Approve once** over **Always allow** for them: a standing trust on a local `.env` would let a prompt-injected agent route any secret it can name into that file without a dialog and read it back.
 - `fill --from` decides "same origin, no dialog" from the local audit log, which a same-user process can rewrite (tamper-evident through `zks audit verify`, not tamper-proof).
 - `tools.json` pins each tool by path and sha256: after upgrading `gh`, `op`, `docker` or ego-browser, rerun `./install.sh`, or zks refuses the changed binary and reports the tool unavailable (`zks doctor`: `"changed"`). The hash is checked once per zks process before the first run of each tool; a binary swapped between that check and the run is not caught (same-user limit).
+- `zks run` hands the values to the command it starts: that process and everything it spawns can read, print or send them. See [Run](#run).
 - The Google Sheets audit is a **mirror**. The source of truth is the local log (`zks audit verify`) and the providers' own audit logs.
 
 ## Quick start
@@ -73,6 +74,10 @@ zks apply [--policy FILE] [--only A,B] [--target t1,t2] [--agent LABEL]
 zks rotate NAME [--target t1,t2] [--policy FILE]
                                             Write a NEW value of a generated variable to its targets
                                             and its derived variables; always asks (no revocation)
+zks run [--policy FILE] [--only A,B] [--agent LABEL] -- <command> [args...]
+                                            Run one command with the variables as its env vars only;
+                                            always asks (shows command, args, dir, names); exits
+                                            with the command's code and prints nothing of its own
 zks inventory [--project P] [--policy FILE] Which variable is in which destination and how old
                                             (audit log metadata, no network)
 zks auth status                             Show which provider tokens are in the Keychain
@@ -204,9 +209,26 @@ Keys trusted before this format (`vercel:<teamId>`) no longer match any write; `
 - With `--target`, every derived variable must have all its targets inside the selection; otherwise the rotation is refused with `dependents_outside_selection` (exit 2): nothing is resolved or written, every write it would have made is audited `failed` with that code, and `error.dependents` lists `{dependent, targets}` for the targets outside the selection. Rerun without `--target`, or include those targets (they must be targets of NAME too).
 - The output is the `apply` output plus `rotated` (NAME) and `dependents` (the derived variables written).
 
+## Run
+
+`zks run [--policy FILE] [--only A,B] [--agent LABEL] -- <command> [args...]` runs one command that needs secrets without the agent reading `.env` files or pulling values:
+
+```sh
+zks run --only DATABASE_URL,STRIPE_SECRET_KEY -- pnpm test
+```
+
+- zks resolves the selected variables (every variable of the policy, or the `--only` names) with the same sources as `apply`, in memory, and starts the command with them as environment variables of that child process only. No value is written to disk, printed, passed as an argument or put in zks's own environment; zks zeroes its buffers once the child has started (the child's environment copy is the child's).
+- The approval dialog opens on **every** run, with **Deny** and **Approve** only: the command is chosen by the agent, so there is no trusted destination and no **Always allow** (same rule as `zks rotate`). It shows the absolute path of the executable, its arguments (at most 300 characters, cut with `…`), the working directory and each variable name with its source. Values are resolved only after approval: a denial, a timeout or no GUI reads no secret, runs nothing, exits 3 and is audited `denied`.
+- The child gets `HOME`, `USER`, `LOGNAME`, `LANG`, `PATH=<cwd>/node_modules/.bin:<the fixed system PATH>` and the injected variables, nothing else from your shell. A bare command name is looked up on that `PATH`, a relative path against the current directory; anything that is not an executable file is `command_not_found` (exit 1) before any dialog. stdin, stdout and stderr are the command's own.
+- On success zks prints nothing of its own and exits with the command's exit code (`128 + N` when signal N killed it). A denial or an error prints the usual JSON error: `not_approved` (exit 3); `command_not_found`, a source error such as `source_missing`, or `run_failed` when the command cannot be started (exit 1); usage errors such as a missing `--`, `--target` or an unknown `--only` name (exit 2).
+- Every run appends one record per injected variable: `action: "run"`, `provider: "run"`, `target` the executable's absolute path, result `applied`, `denied` or `failed`. Never a value and never the arguments. `zks inventory` skips these records: it is about stored destinations.
+- Ctrl-C reaches the command through the terminal; a `SIGTERM` or `SIGHUP` sent to zks is forwarded to it.
+
+**Honest limit:** the child process holds the values. An agent that runs `zks run -- printenv` (or a script that prints or uploads its environment) sees them; that is why the dialog shows the full command every time and never offers to trust it. Read the command before approving, prefer wrapping single commands (`pnpm test`, `pnpm prisma migrate deploy`), and never wrap a whole agent session or an interactive shell.
+
 ## Inventory
 
-`zks inventory [--project P] [--policy FILE]` reads only the local audit log (no network, no values) and the policy. For each variable × destination it prints `{variable, provider, target, environment, lastWrittenAt, ageDays, writes, status}`: the latest applied `set` or `rotate` record, its age in whole days and how many applied writes there were. `status` is `written`, `never_written` (in the policy, never written: `lastWrittenAt` and `ageDays` are `null`, `writes` 0) or `not_in_policy` (written before, no longer in the policy). Denied and failed writes and captures do not count.
+`zks inventory [--project P] [--policy FILE]` reads only the local audit log (no network, no values) and the policy. For each variable × destination it prints `{variable, provider, target, environment, lastWrittenAt, ageDays, writes, status}`: the latest applied `set` or `rotate` record, its age in whole days and how many applied writes there were. `status` is `written`, `never_written` (in the policy, never written: `lastWrittenAt` and `ageDays` are `null`, `writes` 0) or `not_in_policy` (written before, no longer in the policy). Denied and failed writes, captures and `zks run` records do not count.
 
 The project is `--project` or the policy's `project`. With `--project` and no policy file in the directory, or a policy of another project, the audit entries are listed without a comparison (`policy: null`, every entry `written`).
 
@@ -287,9 +309,11 @@ zks capture read --isolated --url https://vercel.com/account/settings/tokens --c
 | 2 | usage or policy error |
 | 3 | not approved (denied, timed out or no GUI) |
 
+`zks run` exits with the command's own exit code (`128 + N` when signal N killed it) once the command started; the codes above apply before that.
+
 ## Audit
 
-Every apply and rotate appends one record per variable × target (`action: "set"` or `"rotate"`) to `~/.local/state/zks/audit.db` (SQLite, append-only triggers, SHA-256 hash chain): time, human, agent, project, provider, target, environment, variable name, sensitive flag, source kind, result, provider version, error code, approval mode (`dialog` or `trusted`). There is no field for a value or a hash of a value.
+Every apply and rotate appends one record per variable × target (`action: "set"` or `"rotate"`), and every `zks run` one per injected variable (`action: "run"`, see [Run](#run)), to `~/.local/state/zks/audit.db` (SQLite, append-only triggers, SHA-256 hash chain): time, human, agent, project, provider, target, environment, variable name, sensitive flag, source kind, result, provider version, error code, approval mode (`dialog` or `trusted`). There is no field for a value or a hash of a value.
 
 - `zks audit list` — read records.
 - `zks audit verify` — check the chain, and check it against the anchor (record count and last hash) that every apply stores in the Keychain item `zks`/`audit-head`; a deleted tail fails with `brokenAt: "truncated"`.
