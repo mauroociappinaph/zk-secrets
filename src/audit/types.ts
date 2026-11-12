@@ -14,13 +14,16 @@ export interface AuditEntryInput {
   actorHuman: string;
   actorAgent: string;
   project: string;
-  /** "keychain" for captures, whose target is "<service>/<account>" and environment the page origin. */
-  provider: Provider | "keychain";
+  /**
+   * "keychain" for captures, whose target is "<service>/<account>" and environment the page origin.
+   * "run" for `zks run`, whose target is the absolute path of the executable (never its arguments).
+   */
+  provider: Provider | "keychain" | "run";
   target: string;
   environment: string;
   variableName: string;
-  /** "rotate": a write made by `zks rotate`. */
-  action: "set" | "rotate" | "capture";
+  /** "rotate": a write made by `zks rotate`; "run": a value injected into a `zks run` command. */
+  action: "set" | "rotate" | "capture" | "run";
   sensitive: boolean;
   sourceKind: SourceKind | CaptureSourceKind;
   result: AuditResult;
@@ -74,7 +77,7 @@ export interface AuditStore {
   /** Origin and time of the last applied capture-read/capture-generate of target. */
   /** itemModified: the Keychain item's modification time recorded at capture (ISO), or "". */
   lastCapture(target: string): { origin: string; ts: string; itemModified: string } | null;
-  /** Per (provider, target, variable) of project: its latest applied set/rotate record. */
+  /** Per (provider, target, variable) of project: its latest applied set/rotate record (never run or capture). */
   writtenDestinations(project: string): WrittenDestination[];
   pendingMirror(limit: number): AuditRecord[];
   markMirrored(auditIds: string[], ts: string): void;

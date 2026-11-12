@@ -16,6 +16,10 @@ Usage:
                                               Write a NEW value of a generated variable to its targets
                                               and its derived variables; always asks (no revocation)
                                               --target must cover every derived variable's targets
+  zks run [--policy FILE] [--only A,B] [--agent LABEL] -- <command> [args...]
+                                              Run one command with the variables as its env vars only;
+                                              always asks (shows command, args, dir, names); exits
+                                              with the command's code and prints nothing of its own
   zks inventory [--project P] [--policy FILE] Which variable is in which destination and how old
                                               (audit log metadata, no network)
   zks auth status                             Show which provider tokens are in the Keychain
@@ -64,6 +68,12 @@ Targets (targets.<key>.provider): vercel, aws-ssm, aws-sm, github, railway, supa
   secret_exists unless replace: true (rm, then create)
   compose {dir}: writes <dir>/<NAME> (mode 600, dir 700, no symlinks) for Compose secrets: file:
   dotenv {path}: upserts NAME="value" (escaped) in a .env* file, other lines kept, mode 600, atomic, no symlinks
+Run: the child gets HOME, USER, LOGNAME, LANG, PATH=<cwd>/node_modules/.bin:<fixed system PATH> and the
+  selected variables (every policy variable without --only); a bare command name is looked up on that PATH.
+  generated variables are skipped unless named: a generated variable, or one derived from it, in --only is a
+  usage error (its value exists only at its destinations). Arguments over 300 characters: arguments_too_long.
+  On success zks exits with the command's own code: a denial is the not_approved JSON on stdout (exit 3).
+  The command holds the values: \`zks run -- printenv\` shows them, so wrap single commands, never an agent session.
 Capture: zks/<vercel|railway|supabase|netlify|sheets-hmac> only from their own site (--origin https://vercel.com,
 https://railway.com, https://supabase.com, https://app.netlify.com, https://script.google.com); replacing an item asks first,
 and a replaced item gets its old value back when the capture fails.

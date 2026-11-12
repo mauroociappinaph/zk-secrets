@@ -13,8 +13,8 @@ import type {
 } from "./audit/types.ts";
 import { runCapture } from "./capture/run.ts";
 import { CAPTURE_WAIT_MS, type CaptureErrorCode, type CaptureOutcome } from "./capture/script.ts";
-import type { HumanChannel } from "./gate/dialog.ts";
-import type { Exec } from "./platform/exec.ts";
+import { MAX_LINES, type HumanChannel } from "./gate/dialog.ts";
+import { SAFE_PATH, resolveExecutable, type Exec, type SpawnInherited, type SpawnedChild } from "./platform/exec.ts";
 import { ZKS_KEYCHAIN_SERVICE, type Keychain } from "./platform/keychain.ts";
 import type { PermissionFix } from "./platform/permissions.ts";
 import type { ToolPaths } from "./platform/tools.ts";
@@ -36,7 +36,8 @@ import { SecretBuffer } from "./secret/secret-buffer.ts";
 import { SinkError, type AwsClientFactory, type Sink } from "./sinks/types.ts";
 import { SourceError, createResolver } from "./sources/resolve.ts";
 import { HELP_TEXT } from "./help.ts";
-import { resolve as resolvePath } from "node:path";
+import { constants as osConstants } from "node:os";
+import { join, resolve as resolvePath } from "node:path";
 
 export const EXIT_OK = 0;
 export const EXIT_FAILED = 1;
@@ -88,6 +89,8 @@ export interface Deps {
   doctor(): Promise<Record<string, unknown>>;
   /** `zks doctor --fix`: directory and file modes of ~/.config/zks and ~/.local/state/zks only. */
   fixPermissions(): Promise<PermissionFix>;
+  /** `zks run`: starts the approved command with inherited stdio and childEnv plus the injected values. */
+  spawnInherited: SpawnInherited;
   randomBytes?: (size: number) => Buffer;
 }
 
@@ -146,6 +149,7 @@ const COMMAND_FLAGS: Record<string, string[]> = {
   plan: ["--policy", "--only", "--target"],
   apply: ["--policy", "--only", "--target", "--agent"],
   rotate: ["--policy", "--target"],
+  run: ["--policy", "--only", "--agent"],
   inventory: ["--policy", "--project"],
   doctor: ["--fix"],
   "audit list": ["--limit", "--project"],
@@ -159,7 +163,7 @@ const SUBCOMMANDS: Record<string, string[]> = {
   trust: ["list", "remove"],
   capture: ["read", "fill"],
 };
-const COMMANDS = ["init", "validate", "plan", "apply", "rotate", "inventory", "doctor", ...Object.keys(SUBCOMMANDS)];
+const COMMANDS = ["init", "validate", "plan", "apply", "rotate", "run", "inventory", "doctor", ...Object.keys(SUBCOMMANDS)];
 
 interface ParsedArgs {
   positionals: string[];
@@ -208,6 +212,7 @@ function positionalLimit(command: string, sub: string | undefined): number | und
     case "apply":
     case "inventory":
     case "doctor":
+    case "run":
       return 1;
     case "rotate":
       return 2;
@@ -330,11 +335,17 @@ export async function run(argv: string[], deps: Deps): Promise<RunOutput> {
 }
 
 async function dispatch(argv: string[], deps: Deps, redactor: Redactor): Promise<RunOutput> {
-  const { positionals, flags } = parseArgs(argv);
+  // `zks run [options] -- <command> [args...]`: nothing after the first -- is a zks option.
+  // Every other command still parses the whole argv, where -- is an unknown option.
+  const separator = argv.indexOf("--");
+  let { positionals, flags } = parseArgs(separator < 0 ? argv : argv.slice(0, separator));
+  const runArgv = positionals[0] === "run" && separator >= 0 ? argv.slice(separator + 1) : null;
+  if (positionals[0] !== "run") ({ positionals, flags } = parseArgs(argv));
   const [command, sub, arg] = positionals;
   if (flags.has("--version")) return { exitCode: EXIT_OK, stdout: `${deps.version}\n` };
   if (flags.has("--help") || command === undefined || command === "help") return { exitCode: EXIT_OK, stdout: HELP_TEXT };
-  const limit = positionalLimit(command, sub);
+  // `zks run` without -- reports its usage, not the command it was given.
+  const limit = command === "run" && runArgv === null ? undefined : positionalLimit(command, sub);
   // The extra argument is never echoed: it might be a pasted secret.
   if (limit !== undefined && positionals.length > limit) throw new UsageError("unexpected argument");
   checkFlags(command, sub, flags);
@@ -365,6 +376,8 @@ async function dispatch(argv: string[], deps: Deps, redactor: Redactor): Promise
       return apply(deps, flags, redactor);
     case "rotate":
       return rotate(deps, sub, flags, redactor);
+    case "run":
+      return runCommand(deps, runArgv, flags, redactor);
     case "inventory":
       return inventory(deps, flags);
     case "auth":
@@ -530,6 +543,223 @@ async function rotate(deps: Deps, name: string | undefined, flags: Map<string, s
     ],
     extra: { rotated: name, dependents: written },
   });
+}
+
+const RUN_USAGE = "usage: zks run [--policy FILE] [--only A,B] [--agent LABEL] -- <command> [args...]";
+const MAX_RUN_ARGUMENTS = 300;
+
+/** Arguments as the dialog shows them, in full: shell-like quoting. runCommand refuses more than 300 characters. */
+function describeArguments(args: string[]): string {
+  if (args.length === 0) return "(none)";
+  return args.map((a) => (/^[A-Za-z0-9_@%+=:,.\/-]+$/.test(a) ? a : JSON.stringify(a))).join(" ");
+}
+
+/**
+ * `zks run -- <command>`: after the human approves the command in a dialog (every time, no trust),
+ * resolves the selected variables in memory and starts the command with them as environment
+ * variables of that child only. zks prints nothing on success and exits with the child's code.
+ * Generated variables (and those derived from them) are skipped unless named, then refused: their
+ * value exists only at its destinations, and run would create a new one.
+ */
+async function runCommand(
+  deps: Deps,
+  commandArgv: string[] | null,
+  flags: Map<string, string>,
+  redactor: Redactor,
+): Promise<RunOutput> {
+  if (commandArgv === null || commandArgv.length === 0) throw new UsageError(RUN_USAGE);
+  const policy = await loadPolicy(deps, flags.get("--policy"));
+  const only = list(flags.get("--only"));
+  const unknown = (only ?? []).find((n) => !Object.hasOwn(policy.variables, n));
+  // The name is not echoed: it might be a pasted secret (same rule as rotate).
+  if (unknown !== undefined) throw new UsageError("--only: a name is not a variable of the policy; see `zks plan`");
+  const generated = (n: string) => policy.variables[n]?.source?.kind === "generate" || generatedDependencies(policy, n).length > 0;
+  const named = Object.keys(policy.variables).filter((n) => only?.includes(n) && generated(n));
+  if (named.length > 0) {
+    throw new UsageError(`run cannot inject generated values; they exist only at their destinations (${named.join(", ")})`);
+  }
+  const names = Object.keys(policy.variables).filter((n) => (only ? only.includes(n) : !generated(n)));
+  if (names.length === 0) throw new UsageError("--only: select at least one variable");
+  const spec = (name: string) => policy.variables[name] as Policy["variables"][string];
+
+  const [command, ...args] = commandArgv as [string, ...string[]];
+  const shownArguments = describeArguments(args);
+  // The dialog shows the arguments whole: a cut line could hide the part that matters.
+  if (shownArguments.length > MAX_RUN_ARGUMENTS) {
+    return json(EXIT_USAGE, {
+      ok: false,
+      error: {
+        code: "arguments_too_long",
+        message: `the arguments are longer than ${MAX_RUN_ARGUMENTS} characters; the dialog shows them in full, so shorten them`,
+      },
+    });
+  }
+  // A cwd with ":" cannot be a PATH entry; the command then only searches the fixed system PATH.
+  const searchPath = deps.cwd.includes(":") ? SAFE_PATH : `${join(deps.cwd, "node_modules", ".bin")}:${SAFE_PATH}`;
+  const executable = resolveExecutable(command, deps.cwd, searchPath);
+  if (executable === null) {
+    return json(EXIT_FAILED, {
+      ok: false,
+      error: {
+        code: "command_not_found",
+        message: "the command is not an executable file (a bare name is looked up in ./node_modules/.bin and the fixed system PATH)",
+      },
+    });
+  }
+
+  const lines = [
+    `Project: ${policy.project}`,
+    `Run a command with ${names.length} value(s) in its environment:`,
+    `Command: ${executable}`,
+    "Arguments:",
+    shownArguments,
+    `Directory: ${deps.cwd}`,
+    "Variables:",
+    ...names.map((n) => `- ${n} [${spec(n).sensitive ? "secret" : "plain"}; ${describeSource(spec(n).source, deps.cwd)}]`),
+    "",
+    "The command and every process it starts can read these values. zks asks on every run.",
+  ];
+  if (lines.length > MAX_LINES) {
+    return json(EXIT_USAGE, {
+      ok: false,
+      error: { code: "too_many_operations", message: `${names.length} variables do not fit in one approval dialog; narrow with --only` },
+    });
+  }
+  if (lines.some((line) => line.length > MAX_DIALOG_LINE) || lines.join("\n").length > MAX_DIALOG_TEXT) {
+    return json(EXIT_USAGE, {
+      ok: false,
+      error: { code: "dialog_too_long", message: "the approval text is too long for one dialog (command path, directory or a source)" },
+    });
+  }
+
+  const agent = flags.get("--agent") ?? deps.agentId;
+  const head = { ok: false, project: policy.project, command: executable, variables: names, approval: "dialog" };
+  let child: SpawnedChild | null = null;
+  const store = deps.openAudit();
+  try {
+    const record = (name: string, result: AuditResult, errorCode = "") =>
+      store.append({
+        ts: deps.now().toISOString(),
+        actorHuman: deps.user,
+        actorAgent: agent,
+        project: policy.project,
+        provider: "run",
+        target: executable,
+        environment: "",
+        variableName: name,
+        action: "run",
+        sensitive: spec(name).sensitive,
+        sourceKind: sourceKindOf(spec(name)),
+        result,
+        providerVersion: "",
+        errorCode,
+        approval: "dialog",
+      });
+    const finish = async (exitCode: number, error: Record<string, unknown>): Promise<RunOutput> => {
+      const anchorError = await saveAnchor(deps, store);
+      const mirror = await deps.mirror.sync(store);
+      return json(exitCode, { ...head, error, mirror, ...anchorError });
+    };
+
+    // Approve before resolving: a denied run never reads a secret.
+    if (!(await deps.human.approve("zks: approve a command with secrets", lines))) {
+      for (const name of names) record(name, "denied", "not_approved");
+      return await finish(EXIT_DENIED, { code: "not_approved", message: "denied or no answer in the approval dialog" });
+    }
+
+    const resolver = createResolver(
+      policy.variables,
+      {
+        exec: deps.exec,
+        tools: deps.tools,
+        keychain: deps.keychain,
+        human: deps.human,
+        cwd: deps.cwd,
+        readFile: deps.readFile,
+        randomBytes: deps.randomBytes,
+      },
+      (_name, variable, value) => {
+        if (variable.sensitive) redactor.register(value);
+      },
+    );
+    const env: Record<string, string> = {};
+    try {
+      for (const name of names) {
+        try {
+          env[name] = (await resolver.resolve(name)).reveal();
+        } catch (error) {
+          const code = error instanceof SourceError ? error.code : "source_failed";
+          const message = redactor.scrub(error instanceof Error ? error.message : String(error)).slice(0, 300);
+          for (const n of names) record(n, "failed", n === name ? code : "not_run");
+          return await finish(EXIT_FAILED, { code, message, variable: name });
+        }
+      }
+      // spawn() copies the environment before it returns; the copy belongs to the child.
+      try {
+        child = deps.spawnInherited(executable, args, { cwd: deps.cwd, env: { PATH: searchPath, ...env } });
+      } catch (error) {
+        // A synchronous spawn failure takes the same audited run_failed path as an asynchronous one.
+        const spawned = Promise.resolve(error instanceof Error ? error : new Error(String(error)));
+        child = { spawned, exited: new Promise<never>(() => undefined), kill: () => undefined };
+      }
+    } finally {
+      resolver.dispose();
+      for (const name of Object.keys(env)) delete env[name];
+    }
+
+    const spawnError = await child.spawned;
+    if (spawnError !== null) {
+      for (const name of names) record(name, "failed", "run_failed");
+      child = null;
+      return await finish(EXIT_FAILED, { code: "run_failed", message: redactor.scrub(spawnError.message).slice(0, 300) });
+    }
+    try {
+      for (const name of names) record(name, "applied");
+    } catch {
+      // The values must not stay with a command whose run is not audited.
+      child.kill("SIGTERM");
+      await child.exited;
+      child = null;
+      await saveAnchor(deps, store);
+      return json(EXIT_FAILED, { ...head, error: { code: "audit_failed", message: "the command was stopped: its audit record could not be written" } });
+    }
+  } finally {
+    store.close();
+  }
+
+  // The child owns stdout from here on: zks prints nothing there and keeps the child's exit code.
+  const exit = await (child as SpawnedChild).exited;
+  await syncAfterRun(deps, redactor);
+  if (exit.code !== null) return { exitCode: exit.code, stdout: "" };
+  const number = exit.signal === null ? undefined : osConstants.signals[exit.signal];
+  return { exitCode: number === undefined ? EXIT_FAILED : 128 + number, stdout: "" };
+}
+
+/** Audit anchor and mirror after a run: a failure is one redacted stderr line, never the exit code or stdout. */
+async function syncAfterRun(deps: Deps, redactor: Redactor): Promise<void> {
+  const problems: string[] = [];
+  const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
+  try {
+    const store = deps.openAudit();
+    try {
+      const { anchorError } = await saveAnchor(deps, store);
+      if (anchorError !== undefined) problems.push(anchorError);
+      try {
+        const mirror = await deps.mirror.sync(store);
+        if (mirror.error !== undefined) problems.push(mirror.error);
+      } catch (error) {
+        problems.push(message(error));
+      }
+    } finally {
+      store.close();
+    }
+  } catch (error) {
+    problems.push(message(error));
+  }
+  if (problems.length > 0) {
+    const line = redactor.scrub(problems.join("; ")).replace(/[\r\n]+/g, " ").slice(0, 300);
+    process.stderr.write(`zks: audit anchor/mirror: ${line}\n`);
+  }
 }
 
 const DAY_MS = 86_400_000;
