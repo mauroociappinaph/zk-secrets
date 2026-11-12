@@ -181,9 +181,17 @@ Removes the launcher, `~/.local/libexec/zks` (with `tools.json`), the skill and 
 npm ci
 npm run check    # typecheck + tests
 npm run build    # dist/
+npm run deps:check   # exact versions, v3 lockfile in sync, no high/critical npm audit finding
+npm run sbom         # CycloneDX SBOM of the production dependencies on stdout
 ```
 
-CI runs the same steps on every push and pull request to `main` and `develop`.
+CI runs the same steps on every push and pull request to `main` and `develop`, plus `deps:check --strict` (an unreachable registry fails), `npm audit signatures` and an `sbom` artifact.
+
+### Supply chain
+
+- Every dependency in `package.json` is an exact version and `.npmrc` sets `save-exact=true`; `deps:check` fails on a range, a tag, a URL or a lockfile that disagrees with `package.json`.
+- `install.sh` runs `deps:check` before building (an offline registry only warns) and writes `sbom.cdx.json` into the read-only install, so the integrity digest covers it.
+- socket.dev is not wired in: it needs an account and an API token; `npm audit` plus `npm audit signatures` cover known advisories and registry signatures.
 
 ## Docs
 

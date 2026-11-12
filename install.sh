@@ -1,6 +1,6 @@
 #!/bin/sh
 # Installs zks for the current macOS user:
-#   ~/.local/libexec/zks/<version>/   read-only app (dist, bin, production node_modules) and
+#   ~/.local/libexec/zks/<version>/   read-only app (dist, bin, production node_modules, sbom.cdx.json) and
 #                                     tools.json: absolute paths of ego-browser, gh and op
 #   ~/.local/bin/zks                  launcher with node, home and install path baked in; runs
 #                                     node through `env -i` with a fixed PATH
@@ -53,6 +53,8 @@ trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
 printf '==> Checking and building zks %s\n' "$VERSION"
 npm ci
 npm run check
+printf '==> Checking dependencies (pinned versions, lockfile, npm audit)\n'
+npm run --silent deps:check || die "dependency check failed (see the JSON above)"
 npm run build
 [ -f dist/cli.js ] || die "build did not produce dist/cli.js"
 
@@ -64,6 +66,8 @@ fi
 mkdir -p "$DEST"
 cp -R dist bin package.json package-lock.json "$DEST/"
 (cd "$DEST" && npm ci --omit=dev --ignore-scripts)
+# CycloneDX SBOM of the production dependencies, inside the install so the digest covers it.
+npm run --silent sbom >"$DEST/sbom.cdx.json" || die "could not write the SBOM"
 chmod 755 "$DEST/bin/zks"
 DEST="$(cd "$DEST" && pwd -P)"
 case "$DEST" in *[!A-Za-z0-9/._@+-]*) die "unsupported character in install path $DEST" ;; esac
