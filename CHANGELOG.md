@@ -7,11 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-13
+
 ### Added
 
 - `zks run [--policy FILE] [--only A,B] [--agent LABEL] -- <command> [args...]`: runs one command with the selected variables as environment variables of that child process only. The dialog opens on every run (Deny / Approve, never Always allow) and shows the executable, its full arguments, the working directory and each variable name with its source. Generated variables are skipped unless named, and naming one is a usage error. zks exits with the command's own exit code and forwards `SIGINT`, `SIGTERM` and `SIGHUP`. Each run is audited per variable (`action: "run"`), never with values or arguments.
 - `zks capture login`: logs an ego-browser session into a website with a Keychain password the agent never sees (username as a plain `--user` flag; the password is read and typed inside the ego script like `fill --from`). The dialog opens on every login. Reports `loggedIn`, or `pending: 2fa|captcha|unknown` (exit 0) for the human to finish; leaving the origin is `login_redirected` with the final origin only. Audited as `provider: "capture"`, `sourceKind: "capture-login"`, target the origin, without the username.
 - `zks capture recipes` and `--recipe NAME`: login recipes for `hostgator` and `cpanel` (`verified: false`: selectors from public documentation, confirmed on the first real run).
+- Repository: Apache-2.0 license, `SECURITY.md`, `CONTRIBUTING.md`, Code of Conduct, CODEOWNERS and issue/PR templates; `main` and `develop` are protected (pull request, review and CI required).
 
 ## [0.2.0] - 2026-11-12
 
@@ -50,6 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hardening: zks ignores the caller's environment (`env -i`), ignores AWS `endpoint_url` and `gh` host config, rejects prototype keys and bounds the dialog size.
 - `install.sh` and `uninstall.sh`, a global agent skill (`skill/SKILL.md`), a `~/AGENTS.md` rule, architecture and agent-flow docs, and CI.
 
-[Unreleased]: https://github.com/mauroociappinaph/zk-secrets/compare/main...develop
-[0.2.0]: https://github.com/mauroociappinaph/zk-secrets/compare/79a2cf4...3dc166c
-[0.1.0]: https://github.com/mauroociappinaph/zk-secrets/commits/79a2cf4
+[Unreleased]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/mauroociappinaph/zk-secrets/releases/tag/v0.1.0

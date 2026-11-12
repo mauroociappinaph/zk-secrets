@@ -4,10 +4,11 @@
 
 | Version | Supported |
 | --- | --- |
-| 0.2.x | yes |
+| 0.3.x | yes |
+| 0.2.x | security fixes only |
 | < 0.2 | no |
 
-Fixes land on `develop` and ship in the next 0.2.x release.
+Fixes land on `develop` and ship in the next 0.3.x release.
 
 ## Reporting a vulnerability
 
