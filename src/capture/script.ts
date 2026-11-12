@@ -218,7 +218,7 @@ async function fill(page) {
   const bytes = found.stderr;
   const line = /^password: (.*)$/m.exec(bytes.toString("latin1"));
   const rest = line ? line[1] : null;
-  const hex = rest === null ? null : /^0x([0-9A-Fa-f]*)(?:\s|$)/.exec(rest);
+  const hex = rest === null ? null : /^0x([0-9A-Fa-f]*)(?:\\s|$)/.exec(rest);
   let value = null;
   if (rest === "") value = "";
   else if (hex && hex[1].length % 2 === 0) value = Buffer.from(hex[1], "hex").toString("utf8");

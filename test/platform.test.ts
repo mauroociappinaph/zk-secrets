@@ -29,7 +29,8 @@ test("Redactor removes raw, JSON-escaped, URL, base64 and hex forms", () => {
 
 /** What `security find-generic-password -g` prints on stderr: quoted when printable, else 0x-hex. */
 function securityG(value: string): Buffer {
-  const printable = /^[\x20-\x7e]*$/.test(value) && !/["\\]/.test(value);
+  // Real security -g: only a backslash or a non-printable byte forces hex; quotes stay raw.
+  const printable = /^[\x20-\x7e]*$/.test(value) && !/\\/.test(value);
   const line = printable ? `password: "${value}"` : `password: 0x${Buffer.from(value, "utf8").toString("hex").toUpperCase()}  "..."`;
   return Buffer.from(`${line}\n`);
 }
@@ -38,6 +39,21 @@ test("keychain get returns the exact bytes of non-ASCII, quote/backslash, hex-lo
   for (const value of ["contrase\u00f1a", 'abc"d\\e', "deadbeef", "a b", "", "line1\nline2"]) {
     const keychain = createKeychain(fakeExec(() => ({ stdout: Buffer.from("attributes:\n"), stderr: securityG(value) })).exec);
     assert.equal((await keychain.get("svc", "acct"))?.reveal(), value, JSON.stringify(value));
+  }
+});
+
+test("keychain get parses real -g shapes: raw quotes, empty, trailing-space hex, attribute lines ignored", async () => {
+  const cases: Array<[string, string]> = [
+    ['password: "password: "x""\n', 'password: "x"'],
+    ['password: """"\n', '""'],
+    ["password: \n", ""],
+    ["password: 0x7F \n", "\x7f"],
+    ['password: 0x610962  "a\\011b"\n', "a\tb"],
+  ];
+  for (const [stderr, want] of cases) {
+    const stdout = Buffer.from('    0x00000007 <blob>="password: \\"fake\\""\n');
+    const kc = createKeychain(fakeExec(() => ({ stdout, stderr: Buffer.from(stderr) })).exec);
+    assert.equal((await kc.get("svc", "acct"))?.reveal(), want, stderr);
   }
 });
 

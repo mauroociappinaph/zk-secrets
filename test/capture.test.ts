@@ -1013,3 +1013,26 @@ test("S1 (N4): a contenteditable that received the typed text is cleared too", a
   assert.deepEqual(printed, ['ZKS_RESULT {"ok":false,"code":"browser_failed"}']);
   assert.equal(editable.textContent, "");
 });
+
+/** Like the real security -g for a non-printable value: hex, two spaces, then the escaped form. */
+function fakeSecurityHex(value: string): string {
+  const path = join(tempDir(), "security");
+  const hex = Buffer.from(value, "utf8").toString("hex").toUpperCase();
+  writeFileSync(path, `#!/bin/sh\nprintf 'password: 0x%s  "x"\\n' '${hex}' >&2\nexit 0\n`);
+  chmodSync(path, 0o700);
+  return path;
+}
+
+test("v2 S3 (L14): fill types the exact value of a non-printable Keychain item (hex -g line)", async () => {
+  for (const value of ["contraseña", "a\tb", "x\ny"]) {
+    const input = Object.assign(new FakeInput(), { type: "password" });
+    const { page } = domPage({ nodes: [input] });
+    const { printed } = await runScript(buildCaptureScript(fillSpec(), fakeSecurityHex(value)), page);
+    assert.deepEqual(printed, [`ZKS_RESULT {"ok":true,"length":${value.length}}`], JSON.stringify(value));
+    assert.equal(input.value, value);
+  }
+});
+
+test("v2 S3 (L14): the generated script keeps the \\s of the hex regex", () => {
+  assert.ok(buildCaptureScript(fillSpec()).includes("(?:\\s|$)"));
+});
