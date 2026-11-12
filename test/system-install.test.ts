@@ -148,5 +148,6 @@ test("v2 S1 (review R1): install.sh writes ~/AGENTS.md only through the user-run
 
 test("v2 S1 (review R3): the production install creates no node_modules/.bin symlinks", () => {
   const source = readFileSync(join(REPO, "install.sh"), "utf8");
-  assert.match(source, /\(cd "\$DEST" && npm ci --omit=dev --ignore-scripts --no-bin-links\)/);
+  assert.match(source, /"\$NPM_BIN" ci --omit=dev --ignore-scripts --no-bin-links\)/);
+  assert.match(source, /env -i HOME="\$TMP_DIR" PATH="\$SAFE_PATH" npm_config_userconfig=\/dev\/null/);
 });
