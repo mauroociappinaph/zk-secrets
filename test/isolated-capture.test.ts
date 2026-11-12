@@ -308,7 +308,8 @@ test("S3: an isolated read creates its own space, goes to --url, stores the valu
   const script = call!.input;
   assert.ok(script.includes(`"isolated":{"profileId":"${PROFILE}","url":"${URL_}","name":"${SPACE_NAME}"}`), script.slice(0, 400));
   assert.ok(script.includes('"space":null,"page":null'));
-  assert.match(script, /finally \{\s*try \{\s*await task\.finish\(\{ keep: \[\] \}\);/);
+  // read and fill always close the space; only a pending login keeps its page (see capture-login tests).
+  assert.match(script, /finally \{[^]*?try \{\s*await task\.finish\(\{ keep: pending \? \[page\] : \[\] \}\);/);
 
   const security = fakeSecurity();
   const ran = await runEgo(script, { security: security.path });

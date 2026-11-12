@@ -45,7 +45,8 @@ Usage:
                                               Log the browser into a site: sets the user field, types the
                                               stored password (never shown), submits; always asks first.
                                               Exit 0 with loggedIn true, or false with pending 2fa|captcha|
-                                              unknown (the human finishes in the browser); login_redirected
+                                              unknown (the human finishes in the browser; --isolated keeps
+                                              that page open and adds space and page); login_redirected
                                               (exit 1) when the page leaves --origin
   zks capture recipes                         List login recipes (hostgator, cpanel); --recipe NAME fills
                                               the flags not given; verified:false = selectors not yet

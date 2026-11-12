@@ -61,7 +61,8 @@ export interface CaptureScriptSpec {
   waitMs: number;
   /**
    * Isolated capture: zks checks the profile with profiles(), creates its own space `name` with
-   * it, goes to `url` and always finishes the space with keep: []. Absent for --space/--page.
+   * it, goes to `url` and finishes the space with keep: [] (a pending login keeps its page open
+   * for the human). Absent for --space/--page.
    */
   isolated?: { profileId: string; url: string; name: string };
   /** Required for login; `waitMs` also bounds how long the script waits for the page to settle after submit. */
@@ -342,21 +343,37 @@ function inspectLogin({ expected, passwordSelector, successSelector }) {
 
 async function loginState(page) {
   const origin = await currentOrigin(page);
-  if (origin !== spec.origin) return { origin, away: true };
+  let url = "";
+  try {
+    url = await page.url();
+  } catch {}
+  if (origin !== spec.origin) return { origin, url, away: true };
   let seen = null;
   try {
     seen = await page.evaluate(inspectLogin, { expected: spec.origin, passwordSelector: spec.selector, successSelector: spec.login.successSelector });
   } catch {}
   const s = seen !== null && typeof seen === "object" ? seen : {};
-  if (s.away === true) return { origin, away: true };
+  if (s.away === true) return { origin, url, away: true };
   // An unreadable page counts as still showing the password field: fail towards loggedIn false.
-  const state = { origin, away: false, success: s.success === true, password: s.password !== false, otp: s.otp === true, captcha: s.captcha === true };
-  state.done = state.success || state.otp || state.captcha || (spec.login.successSelector === null && !state.password);
-  return state;
+  return { origin, url, away: false, success: s.success === true, password: s.password !== false, otp: s.otp === true, captcha: s.captcha === true };
+}
+
+/**
+ * A captcha frame or code input counts only when it is new since the submit, or once the page
+ * changed (another URL, or the password field is gone): one that was already on the login page
+ * (an invisible reCAPTCHA, a phone field) is not a challenge. A found success selector wins.
+ */
+function judge(before, state) {
+  const changed = state.url !== before.url || (before.password && !state.password);
+  const captcha = state.captcha && (changed || !before.captcha);
+  const otp = state.otp && (changed || !before.otp);
+  const success = spec.login.successSelector !== null && state.success;
+  const done = success || captcha || otp || (spec.login.successSelector === null && !state.password);
+  return { ...state, success, captcha: !success && captcha, otp: !success && otp, done };
 }
 
 /** Waits, bounded by waitMs, for the page to show a result; leaving the origin twice in a row ends it. */
-async function settle(page) {
+async function settle(page, before) {
   const deadline = Date.now() + spec.waitMs;
   let away = 0;
   for (;;) {
@@ -366,7 +383,8 @@ async function settle(page) {
       if (++away >= 2) return state;
     } else {
       away = 0;
-      if (state.done) return state;
+      const judged = judge(before, state);
+      if (judged.done || Date.now() >= deadline) return judged;
     }
     if (Date.now() >= deadline) return state;
   }
@@ -388,8 +406,11 @@ async function login(page, navigated) {
   if (!filled.ok) return filled.code === "origin_mismatch" ? await redirected(page) : filled;
   // The password is in the field now: any failure before the submit wipes it and leaves the page.
   let submitted = false;
+  let before = null;
   try {
     if (!(await originMatches(page))) return await redirected(page);
+    before = await loginState(page);
+    if (before.away) return await redirected(page);
     try {
       await page.click(L.submitSelector, { timeout: spec.waitMs });
     } catch {
@@ -402,10 +423,15 @@ async function login(page, navigated) {
       try { await page.goto("about:blank"); } catch {}
     }
   }
-  const state = await settle(page);
+  const state = await settle(page, before);
   if (state.away) return { ok: false, code: "login_redirected", finalOrigin: state.origin };
   const loggedIn = L.successSelector !== null ? state.success : !state.password && !state.otp && !state.captcha;
   if (loggedIn) return { ok: true, loggedIn: true, finalOrigin: state.origin };
+  // The click may not have submitted: never leave the typed password in a field the agent can read.
+  // The page itself stays, so the human can finish a captcha or 2FA step there.
+  if (state.password) {
+    try { await page.evaluate(clearAfterFailure, spec.selector); } catch {}
+  }
   return { ok: true, loggedIn: false, finalOrigin: state.origin, pending: state.captcha ? "captcha" : state.otp ? "2fa" : "unknown" };
 }
 
@@ -414,7 +440,8 @@ function step(page, navigated) {
 }
 
 // Isolated: the profile must exist and must not be the default one (the agent's own session).
-// zks creates the space itself, lands on --url and, whatever happens, finishes it keeping nothing.
+// zks creates the space itself, lands on --url and finishes it keeping nothing, except the page of
+// a pending login (2FA, captcha or unknown), which stays open for the human to finish there.
 async function isolated(iso) {
   const list = await profiles();
   const profile = Array.isArray(list)
@@ -423,14 +450,18 @@ async function isolated(iso) {
   if (profile === undefined) return { ok: false, code: "isolated_profile_missing" };
   if (profile.isDefault !== false) return { ok: false, code: "isolated_profile_not_isolated" };
   const task = await taskSpace(iso.name, { profileId: iso.profileId });
+  let page = null;
+  let result = null;
   try {
-    const page = task.page(ISOLATED_PAGE);
+    page = task.page(ISOLATED_PAGE);
     await page.goto(iso.url);
     if (!(await originMatches(page))) return spec.mode === "login" ? await redirected(page) : { ok: false, code: "login_required" };
-    return await step(page, true);
+    result = await step(page, true);
+    return result;
   } finally {
+    const pending = spec.mode === "login" && page !== null && result !== null && result.ok === true && result.loggedIn === false;
     try {
-      await task.finish({ keep: [] });
+      await task.finish({ keep: pending ? [page] : [] });
     } catch {}
   }
 }

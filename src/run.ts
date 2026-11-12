@@ -13,7 +13,7 @@ import type {
 } from "./audit/types.ts";
 import { LOGIN_RECIPES, loginRecipe } from "./capture/recipes.ts";
 import { runCapture, runLogin } from "./capture/run.ts";
-import { CAPTURE_WAIT_MS, type CaptureErrorCode, type CaptureOutcome, type LoginPending } from "./capture/script.ts";
+import { CAPTURE_WAIT_MS, ISOLATED_PAGE, type CaptureErrorCode, type CaptureOutcome, type LoginPending } from "./capture/script.ts";
 import { MAX_LINES, type HumanChannel } from "./gate/dialog.ts";
 import { SAFE_PATH, resolveExecutable, type Exec, type SpawnInherited, type SpawnedChild } from "./platform/exec.ts";
 import { ZKS_KEYCHAIN_SERVICE, type Keychain } from "./platform/keychain.ts";
@@ -1683,7 +1683,9 @@ async function captureLogin(deps: Deps, flags: Map<string, string>): Promise<Run
     let approval: ApprovalMode | undefined;
     const finish = async (
       result: AuditResult,
-      outcome: { code: CaptureFailure; message?: string; finalOrigin?: string } | { loggedIn: boolean; finalOrigin: string; pending?: LoginPending },
+      outcome:
+        | { code: CaptureFailure; message?: string; finalOrigin?: string }
+        | { loggedIn: boolean; finalOrigin: string; pending?: LoginPending; left?: { space: string; page: string } },
     ) => {
       const entry = audit.append({
         ts: deps.now().toISOString(),
@@ -1711,6 +1713,7 @@ async function captureLogin(deps: Deps, flags: Map<string, string>): Promise<Run
           loggedIn: outcome.loggedIn,
           finalOrigin: outcome.finalOrigin,
           ...(outcome.pending ? { pending: outcome.pending } : {}),
+          ...(outcome.left ?? {}),
           auditId: entry.auditId,
           mirror,
           ...anchorError,
@@ -1751,7 +1754,7 @@ async function captureLogin(deps: Deps, flags: Map<string, string>): Promise<Run
     if (lines.some((line) => line.length > MAX_DIALOG_LINE)) {
       return json(EXIT_USAGE, {
         ok: false,
-        error: { code: "dialog_too_long", message: "the approval text is too long for one dialog (a line over 300 characters: shorten --url or --user)" },
+        error: { code: "dialog_too_long", message: "the approval text is too long for one dialog (a line over 300 characters: shorten --url, --user or the --from item name)" },
       });
     }
     approval = "dialog";
@@ -1759,6 +1762,7 @@ async function captureLogin(deps: Deps, flags: Map<string, string>): Promise<Run
       return await finish("denied", { code: "not_approved", message: "the login was not approved; nothing was read" });
     }
 
+    const spaceName = req.isolated ? `zks-capture-${(deps.randomBytes ?? nodeRandomBytes)(8).toString("hex")}` : null;
     const outcome = await runLogin(deps.exec, egoBrowser, {
       mode: "login",
       space: req.space,
@@ -1769,12 +1773,14 @@ async function captureLogin(deps: Deps, flags: Map<string, string>): Promise<Run
       service: req.service,
       account: req.account,
       waitMs: CAPTURE_WAIT_MS,
-      ...(req.isolated && profileId !== null
-        ? { isolated: { profileId, url: req.url, name: `zks-capture-${(deps.randomBytes ?? nodeRandomBytes)(8).toString("hex")}` } }
-        : {}),
+      ...(profileId !== null && spaceName !== null ? { isolated: { profileId, url: req.url, name: spaceName } } : {}),
       login: { url: req.url, user: req.user, userSelector: req.userSelector, submitSelector: req.submitSelector, successSelector: req.successSelector },
     });
-    if (outcome.ok) return await finish("applied", outcome);
+    if (outcome.ok) {
+      // A pending isolated login left its page open in the capture profile: name it for the human.
+      const left = outcome.pending !== undefined && spaceName !== null ? { space: spaceName, page: ISOLATED_PAGE } : undefined;
+      return await finish("applied", { ...outcome, ...(left ? { left } : {}) });
+    }
     if (outcome.code === "login_redirected") {
       return await finish("failed", {
         code: "login_redirected",

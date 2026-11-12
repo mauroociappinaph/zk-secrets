@@ -101,10 +101,10 @@ Agent                      ego-browser page              zks                    
   │                          │  type it (keyboard), confirm│                              │
   │                          │  click submit, settle ≤ 15 s│                              │
   │                          │── ZKS_RESULT {ok, loggedIn, finalOrigin, pending?} ─▶│ audit (origin, item)
-  │◀──── {ok, mode: "login", origin, from, loggedIn, finalOrigin, pending?, auditId} ─│
+  │◀── {ok, mode: "login", origin, from, loggedIn, finalOrigin, pending?, space?, page?, auditId} ─│
 ```
 
-Branches: `loggedIn: true` → continue. `pending: "2fa" | "captcha"` (exit 0) → the agent stops and the human finishes the step in the browser. `pending: "unknown"` → the login did not go through; the agent reports it. `login_redirected` (exit 1) → the page left the origin; only `finalOrigin` is reported. Exit 3 → denied, nothing was read.
+Branches: `loggedIn: true` → continue. `pending: "2fa" | "captcha"` (exit 0) → the agent stops and the human finishes the step in the browser; with `--isolated` the page stays open in the capture profile and `space`/`page` name it. A pending result never leaves the typed password in the field, and a captcha or code input already on the login page before the submit does not count as pending. `pending: "unknown"` → the login did not go through; the agent reports it. `login_redirected` (exit 1) → the page left the origin; only `finalOrigin` is reported. Exit 3 → denied, nothing was read.
 
 ## Which source kind
 

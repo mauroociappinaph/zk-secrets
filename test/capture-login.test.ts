@@ -3,7 +3,7 @@ import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { LOGIN_RECIPES } from "../src/capture/recipes.ts";
-import { CAPTURE_WAIT_MS, buildCaptureScript, parseLoginOutput, type CaptureScriptSpec } from "../src/capture/script.ts";
+import { CAPTURE_WAIT_MS, buildCaptureScript, parseCaptureOutput, parseLoginOutput, type CaptureScriptSpec } from "../src/capture/script.ts";
 import { HELP_TEXT } from "../src/help.ts";
 import { run } from "../src/run.ts";
 import { CANARY, TEST_TOOLS, auditBytes, harness, parse, tempDir, type ExecCall } from "./helpers.ts";
@@ -273,6 +273,13 @@ test("S1: zks capture fill and read still reject the login result shape (preserv
   assert.equal(parse(out.stdout).error.code, "browser_failed");
 });
 
+test("R3-005: parseCaptureOutput rejects a read/fill result carrying the login_redirected code", () => {
+  const failed = { ok: false, code: "browser_failed" };
+  assert.deepEqual(parseCaptureOutput('ZKS_RESULT {"ok":false,"code":"login_redirected"}\n'), failed);
+  assert.deepEqual(parseCaptureOutput(`ZKS_RESULT {"ok":false,"code":"login_redirected","finalOrigin":"${ORIGIN}"}\n`), failed);
+  assert.deepEqual(parseCaptureOutput('ZKS_RESULT {"ok":false,"code":"not_found"}\n'), { ok: false, code: "not_found" });
+});
+
 // Usage
 
 test("S1: required flags, validation and refusals never echo a value", async () => {
@@ -306,9 +313,21 @@ test("S2: a dialog line over 300 characters is dialog_too_long; nothing is read"
   assert.equal(out.exitCode, 2, out.stdout);
   assert.deepEqual(parse(out.stdout), {
     ok: false,
-    error: { code: "dialog_too_long", message: "the approval text is too long for one dialog (a line over 300 characters: shorten --url or --user)" },
+    error: { code: "dialog_too_long", message: TOO_LONG },
   });
   assert.equal(egoCalls(h).length + h.human.approvals.length, 0);
+});
+
+const TOO_LONG = "the approval text is too long for one dialog (a line over 300 characters: shorten --url, --user or the --from item name)";
+
+test("R3-003: dialog_too_long names every flag that can make a line long, including the --from item name", async () => {
+  for (const argv of [replace(LOGIN, "--from", `${"s".repeat(128)}/${"a".repeat(128)}`)]) {
+    const h = withItem({ keychain: { [argv[argv.indexOf("--from") + 1]!]: CANARY } });
+    const out = await run(argv, h.deps);
+    assert.equal(out.exitCode, 2, out.stdout);
+    assert.deepEqual(parse(out.stdout), { ok: false, error: { code: "dialog_too_long", message: TOO_LONG } });
+    assert.equal(egoCalls(h).length + h.human.approvals.length, 0);
+  }
 });
 
 test("S1 (preserve): capture read/fill usage and the forbidden --password flag are unchanged", async () => {
@@ -333,11 +352,31 @@ test("S1: an isolated login runs in the capture profile; no profile is isolated_
   const script = egoCalls(h)[0]!.input;
   assert.ok(script.includes(`"isolated":{"profileId":"${PROFILE}","url":"${URL_}","name":"zks-capture-0707070707070707"}`));
 
+  assert.equal(parse(out.stdout).space, undefined, "a finished login reports no space");
+
   const unset = withItem();
   const res = await run(ISO_LOGIN, unset.deps);
   assert.equal(res.exitCode, 1, res.stdout);
   assert.equal(parse(res.stdout).error.code, "isolated_profile_unset");
   assert.equal(egoCalls(unset).length + unset.human.approvals.length, 0);
+});
+
+test("R3-002: an isolated pending login reports the space and page it left open; a pending --space login does not", async () => {
+  for (const pending of ["2fa", "captcha", "unknown"]) {
+    const marker = ego(`ZKS_RESULT {"ok":true,"loggedIn":false,"finalOrigin":"${ORIGIN}","pending":"${pending}"}`);
+    const h = withItem({ exec: marker });
+    h.config = { capture: { profileId: PROFILE } };
+    const out = await run(ISO_LOGIN, h.deps);
+    assert.equal(out.exitCode, 0, out.stdout);
+    const body = parse(out.stdout);
+    assert.deepEqual(body, {
+      ok: true, command: "capture", mode: "login", origin: ORIGIN, from: ITEM, isolated: true,
+      loggedIn: false, finalOrigin: ORIGIN, pending, space: "zks-capture-0707070707070707", page: "p1",
+      auditId: body.auditId, mirror: NO_MIRROR(1),
+    });
+    const own = withItem({ exec: marker });
+    assert.equal(parse((await run(LOGIN, own.deps)).stdout).space, undefined);
+  }
 });
 
 // Recipes
@@ -646,6 +685,64 @@ test("S3: an isolated login goes to the URL once, logs in and always finishes th
   assert.deepEqual(red.printed, ['ZKS_RESULT {"ok":false,"code":"login_redirected","finalOrigin":"https://sso.example"}']);
   assert.deepEqual(red.securityCalls, []);
   assert.deepEqual(red.spaceEvents.at(-1), ["finish", { keep: [] }]);
+});
+
+test("R3-002: an isolated pending login keeps its page open; logged in or failed keeps nothing", async () => {
+  const iso = { profileId: PROFILE, url: URL_, name: "zks-capture-x" };
+  const spec = loginSpec({}, { space: null, page: null, isolated: iso });
+  const cap = loginPage({ afterSubmit: (s) => { gone(s); s.nodes.push(new FakeIframe("https://newassets.hcaptcha.com/captcha/v1")); } });
+  const pending = await runLogin(spec, cap.page);
+  assert.deepEqual(pending.printed, [`ZKS_RESULT {"ok":true,"loggedIn":false,"finalOrigin":"${ORIGIN}","pending":"captcha"}`]);
+  const finish = pending.spaceEvents.at(-1) as [string, { keep: unknown[] }];
+  assert.equal(finish[0], "finish");
+  assert.equal(finish[1].keep.length, 1);
+  assert.equal(finish[1].keep[0], cap.page, "the page with the challenge stays open");
+
+  const stays = loginPage();
+  const unknown = await runLogin(spec, stays.page);
+  assert.deepEqual(unknown.printed, [`ZKS_RESULT {"ok":true,"loggedIn":false,"finalOrigin":"${ORIGIN}","pending":"unknown"}`]);
+  assert.equal((unknown.spaceEvents.at(-1) as [string, { keep: unknown[] }])[1].keep[0], stays.page);
+
+  const failed = loginPage({ clickThrows: true });
+  const notFound = await runLogin(spec, failed.page);
+  assert.deepEqual(notFound.printed, ['ZKS_RESULT {"ok":false,"code":"not_found"}']);
+  assert.deepEqual(notFound.spaceEvents.at(-1), ["finish", { keep: [] }]);
+});
+
+test("R3-001: a captcha iframe or code input already on the login page is not pending until the page changed", async () => {
+  const preCaptcha = loginPage({ extra: [new FakeIframe("https://www.google.com/recaptcha/api2/anchor")] });
+  assert.deepEqual((await runLogin(loginSpec(), preCaptcha.page)).printed, [`ZKS_RESULT {"ok":true,"loggedIn":false,"finalOrigin":"${ORIGIN}","pending":"unknown"}`]);
+
+  const preTel = loginPage({ extra: [new FakeInput(['input[type="tel"]'], "tel")] });
+  assert.deepEqual((await runLogin(loginSpec(), preTel.page)).printed, [`ZKS_RESULT {"ok":true,"loggedIn":false,"finalOrigin":"${ORIGIN}","pending":"unknown"}`]);
+
+  // Once the page changed (the password field is gone), the code input counts.
+  const changed = loginPage({ extra: [new FakeInput(['input[type="tel"]'], "tel")], afterSubmit: gone });
+  assert.deepEqual((await runLogin(loginSpec(), changed.page)).printed, [`ZKS_RESULT {"ok":true,"loggedIn":false,"finalOrigin":"${ORIGIN}","pending":"2fa"}`]);
+
+  // A URL change counts as a change too.
+  const moved = loginPage({ extra: [new FakeInput(['input[type="tel"]'], "tel")], afterSubmit: (s) => void (s.url = `${ORIGIN}/verify`) });
+  assert.deepEqual((await runLogin(loginSpec(), moved.page)).printed, [`ZKS_RESULT {"ok":true,"loggedIn":false,"finalOrigin":"${ORIGIN}","pending":"2fa"}`]);
+});
+
+test("R3-001: a found --success-selector wins over captcha and code-input detection", async () => {
+  const p = loginPage({
+    afterSubmit: (s) => s.nodes.push(new FakeNode(["#dashboard"]), new FakeIframe("https://www.recaptcha.net/anchor"), new FakeInput(['input[type="tel"]'], "tel")),
+  });
+  assert.deepEqual((await runLogin(loginSpec({ successSelector: "#dashboard" }), p.page)).printed, [`ZKS_RESULT {"ok":true,"loggedIn":true,"finalOrigin":"${ORIGIN}"}`]);
+});
+
+test("R1-001: a pending login with the password field still on the page blanks it, without leaving the page", async () => {
+  const stays = loginPage();
+  const { printed } = await runLogin(loginSpec(), stays.page);
+  assert.deepEqual(printed, [`ZKS_RESULT {"ok":true,"loggedIn":false,"finalOrigin":"${ORIGIN}","pending":"unknown"}`]);
+  assert.equal(stays.password.value, "", "the typed password does not stay in the field");
+  assert.ok(!stays.events.includes("goto:about:blank"), "the page stays for the human");
+
+  const cap = loginPage({ afterSubmit: (s) => s.nodes.push(new FakeIframe("https://newassets.hcaptcha.com/captcha/v1")) });
+  const res = await runLogin(loginSpec(), cap.page);
+  assert.deepEqual(res.printed, [`ZKS_RESULT {"ok":true,"loggedIn":false,"finalOrigin":"${ORIGIN}","pending":"captcha"}`]);
+  assert.equal(cap.password.value, "");
 });
 
 test("S1: a hostile username or selector cannot break out of the script", async () => {
