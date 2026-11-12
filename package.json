@@ -1,7 +1,7 @@
 {
   "name": "zk-secrets",
   "version": "0.2.0",
-  "description": "Zero-knowledge secrets and env var sync for Vercel, AWS, GitHub, Railway and Supabase, built for AI agents that must never see secret values.",
+  "description": "Agent-blind secrets and env var sync for Vercel, AWS, GitHub, Railway, Supabase, Netlify, Docker and local .env files, built for AI agents that must never see secret values.",
   "private": true,
   "type": "module",
   "bin": {
@@ -28,5 +28,5 @@
     "@types/node": "22.20.5",
     "typescript": "5.9.3"
   },
-  "license": "UNLICENSED"
+  "license": "Apache-2.0"
 }
