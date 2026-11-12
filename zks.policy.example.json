@@ -9,7 +9,7 @@
     "railway-prod": { "provider": "railway", "projectId": "REPLACE-ME", "environmentId": "REPLACE-ME", "serviceId": "REPLACE-ME", "tokenType": "project" },
     "supabase-prod": { "provider": "supabase", "projectRef": "abcdefghijklmnopqrst" },
     "netlify-prod": { "provider": "netlify", "accountId": "acme-team", "siteId": "REPLACE-ME", "context": "production" },
-    "swarm-prod": { "provider": "docker-swarm", "host": "tcp://swarm.example.com:2376", "replace": true },
+    "swarm-prod": { "provider": "docker-swarm", "host": "unix:///run/docker.sock", "replace": true },
     "compose-local": { "provider": "compose", "dir": "./run/compose-secrets" },
     "dotenv-local": { "provider": "dotenv", "path": ".env.local" }
   },

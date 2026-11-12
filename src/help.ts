@@ -59,7 +59,7 @@ Non-sensitive env vars may use "value" instead of a source. Sensitive ones never
 Targets (targets.<key>.provider): vercel, aws-ssm, aws-sm, github, railway, supabase, netlify, docker-swarm,
   compose, dotenv.
   netlify {accountId, siteId?, context: all|production|deploy-preview|branch-deploy|dev}: token zks/netlify
-  docker-swarm {host: unix:///path|tcp://host:port, replace?}: docker --host HOST secret create NAME - (value on
+  docker-swarm {host: unix:///path, replace?}: docker --host HOST secret create NAME - (value on
   stdin); unix:// must be a real socket, not a symlink (docker_host_invalid); no ssh://; an existing secret is
   secret_exists unless replace: true (rm, then create)
   compose {dir}: writes <dir>/<NAME> (mode 600, dir 700, no symlinks) for Compose secrets: file:

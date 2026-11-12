@@ -24,7 +24,7 @@ const UNIX = "unix://";
 
 /**
  * A `unix://` host must be a real socket: lstat (never following a symlink) refuses a symlink, a
- * missing path or anything else before docker runs. `tcp://` hosts have no local check.
+ * missing path or anything else before docker runs. Only unix sockets are accepted.
  */
 async function checkHost(host: string): Promise<void> {
   if (!host.startsWith(UNIX)) return;
