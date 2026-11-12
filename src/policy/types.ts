@@ -56,12 +56,36 @@ export type TargetConfig =
   | RailwayTarget
   | SupabaseTarget;
 
+export const GENERATE_FORMATS = ["random", "uuid", "jwt-secret", "password", "rsa-private-key", "ed25519-private-key"] as const;
+export type GenerateFormat = (typeof GENERATE_FORMATS)[number];
+
+export interface GenerateSource {
+  kind: "generate";
+  /** Default "random": `bytes` random bytes in `encoding`. */
+  format?: GenerateFormat;
+  /** random only. */
+  bytes?: number;
+  encoding?: "base64url" | "hex";
+  /** password only. */
+  length?: number;
+  lower?: boolean;
+  upper?: boolean;
+  digits?: boolean;
+  symbols?: boolean;
+  /** rsa-private-key only. */
+  bits?: 2048 | 3072 | 4096;
+}
+
 export type SourceSpec =
   | { kind: "op"; ref: string }
   | { kind: "keychain"; service: string; account: string }
   | { kind: "prompt" }
-  | { kind: "generate"; bytes?: number; encoding?: "base64url" | "hex" }
-  | { kind: "dotenv"; path: string; key?: string };
+  | GenerateSource
+  | { kind: "dotenv"; path: string; key?: string }
+  /** SPKI PEM public key of another variable's generated private key. */
+  | { kind: "public-key"; of: string }
+  /** `${NAME}` raw, `${NAME:url}` percent-encoded, `$${` a literal `${`. */
+  | { kind: "template"; template: string };
 
 export type SourceKind = SourceSpec["kind"] | "literal";
 

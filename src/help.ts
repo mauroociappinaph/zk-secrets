@@ -42,7 +42,11 @@ Usage:
   zks doctor                                  Check tools, tokens, audit and install integrity
   zks --version | zks help
 
-Sources (variables.<NAME>.source.kind): op, keychain, prompt, generate, dotenv.
+Sources (variables.<NAME>.source.kind): op, keychain, prompt, generate, dotenv, public-key, template.
+  generate format: random (bytes, encoding), uuid, jwt-secret, password (length 12-128, lower, upper,
+  digits, symbols), rsa-private-key (bits 2048|3072|4096), ed25519-private-key
+  public-key {of: "VAR"}: public PEM of VAR's generated private key; may be sensitive: false
+  template {template: "postgres://\${USER}:\${PASS:url}@\${HOST}/db"}: built in memory, $\${ is a literal \${
 Non-sensitive env vars may use "value" instead of a source. Sensitive ones never can.
 Targets (targets.<key>.provider): vercel, aws-ssm, aws-sm, github, railway, supabase.
 Capture: zks/<vercel|railway|supabase|sheets-hmac> only from their own site (--origin https://vercel.com,

@@ -15,7 +15,7 @@ import type { Operation, Policy, Provider, TargetConfig } from "./policy/types.t
 import { Redactor } from "./secret/redactor.ts";
 import { SecretBuffer } from "./secret/secret-buffer.ts";
 import { SinkError, type AwsClientFactory, type Sink } from "./sinks/types.ts";
-import { SourceError, resolveValue } from "./sources/resolve.ts";
+import { SourceError, createResolver } from "./sources/resolve.ts";
 import { HELP_TEXT } from "./help.ts";
 import { resolve as resolvePath } from "node:path";
 
@@ -416,21 +416,28 @@ async function apply(deps: Deps, flags: Map<string, string>, redactor: Redactor)
     const byVariable = new Map<string, Operation[]>();
     for (const op of ops) byVariable.set(op.name, [...(byVariable.get(op.name) ?? []), op]);
 
+    // One resolver per apply: each value is resolved once, in dependency order, and shared by the
+    // templates and public keys derived from it. Every resolved value is zeroed in the finally below.
+    const resolver = createResolver(
+      policy.variables,
+      {
+        exec: deps.exec,
+        tools: deps.tools,
+        keychain: deps.keychain,
+        human: deps.human,
+        cwd: deps.cwd,
+        readFile: deps.readFile,
+        randomBytes: deps.randomBytes,
+      },
+      (_name, spec, value) => {
+        if (spec.sensitive) redactor.register(value);
+      },
+    );
     try {
       for (const [name, variableOps] of byVariable) {
-        const variable = (variableOps[0] as Operation).variable;
-        let value: SecretBuffer | null = null;
+        let value: SecretBuffer;
         try {
-          value = await resolveValue(name, variable, {
-            exec: deps.exec,
-            tools: deps.tools,
-            keychain: deps.keychain,
-            human: deps.human,
-            cwd: deps.cwd,
-            readFile: deps.readFile,
-            randomBytes: deps.randomBytes,
-          });
-          if (variable.sensitive) redactor.register(value);
+          value = await resolver.resolve(name);
         } catch (error) {
           const code = error instanceof SourceError ? error.code : "source_failed";
           const message = redactor.scrub(error instanceof Error ? error.message : String(error));
@@ -440,7 +447,7 @@ async function apply(deps: Deps, flags: Map<string, string>, redactor: Redactor)
           }
           continue;
         }
-        try {
+        {
           for (const op of variableOps) {
             let version: string | undefined;
             try {
@@ -467,8 +474,6 @@ async function apply(deps: Deps, flags: Map<string, string>, redactor: Redactor)
             }
             results.push(toResult(op, entry, "applied", version));
           }
-        } finally {
-          value.dispose();
         }
       }
     } catch (error) {
@@ -476,6 +481,8 @@ async function apply(deps: Deps, flags: Map<string, string>, redactor: Redactor)
       // Stop: further writes would go unaudited.
       await saveAnchor(deps, store);
       return json(EXIT_FAILED, { ok: false, error: { code: "audit_failed", message: error.message }, approval, results, ...trustChange });
+    } finally {
+      resolver.dispose();
     }
 
     const anchorError = await saveAnchor(deps, store);

@@ -108,13 +108,45 @@ Rules: Vercel sensitive variables cannot target `development`; Supabase rejects 
 | `op` | `op read <ref>` (1Password CLI) | the value is in 1Password; the `op://` reference is not secret |
 | `keychain` | macOS Keychain item `service`/`account` | the value is already in the Keychain |
 | `prompt` | hidden macOS dialog | the human types or pastes it |
-| `generate` | local CSPRNG, `bytes` 16–512, `base64url` or `hex` | a new random key; **rotates on every apply** |
+| `generate` | local CSPRNG; `format` (below), default `random` with `bytes` 16–512, `base64url` or `hex` | a new key, password or keypair; **rotates on every apply** |
 | `dotenv` | a dotenv file read by zks (`path`, optional `key`) | migrating an existing `.env` file |
+| `public-key` | SPKI PEM public key of another variable's generated private key (`of`) | publishing the verifying half of a keypair |
+| `template` | built in memory from other variables (`template`) | `DATABASE_URL` from user, password and host |
 | *(none)* `value` | literal in the policy | only `sensitive: false` env vars |
+
+`generate` formats:
+
+| `format` | Value | Options |
+|---|---|---|
+| `random` (default) | `bytes` random bytes in `encoding` | `bytes` 16–512 (32), `encoding` `base64url`\|`hex` |
+| `uuid` | UUID v4 | — |
+| `jwt-secret` | 64 random bytes, base64url (an HS256/HS512 key) | — |
+| `password` | at least one character of each enabled class, characters chosen uniformly (rejection sampling) | `length` 12–128 (32); `lower`, `upper`, `digits`, `symbols` booleans (all `true`), at least one enabled; symbols are `!#$%&()*+,-./:;<=>?@[]^_{\|}~` |
+| `rsa-private-key` | PKCS#8 PEM | `bits` 2048\|3072\|4096 (3072) |
+| `ed25519-private-key` | PKCS#8 PEM | — |
+
+An option another format does not use is an `invalid_policy` issue (`variables.X.source.length: is not valid for format "uuid"`).
+
+```json
+"SESSION_SECRET": { "sensitive": true, "source": { "kind": "generate", "format": "jwt-secret" }, "targets": ["vercel-prod"] },
+"DB_PASSWORD":    { "sensitive": true, "source": { "kind": "generate", "format": "password", "length": 40, "symbols": false }, "targets": ["railway-prod"] },
+"SIGNING_KEY":     { "sensitive": true,  "source": { "kind": "generate", "format": "ed25519-private-key" }, "targets": ["ssm-prod"] },
+"SIGNING_KEY_PUB": { "sensitive": false, "source": { "kind": "public-key", "of": "SIGNING_KEY" }, "targets": ["vercel-prod"] },
+"DATABASE_URL": {
+  "sensitive": true,
+  "source": { "kind": "template", "template": "postgres://${DB_USER}:${DB_PASSWORD:url}@${DB_HOST}/app" },
+  "targets": ["vercel-prod"]
+}
+```
+
+Derived values (`public-key`, `template`) are computed in memory during the same `apply` as the values they use: every variable is resolved once, dependencies first, so `DB_PASSWORD` above is generated once and the same bytes reach both its own target and `DATABASE_URL`. `plan` and the dialog show `generate password(40)`, `public-key of SIGNING_KEY` and `template(DB_USER, DB_PASSWORD, DB_HOST)`, never values.
 
 Source rules:
 
-- Every `source` needs `"sensitive": true`. Only a literal `value` can be non-sensitive.
+- Every `source` needs `"sensitive": true`, except `public-key`, which may be `"sensitive": false`. Only a literal `value` or a `public-key` can be non-sensitive.
+- `public-key`: `of` names a variable whose source is `generate` with format `rsa-private-key` or `ed25519-private-key`.
+- `template`: 1–2000 characters; `${NAME}` inserts NAME's value as is, `${NAME:url}` percent-encodes it (`encodeURIComponent`), `$${` is a literal `${`. It must reference at least one variable; an unknown variable, a reference to itself or a cycle (`A -> B -> A`) is an `invalid_policy` issue.
+- A selection (`--only`, `--target`) that writes a derived variable must also write every generated variable it is derived from, otherwise zks would write a value derived from a key or password stored nowhere (`selection: DATABASE_URL uses DB_PASSWORD, a generated value this selection does not write; select it too`, exit 2). Non-generated dependencies (Keychain, 1Password, literals) are read even when not selected.
 - `keychain`: `service` and `account` match `^[A-Za-z0-9_.-]{1,128}$`; the service `zks` (in any case) is reserved for zks's own tokens.
 - `dotenv`: `path` is a relative `.env*` file inside the project (for example `.env.production` or `apps/web/.env.local`): ASCII, no `..`, no absolute path, at most 200 characters. `plan` and the dialog show it resolved to an absolute path; zks reads the resolved real path it checked.
 - `op`: `ref` is `op://` followed by printable ASCII without spaces, at most 200 characters.

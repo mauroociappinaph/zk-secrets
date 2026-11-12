@@ -19,6 +19,7 @@ zks splits the work between an **untrusted planner** (the AI agent, which only e
  │    ├─ gate/dialog.ts       osascript approval + hidden prompt (human only)           │
  │    ├─ policy/trust.ts      trusted destinations, HMAC-signed trust.json              │
  │    ├─ sources/resolve.ts   op │ keychain │ prompt │ generate │ dotenv │ literal       │
+ │                            public-key │ template (derived, one resolver per apply)    │
  │    ├─ secret/*             SecretBuffer (never rendered) + Redactor (scrub output)   │
  │    ├─ sinks/*              vercel │ aws-ssm │ aws-sm │ github │ railway │ supabase   │
  │    ├─ audit/store.ts       SQLite append-only, SHA-256 hash chain                    │
@@ -105,7 +106,7 @@ The policy file is written by the agent and is **not trusted**: it is validated 
 | Swap / memory | Buffers are zeroed after use; values live for one apply | OS paging and immutable JavaScript strings during the HTTPS request cannot be zeroed |
 | Prompt injection (policy text, repo files, provider output) | The agent never receives values to leak; the approval dialog shows exactly what will be written: every write, its real destination ids, secret/plain and source, never truncated (max 20 writes), printable ASCII only; skill and `~/AGENTS.md` rule forbid reading secrets | A tricked agent can still propose a bad policy; the human must read the dialog |
 | Binary tampering | Install is read-only; `zks doctor` compares a SHA-256 tree digest with `integrity.json` | Tamper-evident, not tamper-proof: a same-user process can `chmod` and rewrite both |
-| Policy tampering | Policy is untrusted input: strict validation (own keys only, strict id patterns), literal values only for `sensitive: false`, every `source` forced to `sensitive: true`, Keychain service `zks` reserved, dotenv paths limited to relative `.env*` files inside the project (symlinks resolved; the checked real path is the one read), `op://` refs limited to printable ASCII, identifiers length-capped so the dialog is never truncated; the approval dialog is the gate | Human approves a list they did not read |
+| Policy tampering | Policy is untrusted input: strict validation (own keys only, strict id patterns), literal values only for `sensitive: false`, every `source` except `public-key` forced to `sensitive: true`, `template` references checked for unknown names and cycles, Keychain service `zks` reserved, dotenv paths limited to relative `.env*` files inside the project (symlinks resolved; the checked real path is the one read), `op://` refs limited to printable ASCII, identifiers length-capped so the dialog is never truncated; the approval dialog is the gate | Human approves a list they did not read |
 | Trust store tampering | `trust.json` is HMAC-SHA256 signed with a Keychain key; unparsable, unsigned or mismatched files trust nothing and are reported `trust: "invalid"`; `zks trust remove` only reduces trust | A same-user process can read `trust-hmac` and forge the file; "Always allow" on one GitHub repo trusts its whole owner |
 | Audit tampering | `BEFORE UPDATE/DELETE` triggers, SHA-256 hash chain (`zks audit verify`), Keychain anchor `zks`/`audit-head` that detects a deleted tail, off-machine Sheet mirror with a `chainOk` column, provider audit logs; `zks config set/unset sheets-webhook` needs approval | Tamper-evident, not impossible: a same-user process can rewrite the SQLite file and the anchor; the mirror and provider logs reveal it |
 | Actor identity | `actorHuman` comes from the OS user database | `actorAgent` is a self-declared label (`--agent`, `ZKS_AGENT_LABEL` from `PI_SESSION_ID`/`AI_AGENT`); zks cannot authenticate it |
@@ -217,13 +218,20 @@ Target (by provider)
   supabase  projectRef [a-z0-9]{20}
 
 Variable
-  sensitive: boolean            must be true when a source is used
+  sensitive: boolean            must be true when a source other than public-key is used
   description?: string
   source?: op{ref ^op://[printable ASCII]$, at most 200 characters}
          | keychain{service,account ^[A-Za-z0-9_.-]{1,128}$; service "zks" reserved in any case}
          | prompt
-         | generate{bytes 16..512, encoding base64url|hex}
+         | generate{format? random (default): bytes 16..512, encoding base64url|hex
+                    | uuid | jwt-secret (64 bytes base64url)
+                    | password: length 12..128 (32), lower|upper|digits|symbols booleans (true), >= 1 enabled
+                    | rsa-private-key: bits 2048|3072|4096 (3072), PKCS8 PEM | ed25519-private-key: PKCS8 PEM}
+                    options of another format are invalid
          | dotenv{path: relative .env* file inside the project, at most 200 characters, key?}
+         | public-key{of: variable with a generate rsa-/ed25519-private-key source}  SPKI PEM; may be sensitive: false
+         | template{template: 1..2000 characters, ${NAME} raw, ${NAME:url} percent-encoded, $${ literal ${;
+                    >= 1 reference; no unknown, self or cyclic reference}
   value?: string                only when sensitive is false; exactly one of source or value
   targets: [<target key>, ...]  non-empty; own keys of targets only
 ```
@@ -241,7 +249,7 @@ Variable
 | `variableName` | name only; for a capture the Keychain account |
 | `action` | `set` (apply) or `capture` |
 | `sensitive` | boolean |
-| `sourceKind` | `op`, `keychain`, `prompt`, `generate`, `dotenv` or `literal`; for a capture `capture-read`, `capture-generate` or `capture-from` |
+| `sourceKind` | `op`, `keychain`, `prompt`, `generate`, `dotenv`, `public-key`, `template` or `literal`; for a capture `capture-read`, `capture-generate` or `capture-from` |
 | `result` | `applied`, `denied` or `failed` |
 | `providerVersion` | version id returned by the provider, if any |
 | `errorCode` | short code, e.g. `not_approved`, `missing_token` |

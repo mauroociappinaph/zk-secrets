@@ -1,5 +1,7 @@
 import { resolve as resolvePath } from "node:path";
+import { MAX_TEMPLATE_LENGTH, TemplateSyntaxError, parseTemplate, templateRefs } from "./template.ts";
 import {
+  GENERATE_FORMATS,
   PROVIDERS,
   VERCEL_ENVIRONMENTS,
   type Operation,
@@ -36,6 +38,24 @@ const RESERVED_VARIABLE_NAMES = ["__proto__", "constructor", "prototype"];
 const ROLE_ARN = /^arn:aws[a-z-]*:iam::\d{12}:role\/[A-Za-z0-9+=,.@_\/-]+$/;
 const GENERATE_MIN_BYTES = 16;
 const GENERATE_MAX_BYTES = 512;
+export const PASSWORD_MIN_LENGTH = 12;
+export const PASSWORD_MAX_LENGTH = 128;
+export const PASSWORD_DEFAULT_LENGTH = 32;
+export const RSA_DEFAULT_BITS = 3072;
+const RSA_BITS = [2048, 3072, 4096];
+const PASSWORD_CLASSES = ["lower", "upper", "digits", "symbols"] as const;
+/** Options each generate format accepts besides kind and format. */
+const FORMAT_OPTIONS: Record<string, string[]> = {
+  random: ["bytes", "encoding"],
+  uuid: [],
+  "jwt-secret": [],
+  password: ["length", ...PASSWORD_CLASSES],
+  "rsa-private-key": ["bits"],
+  "ed25519-private-key": [],
+};
+const GENERATE_OPTIONS = ["bytes", "encoding", "length", ...PASSWORD_CLASSES, "bits"];
+const PRIVATE_KEY_FORMATS = ["rsa-private-key", "ed25519-private-key"];
+const SOURCE_KINDS = ["op", "keychain", "prompt", "generate", "dotenv", "public-key", "template"];
 
 export class PolicyError extends Error {
   readonly issues: string[];
@@ -69,8 +89,9 @@ export function validatePolicy(input: unknown): Policy {
   const variables = isObject(input.variables) ? input.variables : {};
   if (!isObject(input.variables)) issues.push("variables: must be an object");
   for (const [name, spec] of Object.entries(variables)) {
-    validateVariable(name, spec, targets, issues);
+    validateVariable(name, spec, targets, variables, issues);
   }
+  validateCycles(variables, issues);
 
   if (issues.length > 0) throw new PolicyError(issues);
   return input as unknown as Policy;
@@ -150,7 +171,95 @@ function validateTarget(path: string, target: unknown, issues: string[]): void {
   }
 }
 
-function validateSource(path: string, source: unknown, issues: string[]): void {
+function validateGenerate(path: string, source: Json, issues: string[]): void {
+  const format = source.format ?? "random";
+  if (typeof format !== "string" || !(GENERATE_FORMATS as readonly string[]).includes(format)) {
+    issues.push(`${path}.format: must be one of ${GENERATE_FORMATS.join(", ")}`);
+    return;
+  }
+  const allowed = FORMAT_OPTIONS[format] as string[];
+  for (const option of GENERATE_OPTIONS) {
+    if (source[option] !== undefined && !allowed.includes(option)) issues.push(`${path}.${option}: is not valid for format "${format}"`);
+  }
+  switch (format) {
+    case "random": {
+      const bytes = source.bytes ?? 32;
+      if (!Number.isInteger(bytes) || (bytes as number) < GENERATE_MIN_BYTES || (bytes as number) > GENERATE_MAX_BYTES) {
+        issues.push(`${path}.bytes: must be an integer between ${GENERATE_MIN_BYTES} and ${GENERATE_MAX_BYTES}`);
+      }
+      if (source.encoding !== undefined && source.encoding !== "base64url" && source.encoding !== "hex") {
+        issues.push(`${path}.encoding: must be "base64url" or "hex"`);
+      }
+      break;
+    }
+    case "password": {
+      const length = source.length ?? PASSWORD_DEFAULT_LENGTH;
+      if (!Number.isInteger(length) || (length as number) < PASSWORD_MIN_LENGTH || (length as number) > PASSWORD_MAX_LENGTH) {
+        issues.push(`${path}.length: must be an integer between ${PASSWORD_MIN_LENGTH} and ${PASSWORD_MAX_LENGTH}`);
+      }
+      let enabled = 0;
+      for (const cls of PASSWORD_CLASSES) {
+        const value = source[cls] ?? true;
+        if (typeof value !== "boolean") issues.push(`${path}.${cls}: must be true or false`);
+        else if (value) enabled++;
+      }
+      if (enabled === 0 && PASSWORD_CLASSES.every((cls) => typeof (source[cls] ?? true) === "boolean")) {
+        issues.push(`${path}: password needs at least one of ${PASSWORD_CLASSES.join(", ")}`);
+      }
+      break;
+    }
+    case "rsa-private-key":
+      if (source.bits !== undefined && !RSA_BITS.includes(source.bits as number)) issues.push(`${path}.bits: must be 2048, 3072 or 4096`);
+      break;
+  }
+}
+
+function isPrivateKeySource(spec: unknown): boolean {
+  return isObject(spec) && isObject(spec.source) && spec.source.kind === "generate" && PRIVATE_KEY_FORMATS.includes(spec.source.format as string);
+}
+
+/** Variables another variable's source reads: template references and the private key of a public-key. */
+export function dependenciesOf(source: SourceSpec | undefined): string[] {
+  if (source?.kind === "public-key") return [source.of];
+  if (source?.kind === "template") {
+    try {
+      return templateRefs(parseTemplate(source.template));
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+/** Reports each reference cycle once, at the variable where it is first entered. */
+function validateCycles(variables: Json, issues: string[]): void {
+  const state = new Map<string, "visiting" | "done">();
+  const stack: string[] = [];
+  const deps = (name: string): string[] => {
+    const spec = variables[name];
+    if (!isObject(spec) || !isObject(spec.source) || (spec.source.kind !== "template" && spec.source.kind !== "public-key")) return [];
+    if (spec.source.kind === "public-key" && typeof spec.source.of !== "string") return [];
+    if (spec.source.kind === "template" && typeof spec.source.template !== "string") return [];
+    return dependenciesOf(spec.source as unknown as SourceSpec).filter((d) => d !== name && Object.hasOwn(variables, d));
+  };
+  const visit = (name: string): void => {
+    state.set(name, "visiting");
+    stack.push(name);
+    for (const dep of deps(name)) {
+      if (state.get(dep) === "visiting") {
+        const cycle = [...stack.slice(stack.indexOf(dep)), dep];
+        issues.push(`variables.${dep}.source.template: reference cycle ${cycle.join(" -> ")}`);
+      } else if (!state.has(dep)) {
+        visit(dep);
+      }
+    }
+    stack.pop();
+    state.set(name, "done");
+  };
+  for (const name of Object.keys(variables)) if (!state.has(name)) visit(name);
+}
+
+function validateSource(path: string, name: string, source: unknown, variables: Json, issues: string[]): void {
   if (!isObject(source)) {
     issues.push(`${path}: must be an object`);
     return;
@@ -171,13 +280,36 @@ function validateSource(path: string, source: unknown, issues: string[]): void {
       break;
     case "prompt":
       break;
-    case "generate": {
-      const bytes = source.bytes ?? 32;
-      if (!Number.isInteger(bytes) || (bytes as number) < GENERATE_MIN_BYTES || (bytes as number) > GENERATE_MAX_BYTES) {
-        issues.push(`${path}.bytes: must be an integer between ${GENERATE_MIN_BYTES} and ${GENERATE_MAX_BYTES}`);
+    case "generate":
+      validateGenerate(path, source, issues);
+      break;
+    case "public-key": {
+      const of = source.of;
+      if (typeof of !== "string" || !VARIABLE_NAME.test(of) || of === name) issues.push(`${path}.of: must name another variable`);
+      else if (!Object.hasOwn(variables, of)) issues.push(`${path}.of: unknown variable "${of}"`);
+      else if (!isPrivateKeySource(variables[of])) {
+        issues.push(`${path}.of: "${of}" must use a generate rsa-private-key or ed25519-private-key source`);
       }
-      if (source.encoding !== undefined && source.encoding !== "base64url" && source.encoding !== "hex") {
-        issues.push(`${path}.encoding: must be "base64url" or "hex"`);
+      break;
+    }
+    case "template": {
+      const text = source.template;
+      if (typeof text !== "string" || text.length === 0 || text.length > MAX_TEMPLATE_LENGTH) {
+        issues.push(`${path}.template: must be a string of 1 to ${MAX_TEMPLATE_LENGTH} characters`);
+        break;
+      }
+      let refs: string[];
+      try {
+        refs = templateRefs(parseTemplate(text));
+      } catch (error) {
+        if (!(error instanceof TemplateSyntaxError)) throw error;
+        issues.push(`${path}.template: ${error.message}`);
+        break;
+      }
+      if (refs.length === 0) issues.push(`${path}.template: must reference at least one variable`);
+      for (const ref of refs) {
+        if (ref === name) issues.push(`${path}.template: references itself`);
+        else if (!Object.hasOwn(variables, ref)) issues.push(`${path}.template: unknown variable "${ref}"`);
       }
       break;
     }
@@ -188,11 +320,11 @@ function validateSource(path: string, source: unknown, issues: string[]): void {
       optionalString(`${path}.key`, source.key, VARIABLE_NAME, issues);
       break;
     default:
-      issues.push(`${path}.kind: must be one of op, keychain, prompt, generate, dotenv`);
+      issues.push(`${path}.kind: must be one of ${SOURCE_KINDS.join(", ")}`);
   }
 }
 
-function validateVariable(name: string, spec: unknown, targets: Json, issues: string[]): void {
+function validateVariable(name: string, spec: unknown, targets: Json, variables: Json, issues: string[]): void {
   const path = `variables.${name}`;
   if (RESERVED_VARIABLE_NAMES.includes(name.toLowerCase())) issues.push(`${path}: name is reserved`);
   else if (!VARIABLE_NAME.test(name)) issues.push(`${path}: name must match ${VARIABLE_NAME}`);
@@ -211,10 +343,11 @@ function validateVariable(name: string, spec: unknown, targets: Json, issues: st
   if (spec.value !== undefined && typeof spec.value !== "string") issues.push(`${path}.value: must be a string`);
   if (spec.source === undefined && spec.value === undefined) issues.push(`${path}: needs a source or a value`);
   if (spec.source !== undefined && spec.value !== undefined) issues.push(`${path}: use either source or value, not both`);
-  if (spec.source !== undefined && spec.sensitive === false) {
+  // A public key is the one derived value that is not secret.
+  if (spec.source !== undefined && spec.sensitive === false && !(isObject(spec.source) && spec.source.kind === "public-key")) {
     issues.push(`${path}.sensitive: must be true when a source is used; only literal values can be non-sensitive`);
   }
-  if (spec.source !== undefined) validateSource(`${path}.source`, spec.source, issues);
+  if (spec.source !== undefined) validateSource(`${path}.source`, name, spec.source, variables, issues);
 
   if (!Array.isArray(spec.targets) || spec.targets.length === 0) {
     issues.push(`${path}.targets: must be a non-empty list of target keys`);
@@ -259,6 +392,19 @@ export function planOperations(policy: Policy, selection: Selection = {}): Opera
   ];
   if (issues.length > 0) throw new PolicyError(issues);
 
+  const selected = (name: string, variable: VariableSpec) =>
+    (!selection.only || selection.only.includes(name)) &&
+    variable.targets.some((t) => !selection.targets || selection.targets.includes(t));
+  const written = new Set(Object.entries(policy.variables).filter(([n, v]) => selected(n, v)).map(([n]) => n));
+  for (const name of written) {
+    for (const dep of generatedDependencies(policy, name)) {
+      if (!written.has(dep)) {
+        issues.push(`selection: ${name} uses ${dep}, a generated value this selection does not write; select it too`);
+      }
+    }
+  }
+  if (issues.length > 0) throw new PolicyError(issues);
+
   const ops: Operation[] = [];
   for (const [name, variable] of Object.entries(policy.variables)) {
     if (selection.only && !selection.only.includes(name)) continue;
@@ -271,6 +417,24 @@ export function planOperations(policy: Policy, selection: Selection = {}): Opera
   return ops;
 }
 
+/** Generated variables a variable's value is derived from, directly or through other derived variables. */
+function generatedDependencies(policy: Policy, name: string): string[] {
+  const found: string[] = [];
+  const seen = new Set<string>([name]);
+  const walk = (current: string): void => {
+    for (const dep of dependenciesOf(policy.variables[current]?.source)) {
+      if (seen.has(dep)) continue;
+      seen.add(dep);
+      if (policy.variables[dep]?.source?.kind === "generate") found.push(dep);
+      walk(dep);
+    }
+  };
+  walk(name);
+  return found;
+}
+
+const ROTATES = " - NEW value on every apply";
+
 /** Human text for a source; dotenv paths are shown resolved against cwd, as zks will read them. */
 export function describeSource(source: SourceSpec | undefined, cwd: string): string {
   if (!source) return "literal";
@@ -282,8 +446,21 @@ export function describeSource(source: SourceSpec | undefined, cwd: string): str
     case "prompt":
       return "typed by you in a hidden dialog";
     case "generate":
-      return `NEW random value (${source.bytes ?? 32} bytes) - rotates on every apply`;
+      switch (source.format ?? "random") {
+        case "random":
+          return `NEW random value (${source.bytes ?? 32} bytes) - rotates on every apply`;
+        case "password":
+          return `generate password(${source.length ?? PASSWORD_DEFAULT_LENGTH})${ROTATES}`;
+        case "rsa-private-key":
+          return `generate rsa-private-key(${source.bits ?? RSA_DEFAULT_BITS})${ROTATES}`;
+        default:
+          return `generate ${source.format}${ROTATES}`;
+      }
     case "dotenv":
       return `dotenv ${resolvePath(cwd, source.path)}${source.key ? `#${source.key}` : ""}`;
+    case "public-key":
+      return `public-key of ${source.of}`;
+    case "template":
+      return `template(${dependenciesOf(source).join(", ")})`;
   }
 }
