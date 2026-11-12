@@ -47,7 +47,7 @@ Each spec quotes the list item the user selected by number, then the user's deci
 - T2 [S1] `install.sh --system` root-owned install under /usr/local/libexec/zks — P1 — inline — 5429b77 — done (launcher in /usr/local/libexec/zks/bin: /usr/local/bin is uid 501 here)
 - T3 [S3] capture in an isolated ego-browser profile/space — P1 — worker — 73bbc31 — done (page p1 confirmed against real ego; isolated flow not run against a real second profile)
 - T4 [S4] SBOM, npm audit in install/CI, pinned lockfile check — P1 — inline — 464388e — done (socket.dev skipped: needs account+token)
-- T5 [S5,S6] formatted generators and derived sources — P2 — pending
+- T5 [S5,S6] formatted generators and derived sources — P2 — worker — e77fbb4 — done (one ~975-line commit: generators and derived sources share the resolver; selection rule for derived values added)
 - T6 [S7] `zks rotate NAME` — P2 — pending
 - T7 [S8] `zks inventory` — P2 — pending
 - T8 [S9] plan effects — P2 — pending
