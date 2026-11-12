@@ -84,6 +84,28 @@ Agent                      ego-browser page              zks                    
 
 The agent never snapshots, screenshots or evaluates the page between the reveal and `about:blank`, nor after a fill, while a secret may be shown; zks does the reveal click itself. Once the click was attempted, zks sends the page to `about:blank` on every outcome, so on `not_found` after a reveal the agent reopens the token list without looking, deletes the orphan token by name and retries with another selector. One-time e-mail verification codes are not captured: the agent types them with normal ego actions.
 
+## Login sequence
+
+How the agent logs a browser into a website with a stored password (`zks capture login`). The username is a plain flag; the password stays in the Keychain item `--from`.
+
+```text
+Agent                      ego-browser page              zks                          macOS Keychain
+  │ zks capture login --recipe hostgator --user me@example.com --from hostgator/password --isolated
+  │───────────────────────────────────────────────────────▶│ validate, item exists        │
+  │◀════════ native dialog every time: origin, page, user, item, browser [Deny/Approve] ═══ human
+  │                          │◀── own script on stdin of `ego-browser nodejs` ────────────│
+  │                          │  goto --url, origin check   │                              │
+  │                          │  set user field (username)  │                              │
+  │                          │  focus password, re-check origin                           │
+  │                          │  security find-generic-password ───────────────────────────▶│
+  │                          │  type it (keyboard), confirm│                              │
+  │                          │  click submit, settle ≤ 15 s│                              │
+  │                          │── ZKS_RESULT {ok, loggedIn, finalOrigin, pending?} ─▶│ audit (origin, item)
+  │◀──── {ok, mode: "login", origin, from, loggedIn, finalOrigin, pending?, auditId} ─│
+```
+
+Branches: `loggedIn: true` → continue. `pending: "2fa" | "captcha"` (exit 0) → the agent stops and the human finishes the step in the browser. `pending: "unknown"` → the login did not go through; the agent reports it. `login_redirected` (exit 1) → the page left the origin; only `finalOrigin` is reported. Exit 3 → denied, nothing was read.
+
 ## Which source kind
 
 | The human says… | Source | Policy snippet | Note |

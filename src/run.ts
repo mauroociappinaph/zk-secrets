@@ -11,8 +11,9 @@ import type {
   MirrorResult,
   WrittenDestination,
 } from "./audit/types.ts";
-import { runCapture } from "./capture/run.ts";
-import { CAPTURE_WAIT_MS, type CaptureErrorCode, type CaptureOutcome } from "./capture/script.ts";
+import { LOGIN_RECIPES, loginRecipe } from "./capture/recipes.ts";
+import { runCapture, runLogin } from "./capture/run.ts";
+import { CAPTURE_WAIT_MS, type CaptureErrorCode, type CaptureOutcome, type LoginPending } from "./capture/script.ts";
 import { MAX_LINES, type HumanChannel } from "./gate/dialog.ts";
 import { SAFE_PATH, resolveExecutable, type Exec, type SpawnInherited, type SpawnedChild } from "./platform/exec.ts";
 import { ZKS_KEYCHAIN_SERVICE, type Keychain } from "./platform/keychain.ts";
@@ -140,6 +141,12 @@ const FLAGS_WITH_VALUE = [
   "--generate",
   "--from",
   "--url",
+  "--user",
+  "--user-selector",
+  "--password-selector",
+  "--submit-selector",
+  "--success-selector",
+  "--recipe",
 ];
 
 /** Options each command uses; any other option is refused. --help and --version are global. */
@@ -155,13 +162,29 @@ const COMMAND_FLAGS: Record<string, string[]> = {
   "audit list": ["--limit", "--project"],
   "capture read": ["--space", "--page", "--selector", "--store", "--click", "--origin", "--isolated", "--url"],
   "capture fill": ["--space", "--page", "--selector", "--store", "--generate", "--from", "--origin", "--isolated", "--url"],
+  "capture login": [
+    "--origin",
+    "--url",
+    "--user",
+    "--user-selector",
+    "--password-selector",
+    "--submit-selector",
+    "--success-selector",
+    "--from",
+    "--recipe",
+    "--agent",
+    "--isolated",
+    "--space",
+    "--page",
+  ],
+  "capture recipes": [],
 };
 const SUBCOMMANDS: Record<string, string[]> = {
   auth: ["status", "set", "delete"],
   audit: ["list", "verify", "sync"],
   config: ["show", "set", "unset"],
   trust: ["list", "remove"],
-  capture: ["read", "fill"],
+  capture: ["read", "fill", "login", "recipes"],
 };
 const COMMANDS = ["init", "validate", "plan", "apply", "rotate", "run", "inventory", "doctor", ...Object.keys(SUBCOMMANDS)];
 
@@ -225,7 +248,7 @@ function positionalLimit(command: string, sub: string | undefined): number | und
     case "trust":
       return sub === "list" ? 2 : sub === "remove" ? 3 : undefined;
     case "capture":
-      return sub === "read" || sub === "fill" ? 2 : undefined;
+      return sub === "read" || sub === "fill" || sub === "login" || sub === "recipes" ? 2 : undefined;
     default:
       return undefined;
   }
@@ -1273,6 +1296,7 @@ const CAPTURE_ERRORS: Record<CaptureFailure, string> = {
   isolated_profile_missing: "the configured capture-profile is not an ego-browser profile; nothing was read or filled",
   isolated_profile_not_isolated: "the configured capture-profile is the default ego-browser profile; pick a separate profile",
   login_required: "the isolated page did not stay on --origin; log in to the site once in the capture profile; nothing was read or filled",
+  login_redirected: "the page left --origin during the login",
   restore_failed: "the previous value of the Keychain item could not be written back",
 };
 
@@ -1396,6 +1420,10 @@ function keychainRef(value: string, flag: string): { service: string; account: s
  * approval, and so does filling a stored item into any origin other than the one it came from.
  */
 async function capture(deps: Deps, sub: string | undefined, flags: Map<string, string>, redactor: Redactor): Promise<RunOutput> {
+  if (sub === "recipes") {
+    return json(EXIT_OK, { ok: true, recipes: Object.entries(LOGIN_RECIPES).map(([name, recipe]) => ({ name, ...recipe })) });
+  }
+  if (sub === "login") return captureLogin(deps, flags);
   const req = parseCapture(sub, flags);
   const store = `${req.service}/${req.account}`;
   const base = { command: "capture", mode: req.mode, store, origin: req.origin, ...(req.isolated ? { isolated: true } : {}) };
@@ -1551,6 +1579,210 @@ async function capture(deps: Deps, sub: string | undefined, flags: Map<string, s
     } finally {
       previous?.dispose();
     }
+  } finally {
+    audit.close();
+  }
+}
+
+const LOGIN_USAGE =
+  "usage: zks capture login --origin ORIGIN --url URL --user USERNAME --user-selector CSS --password-selector CSS " +
+  "--submit-selector SELECTOR --from SERVICE/ACCOUNT [--success-selector CSS] [--recipe NAME] [--agent LABEL] " +
+  "(--isolated | --space ID --page LABEL)";
+/** A login name or e-mail: printable ASCII, no leading or trailing space. Not a secret, but never echoed. */
+const LOGIN_USER = /^[\x21-\x7E](?:[\x20-\x7E]{0,252}[\x21-\x7E])?$/;
+
+interface LoginRequest {
+  /** null for --isolated. */
+  space: number | null;
+  page: string | null;
+  isolated: boolean;
+  origin: string;
+  url: string;
+  user: string;
+  userSelector: string;
+  passwordSelector: string;
+  submitSelector: string;
+  successSelector: string | null;
+  service: string;
+  account: string;
+  agent: string | undefined;
+}
+
+/** Validates `capture login`, with a --recipe filling only the flags that were not given. Never echoes a value. */
+function parseLogin(flags: Map<string, string>): LoginRequest {
+  const recipeName = flags.get("--recipe");
+  const recipe = recipeName === undefined ? null : loginRecipe(recipeName);
+  if (recipeName !== undefined && recipe === null) throw new UsageError("unknown recipe; `zks capture recipes` lists them");
+  if (recipe !== null && recipe.requiresOrigin && !flags.has("--origin")) throw new UsageError(`recipe ${recipeName} needs --origin`);
+  const origin = flags.get("--origin") ?? recipe?.origin ?? undefined;
+  const url = flags.get("--url") ?? recipe?.url ?? (recipe !== null && origin !== undefined ? `${origin}/` : undefined);
+  const user = flags.get("--user");
+  const userSelector = flags.get("--user-selector") ?? recipe?.userSelector;
+  const passwordSelector = flags.get("--password-selector") ?? recipe?.passwordSelector;
+  const submitSelector = flags.get("--submit-selector") ?? recipe?.submitSelector;
+  const successSelector = flags.get("--success-selector") ?? recipe?.successSelector ?? null;
+  const from = flags.get("--from");
+  const isolated = flags.has("--isolated");
+  const space = flags.get("--space");
+  const page = flags.get("--page");
+  if (isolated && (space !== undefined || page !== undefined)) throw new UsageError("--isolated cannot be combined with --space or --page");
+  if (
+    origin === undefined || url === undefined || user === undefined || userSelector === undefined || passwordSelector === undefined ||
+    submitSelector === undefined || from === undefined || (!isolated && (space === undefined || page === undefined))
+  ) {
+    throw new UsageError(LOGIN_USAGE);
+  }
+  if (!isolated) {
+    if (!CAPTURE_SPACE.test(space as string)) throw new UsageError("--space must be a positive integer (the TaskSpace id)");
+    if (!CAPTURE_PAGE.test(page as string)) throw new UsageError("--page must be an ego page label (letters, digits, _ or -, at most 32)");
+  }
+  if (origin.length > MAX_CAPTURE_ORIGIN || !CAPTURE_ORIGIN.test(origin)) {
+    throw new UsageError("--origin must be https://host[:port] or http://127.0.0.1|localhost[:port]");
+  }
+  if (new URL(checkedCaptureUrl(url)).origin !== origin) throw new UsageError("--url must be on --origin");
+  if (!LOGIN_USER.test(user)) throw new UsageError("--user must be 1-254 printable ASCII characters");
+  const selectors: Array<[string, string | null]> = [
+    ["--user-selector", userSelector],
+    ["--password-selector", passwordSelector],
+    ["--submit-selector", submitSelector],
+    ["--success-selector", successSelector],
+  ];
+  for (const [flag, value] of selectors) {
+    if (value !== null && !CAPTURE_SELECTOR.test(value)) throw new UsageError(`${flag} must be 1-300 printable ASCII characters`);
+  }
+  const { service, account } = keychainRef(from, "--from");
+  if (service.toLowerCase() === ZKS_KEYCHAIN_SERVICE) throw new UsageError("capture login cannot use the Keychain service zks");
+  return {
+    space: isolated ? null : Number(space),
+    page: isolated ? null : (page as string),
+    isolated,
+    origin,
+    url,
+    user,
+    userSelector,
+    passwordSelector,
+    submitSelector,
+    successSelector,
+    service,
+    account,
+    agent: flags.get("--agent"),
+  };
+}
+
+/**
+ * Logs an ego-browser session into a site with a stored password: zks's own script sets the
+ * username, reads the Keychain item and types it into the password field inside ego, submits and
+ * reports booleans only. Every login asks first (no trust); the audit holds the origin and the item.
+ */
+async function captureLogin(deps: Deps, flags: Map<string, string>): Promise<RunOutput> {
+  const req = parseLogin(flags);
+  const item = `${req.service}/${req.account}`;
+  const base = { command: "capture", mode: "login", origin: req.origin, from: item, ...(req.isolated ? { isolated: true } : {}) };
+  const audit = deps.openAudit();
+  try {
+    let approval: ApprovalMode | undefined;
+    const finish = async (
+      result: AuditResult,
+      outcome: { code: CaptureFailure; message?: string; finalOrigin?: string } | { loggedIn: boolean; finalOrigin: string; pending?: LoginPending },
+    ) => {
+      const entry = audit.append({
+        ts: deps.now().toISOString(),
+        actorHuman: deps.user,
+        actorAgent: req.agent ?? deps.agentId,
+        project: req.service,
+        provider: "capture",
+        target: req.origin,
+        environment: "",
+        variableName: item,
+        action: "capture",
+        sensitive: true,
+        sourceKind: "capture-login",
+        result,
+        providerVersion: "",
+        errorCode: "code" in outcome ? outcome.code : "",
+        ...(approval ? { approval } : {}),
+      });
+      const anchorError = await saveAnchor(deps, audit);
+      const mirror = await deps.mirror.sync(audit);
+      if (!("code" in outcome)) {
+        return json(EXIT_OK, {
+          ok: true,
+          ...base,
+          loggedIn: outcome.loggedIn,
+          finalOrigin: outcome.finalOrigin,
+          ...(outcome.pending ? { pending: outcome.pending } : {}),
+          auditId: entry.auditId,
+          mirror,
+          ...anchorError,
+        });
+      }
+      return json(result === "denied" ? EXIT_DENIED : EXIT_FAILED, {
+        ok: false,
+        ...base,
+        error: { code: outcome.code, message: outcome.message ?? CAPTURE_ERRORS[outcome.code] },
+        ...(outcome.finalOrigin !== undefined ? { finalOrigin: outcome.finalOrigin } : {}),
+        auditId: entry.auditId,
+        mirror,
+        ...anchorError,
+      });
+    };
+
+    const egoBrowser = deps.tools.egoBrowser;
+    if (!egoBrowser) return await finish("failed", { code: "browser_failed" });
+    const profileId = req.isolated ? captureProfile(await deps.readConfig()) : null;
+    if (req.isolated && profileId === null) return await finish("failed", { code: "isolated_profile_unset" });
+    if (!(await deps.keychain.has(req.service, req.account))) return await finish("failed", { code: "not_found" });
+
+    // Metadata only: where the item came from, and whether it changed since that capture.
+    const recorded = audit.lastCapture(item);
+    const modified = await deps.keychain.modifiedAt(req.service, req.account);
+    const from = recorded?.origin || "unknown";
+    const changed = recorded !== null && (recorded.itemModified === "" || modified === null || modified.toISOString() !== recorded.itemModified);
+    const browser = req.isolated ? `isolated ego-browser profile ${profileId}` : `TaskSpace ${req.space}, page ${req.page}`;
+    const lines = [
+      `Log in to ${req.origin}?`,
+      `Page: ${req.url}`,
+      `User: ${req.user}`,
+      `Password: Keychain item ${item}, typed into the password field, then the form is submitted (log in).`,
+      changed ? `The item was captured from ${from}, but it changed after that capture.` : `The item was captured from ${from}.`,
+      `Browser: ${browser}; the logged-in session then stays in that browser profile.`,
+      "zks asks on every login.",
+    ];
+    if (lines.some((line) => line.length > MAX_DIALOG_LINE)) {
+      return json(EXIT_USAGE, {
+        ok: false,
+        error: { code: "dialog_too_long", message: "the approval text is too long for one dialog (a line over 300 characters: shorten --url or --user)" },
+      });
+    }
+    approval = "dialog";
+    if (!(await deps.human.approve("zks: log in to a website", lines))) {
+      return await finish("denied", { code: "not_approved", message: "the login was not approved; nothing was read" });
+    }
+
+    const outcome = await runLogin(deps.exec, egoBrowser, {
+      mode: "login",
+      space: req.space,
+      page: req.page,
+      selector: req.passwordSelector,
+      click: null,
+      origin: req.origin,
+      service: req.service,
+      account: req.account,
+      waitMs: CAPTURE_WAIT_MS,
+      ...(req.isolated && profileId !== null
+        ? { isolated: { profileId, url: req.url, name: `zks-capture-${(deps.randomBytes ?? nodeRandomBytes)(8).toString("hex")}` } }
+        : {}),
+      login: { url: req.url, user: req.user, userSelector: req.userSelector, submitSelector: req.submitSelector, successSelector: req.successSelector },
+    });
+    if (outcome.ok) return await finish("applied", outcome);
+    if (outcome.code === "login_redirected") {
+      return await finish("failed", {
+        code: "login_redirected",
+        message: `the page left --origin during the login (final origin ${outcome.finalOrigin})`,
+        finalOrigin: outcome.finalOrigin,
+      });
+    }
+    return await finish("failed", { code: outcome.code });
   } finally {
     audit.close();
   }

@@ -97,6 +97,12 @@ zks capture fill --isolated --url URL --selector CSS (--store SERVICE/ACCOUNT --
                  | --from SERVICE/ACCOUNT) --origin ORIGIN
                                             Same, in a space zks opens itself in the capture-profile
                                             (not the agent's session) at URL, closed afterwards
+zks capture login --origin ORIGIN --url URL --user USERNAME --user-selector CSS --password-selector CSS
+                  --submit-selector SELECTOR --from SERVICE/ACCOUNT [--success-selector CSS] [--recipe NAME]
+                  [--agent LABEL] (--isolated | --space ID --page LABEL)
+                                            Log the browser into a site with a stored password
+                                            (never shown); always asks first
+zks capture recipes                         List login recipes (hostgator, cpanel)
 zks audit list [--limit N] [--project P]    Show audit records (metadata only)
 zks audit verify                            Check the audit hash chain
 zks audit sync                              Push pending audit records to Google Sheets
@@ -300,7 +306,28 @@ zks capture read --isolated --url https://vercel.com/account/settings/tokens --c
 - Output adds `isolated: true`. A replacement dialog says `New value: read from <origin> (isolated ego-browser profile <id>)`.
 - Honest limit: the agent never gets the space id and never drives that space, but it runs as the same macOS user. While the capture runs, a same-user agent can still list and claim the space by id through ego-browser, or edit `config.json` to point at another non-default profile. `--isolated` narrows the window; a hard boundary still needs a dedicated macOS user for the agent.
 
-- Every capture is audited: `provider: "keychain"`, `action: "capture"`, `target: "<service>/<account>"`, `environment: <origin>`, `sourceKind: capture-read|capture-generate|capture-from`, result `applied`, `failed` or `denied`. Like `apply`, every capture then pushes pending records to the Sheets mirror (best effort) and reports it in `mirror`.
+### Login (`capture login`)
+
+Logs the agent's browser into a website (a hosting panel, a dashboard) with a password stored in the Keychain, which the agent never sees. The username (an e-mail or login name) is not a secret and is passed as a plain flag:
+
+```sh
+zks capture login --recipe hostgator --user me@example.com --from hostgator/password --isolated
+zks capture login --origin https://host.example.com:2083 --recipe cpanel --user me --from cpanel/password \
+  --space 7 --page p1
+zks capture login --origin https://app.example.com --url https://app.example.com/login --user me@example.com \
+  --user-selector "#email" --password-selector "#password" --submit-selector "button[type=submit]" \
+  --success-selector "[data-test=dashboard]" --from example/password --space 7 --page p1
+```
+
+- The approval dialog opens on **every** login (no Always allow, no trust): it names the origin, the page, the username, the Keychain item and what happens ("typed into the password field, then the form is submitted"), where the item was captured from, and the browser (TaskSpace/page or the isolated profile). Denial exits 3, is audited `denied` and reads nothing. A dialog line over 300 characters is `dialog_too_long` (exit 2).
+- The script (same guarantees as `fill --from`): goes to `--url` (on `--origin`; a pinned `zks` item is never used, any other origin is allowed because you approve it), checks the origin, sets the user field (exactly one non-password input) to the username, then fills the password field through fill's path (one `<input type="password">`, Keychain read inside ego, typed through the keyboard, never in the script, argv, env, output or audit), clicks `--submit-selector` and waits up to 15 s for the page to settle. A failure before the submit blanks the password field and leaves the page on `about:blank`.
+- Result, exit 0: `{ok: true, command: "capture", mode: "login", origin, from, loggedIn, finalOrigin, pending?, auditId, mirror}`. `loggedIn` is true when `--success-selector` is given and found, or, without it, when the password field is gone and no one-time-code input or captcha shows. Otherwise `loggedIn: false` with `pending`: `captcha` (an iframe whose host contains `captcha`, or a `/recaptcha/` frame), `2fa` (an `input` of type `tel` or `number`, or `autocomplete="one-time-code"`) or `unknown` (the password field is still there: wrong password, or the page did not react). Pending is not an error: the human finishes the 2FA or captcha in the browser. Give `--success-selector` when the logged-in page has number or phone inputs, or they read as `2fa`.
+- Leaving `--origin` during the flow (a login wall on another origin, an SSO hop) is `login_redirected` (exit 1) with `finalOrigin` (the origin only, never the path). Other errors as `fill`: `not_found` (item, user field or submit), `not_password_field`, `keychain_failed`, `browser_failed`, `isolated_profile_*`.
+- Recipes: `--recipe NAME` fills the flags you did not give; explicit flags win. `zks capture recipes` lists them as JSON. `hostgator` (`https://portal.hostgator.com/login`, `input[name=email]`, `input[name=password]`, `button[type=submit]`); `cpanel` (your own host, so it needs `--origin`; `--url` defaults to `<origin>/`; `#user`, `#pass`, `#login_submit`). Both are `verified: false`: the selectors come from public documentation and are confirmed on the first real run; if one does not match, pass that flag explicitly.
+- Audit: `provider: "capture"`, `action: "capture"`, `sourceKind: "capture-login"`, `target: <origin>`, `variableName: "<service>/<account>"`, result `applied` (the form was submitted, logged in or pending), `denied` or `failed`. The username is not recorded.
+- Honest limit: the logged-in session then lives in that browser profile, and an agent driving the profile can use it. Prefer `--isolated` (the session stays in the capture profile, not the agent's; the space is closed afterwards, so a pending 2FA or captcha is finished by the human in that profile) and log out when done. The username appears in the dialog and in the script piped to ego.
+
+- Every capture is audited: `provider: "keychain"`, `action: "capture"`, `target: "<service>/<account>"`, `environment: <origin>`, `sourceKind: capture-read|capture-generate|capture-from`, result `applied`, `failed` or `denied` (a login is recorded as above). Like `apply`, every capture then pushes pending records to the Sheets mirror (best effort) and reports it in `mirror`.
 
 ## Exit codes
 

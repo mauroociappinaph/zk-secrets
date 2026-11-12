@@ -16,7 +16,8 @@ Ask the human **only** for:
 - a captcha;
 - 2FA, a passkey or a security key;
 - a browser-owned prompt (permissions, device chooser) — call `task.handOff()`, say what to do, resume after;
-- the zks approval dialog for a new destination, for replacing a Keychain item, or for filling a stored item into another origin than it came from.
+- the zks approval dialog for a new destination, for replacing a Keychain item, for filling a stored item into another origin than it came from, or for a `zks capture login` (every time);
+- a 2FA code or captcha after a `zks capture login` reports `pending`.
 
 ### How `zks capture` keeps the value away from you
 
@@ -31,6 +32,16 @@ You drive the non-secret steps in one ego-browser TaskSpace (print its `spaceId`
 - `--origin` (for example `https://api.example.com`) is mandatory for `fill`; always pass it for `read` too. zks checks the page is on it before clicking or reading, and again inside the fill itself.
 - After a `--click`, zks leaves the page on `about:blank` whatever happens, success or failure.
 - **Prefer `--isolated` when a capture profile is configured** (`zks config show` lists `capture.profileId`). Do the non-secret steps in your own TaskSpace, then run the secret step with `--isolated --url <page that shows the reveal button> --origin <origin>` instead of `--space`/`--page`: zks opens its own space in that separate ego profile (the human's provider logins, not your session), goes to the URL, runs the step and closes the space. Your form input does not carry over, so use it where the URL alone reaches the reveal button (or `--click` does the whole step). Errors: `isolated_profile_unset` (no profile: fall back to `--space`/`--page`; do not run `zks config set capture-profile` yourself, it is the human's setup), `isolated_profile_missing` or `isolated_profile_not_isolated` (tell the human the profile is wrong), `login_required` (ask the human to log in to that site once in the capture profile). Never list, claim or drive a `zks-capture-*` space.
+
+### Logging in to a website (`zks capture login`)
+
+When a task needs a website login (a hosting panel such as HostGator or cPanel, a dashboard), use `zks capture login`; never ask the human for the password and never type it yourself. The password must already be a Keychain item (one zks generated at sign-up with `fill --generate`, or one the human keeps there); the username is not a secret and goes in `--user`.
+
+- Known sites: `zks capture recipes` lists recipes. `zks capture login --recipe hostgator --user <email> --from <svc>/<account> --isolated` (or `--space ID --page p1`). cPanel: `--recipe cpanel --origin https://<host>:2083`.
+- Other sites: snapshot the login page first (no secret shown), then `zks capture login --origin <origin> --url <login page> --user <email> --user-selector <css> --password-selector <css> --submit-selector <selector> [--success-selector <css of something only the logged-in page shows>] --from <svc>/<account> (--isolated | --space ID --page p1)`.
+- A dialog opens on every login; tell the human it will ask and wait. Exit 3: denied, ask before retrying.
+- `loggedIn: true`: continue. `loggedIn: false` with `pending: "2fa"` or `"captcha"`: stop and tell the human to finish the 2FA or captcha in the browser, then continue. `pending: "unknown"`: the login did not go through (wrong password or selectors); snapshot the page (the field was submitted, so no password is shown), tell the human, do not loop. `login_redirected`: the page left the origin; report `finalOrigin` and do not retry blindly.
+- Prefer `--isolated` when a capture profile is configured; log out when the task is done.
 
 ### Flow A — missing provider token (`missing_token` for Vercel, Railway or Supabase)
 

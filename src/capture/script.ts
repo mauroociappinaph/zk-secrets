@@ -18,15 +18,36 @@ export const CAPTURE_ERROR_CODES = [
   "isolated_profile_missing",
   "isolated_profile_not_isolated",
   "login_required",
+  "login_redirected",
 ] as const;
 export type CaptureErrorCode = (typeof CAPTURE_ERROR_CODES)[number];
 export type CaptureOutcome = { ok: true; length: number } | { ok: false; code: CaptureErrorCode };
 
+export const LOGIN_PENDING = ["2fa", "captcha", "unknown"] as const;
+export type LoginPending = (typeof LOGIN_PENDING)[number];
+/** A login reports whether it worked, never a value; login_redirected carries only the final origin. */
+export type LoginOutcome =
+  | { ok: true; loggedIn: boolean; finalOrigin: string; pending?: LoginPending }
+  | { ok: false; code: "login_redirected"; finalOrigin: string }
+  | { ok: false; code: Exclude<CaptureErrorCode, "login_redirected"> };
+
+/** The non-secret part of a login: the page, the username and the form's selectors. */
+export interface LoginScriptSpec {
+  url: string;
+  user: string;
+  userSelector: string;
+  submitSelector: string;
+  successSelector: string | null;
+}
+
 const MAX_LENGTH = 100_000;
 
 export interface CaptureScriptSpec {
-  /** read: take the element's value into the Keychain item; fill: put the Keychain item into the element. */
-  mode: "read" | "fill";
+  /**
+   * read: take the element's value into the Keychain item; fill: put the Keychain item into the element;
+   * login: set the user field, fill the Keychain item into `selector` (the password field) and submit.
+   */
+  mode: "read" | "fill" | "login";
   /** The agent's TaskSpace and page; null for an isolated capture. */
   space: number | null;
   page: string | null;
@@ -43,6 +64,8 @@ export interface CaptureScriptSpec {
    * it, goes to `url` and always finishes the space with keep: []. Absent for --space/--page.
    */
   isolated?: { profileId: string; url: string; name: string };
+  /** Required for login; `waitMs` also bounds how long the script waits for the page to settle after submit. */
+  login?: LoginScriptSpec;
 }
 
 /**
@@ -258,6 +281,138 @@ async function fill(page) {
   return confirmed.ok ? { ok: true, length } : confirmed;
 }
 
+/** The page's origin only ("null" when it has none); never its path or query. */
+async function currentOrigin(page) {
+  try {
+    return new URL(await page.url()).origin;
+  } catch {
+    return "null";
+  }
+}
+
+async function redirected(page) {
+  return { ok: false, code: "login_redirected", finalOrigin: await currentOrigin(page) };
+}
+
+async function waitFor(page, selector) {
+  try {
+    await page.waitForSelector(selector, { state: "attached", timeout: spec.waitMs });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Runs in the page without the secret: same origin, exactly one non-password input, set like a user would. */
+function setUser({ selector, expected, user }) {
+  if (document.location.origin !== expected) return { ok: false, code: "origin_mismatch" };
+  const nodes = document.querySelectorAll(selector);
+  const node = nodes.length === 1 ? nodes[0] : null;
+  if (!(node instanceof HTMLInputElement) || node.type === "password") return { ok: false, code: "not_found" };
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(node, user);
+  node.dispatchEvent(new Event("input", { bubbles: true }));
+  node.dispatchEvent(new Event("change", { bubbles: true }));
+  return { ok: true };
+}
+
+/** Runs in the page after submit, without the secret: what the page shows now, as booleans only. */
+function inspectLogin({ expected, passwordSelector, successSelector }) {
+  if (document.location.origin !== expected) return { away: true };
+  const any = (selector) => {
+    try {
+      return document.querySelectorAll(selector).length > 0;
+    } catch {
+      return false;
+    }
+  };
+  let captcha = false;
+  for (const frame of document.querySelectorAll("iframe")) {
+    try {
+      const src = new URL(frame.getAttribute("src") || "", document.location.href);
+      if (/captcha/i.test(src.hostname) || /^\\/recaptcha\\//i.test(src.pathname)) captcha = true;
+    } catch {}
+  }
+  return {
+    success: successSelector === null ? false : any(successSelector),
+    password: any(passwordSelector),
+    otp: any('input[type="tel"], input[type="number"], input[autocomplete="one-time-code"]'),
+    captcha,
+  };
+}
+
+async function loginState(page) {
+  const origin = await currentOrigin(page);
+  if (origin !== spec.origin) return { origin, away: true };
+  let seen = null;
+  try {
+    seen = await page.evaluate(inspectLogin, { expected: spec.origin, passwordSelector: spec.selector, successSelector: spec.login.successSelector });
+  } catch {}
+  const s = seen !== null && typeof seen === "object" ? seen : {};
+  if (s.away === true) return { origin, away: true };
+  // An unreadable page counts as still showing the password field: fail towards loggedIn false.
+  const state = { origin, away: false, success: s.success === true, password: s.password !== false, otp: s.otp === true, captcha: s.captcha === true };
+  state.done = state.success || state.otp || state.captcha || (spec.login.successSelector === null && !state.password);
+  return state;
+}
+
+/** Waits, bounded by waitMs, for the page to show a result; leaving the origin twice in a row ends it. */
+async function settle(page) {
+  const deadline = Date.now() + spec.waitMs;
+  let away = 0;
+  for (;;) {
+    await sleep(Math.min(250, spec.waitMs));
+    const state = await loginState(page);
+    if (state.away) {
+      if (++away >= 2) return state;
+    } else {
+      away = 0;
+      if (state.done) return state;
+    }
+    if (Date.now() >= deadline) return state;
+  }
+}
+
+// Login: the user field gets the (non-secret) username, the password goes through fill's typing
+// path, then zks clicks submit and reports only booleans about the page that follows.
+async function login(page, navigated) {
+  const L = spec.login;
+  if (!navigated) await page.goto(L.url);
+  if (!(await originMatches(page))) return await redirected(page);
+  if (!(await waitFor(page, L.userSelector))) return { ok: false, code: "not_found" };
+  const set = await page.evaluate(setUser, { selector: L.userSelector, expected: spec.origin, user: L.user });
+  if (set === null || typeof set !== "object" || set.ok !== true) {
+    if (set !== null && typeof set === "object" && set.code === "origin_mismatch") return await redirected(page);
+    return { ok: false, code: set !== null && typeof set === "object" && set.code === "not_found" ? "not_found" : "browser_failed" };
+  }
+  const filled = await fill(page);
+  if (!filled.ok) return filled.code === "origin_mismatch" ? await redirected(page) : filled;
+  // The password is in the field now: any failure before the submit wipes it and leaves the page.
+  let submitted = false;
+  try {
+    if (!(await originMatches(page))) return await redirected(page);
+    try {
+      await page.click(L.submitSelector, { timeout: spec.waitMs });
+    } catch {
+      return { ok: false, code: "not_found" };
+    }
+    submitted = true;
+  } finally {
+    if (!submitted) {
+      try { await page.evaluate(clearAfterFailure, spec.selector); } catch {}
+      try { await page.goto("about:blank"); } catch {}
+    }
+  }
+  const state = await settle(page);
+  if (state.away) return { ok: false, code: "login_redirected", finalOrigin: state.origin };
+  const loggedIn = L.successSelector !== null ? state.success : !state.password && !state.otp && !state.captcha;
+  if (loggedIn) return { ok: true, loggedIn: true, finalOrigin: state.origin };
+  return { ok: true, loggedIn: false, finalOrigin: state.origin, pending: state.captcha ? "captcha" : state.otp ? "2fa" : "unknown" };
+}
+
+function step(page, navigated) {
+  return spec.mode === "read" ? read(page) : spec.mode === "login" ? login(page, navigated) : fill(page);
+}
+
 // Isolated: the profile must exist and must not be the default one (the agent's own session).
 // zks creates the space itself, lands on --url and, whatever happens, finishes it keeping nothing.
 async function isolated(iso) {
@@ -271,8 +426,8 @@ async function isolated(iso) {
   try {
     const page = task.page(ISOLATED_PAGE);
     await page.goto(iso.url);
-    if (!(await originMatches(page))) return { ok: false, code: "login_required" };
-    return spec.mode === "read" ? await read(page) : await fill(page);
+    if (!(await originMatches(page))) return spec.mode === "login" ? await redirected(page) : { ok: false, code: "login_required" };
+    return await step(page, true);
   } finally {
     try {
       await task.finish({ keep: [] });
@@ -287,7 +442,7 @@ try {
   } else {
     const task = await taskSpace(spec.space);
     const page = task.page(spec.page);
-    result = spec.mode === "read" ? await read(page) : await fill(page);
+    result = await step(page, false);
   }
 } catch {
   result = { ok: false, code: "browser_failed" };
@@ -313,6 +468,17 @@ export function buildCaptureScript(spec: CaptureScriptSpec, security: string = S
     ...(spec.isolated
       ? { isolated: { profileId: spec.isolated.profileId, url: spec.isolated.url, name: spec.isolated.name } }
       : {}),
+    ...(spec.login
+      ? {
+          login: {
+            url: spec.login.url,
+            user: spec.login.user,
+            userSelector: spec.login.userSelector,
+            submitSelector: spec.login.submitSelector,
+            successSelector: spec.login.successSelector,
+          },
+        }
+      : {}),
   };
   return (
     "// zks capture script (generated). Prints exactly one line: ZKS_RESULT <metadata json>.\n" +
@@ -323,24 +489,61 @@ export function buildCaptureScript(spec: CaptureScriptSpec, security: string = S
 
 const FAILED: CaptureOutcome = { ok: false, code: "browser_failed" };
 
-/** Reads the one marker line of ego-browser output; anything else, or more than one marker, is browser_failed. */
-export function parseCaptureOutput(text: string): CaptureOutcome {
+/** The one marker line's JSON object, or null when there is not exactly one valid marker. */
+function markerObject(text: string): Record<string, unknown> | null {
   const markers = text.split(/\r?\n/).filter((line) => line.startsWith(CAPTURE_MARKER));
-  if (markers.length !== 1) return FAILED;
+  if (markers.length !== 1) return null;
   let parsed: unknown;
   try {
     parsed = JSON.parse((markers[0] as string).slice(CAPTURE_MARKER.length));
   } catch {
-    return FAILED;
+    return null;
   }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return FAILED;
-  const result = parsed as Record<string, unknown>;
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+  return parsed as Record<string, unknown>;
+}
+
+/** An origin as URL.origin prints it ("null" for about:blank); never a path, query or space. */
+const FINAL_ORIGIN = /^(?:null|[a-z][a-z0-9+.-]{0,30}:\/\/[A-Za-z0-9.\-[\]:]{1,260})$/;
+
+/** Reads a login's marker line; only the documented shapes pass, anything else is browser_failed. */
+export function parseLoginOutput(text: string): LoginOutcome {
+  const result = markerObject(text);
+  if (result === null) return FAILED as LoginOutcome;
+  const keys = Object.keys(result).sort().join(",");
+  const origin = result.finalOrigin;
+  const validOrigin = typeof origin === "string" && FINAL_ORIGIN.test(origin);
+  if (result.ok === true && validOrigin) {
+    if (keys === "finalOrigin,loggedIn,ok" && result.loggedIn === true) return { ok: true, loggedIn: true, finalOrigin: origin };
+    if (
+      keys === "finalOrigin,loggedIn,ok,pending" &&
+      result.loggedIn === false &&
+      (LOGIN_PENDING as readonly unknown[]).includes(result.pending)
+    ) {
+      return { ok: true, loggedIn: false, finalOrigin: origin, pending: result.pending as LoginPending };
+    }
+    return FAILED as LoginOutcome;
+  }
+  if (result.ok === false && result.code === "login_redirected") {
+    return keys === "code,finalOrigin,ok" && validOrigin ? { ok: false, code: "login_redirected", finalOrigin: origin } : (FAILED as LoginOutcome);
+  }
+  if (result.ok === false && keys === "code,ok" && (CAPTURE_ERROR_CODES as readonly unknown[]).includes(result.code)) {
+    return { ok: false, code: result.code as Exclude<CaptureErrorCode, "login_redirected"> };
+  }
+  return FAILED as LoginOutcome;
+}
+
+/** Reads the one marker line of ego-browser output; anything else, or more than one marker, is browser_failed. */
+export function parseCaptureOutput(text: string): CaptureOutcome {
+  const result = markerObject(text);
+  if (result === null) return FAILED;
   const keys = Object.keys(result).sort().join(",");
   if (result.ok === true && keys === "length,ok") {
     const length = result.length;
     return typeof length === "number" && Number.isInteger(length) && length > 0 && length <= MAX_LENGTH ? { ok: true, length } : FAILED;
   }
-  if (result.ok === false && keys === "code,ok" && (CAPTURE_ERROR_CODES as readonly unknown[]).includes(result.code)) {
+  // login_redirected belongs to a login only; a read or fill never reports it.
+  if (result.ok === false && keys === "code,ok" && result.code !== "login_redirected" && (CAPTURE_ERROR_CODES as readonly unknown[]).includes(result.code)) {
     return { ok: false, code: result.code as CaptureErrorCode };
   }
   return FAILED;

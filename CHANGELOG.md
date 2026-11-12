@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `zks run [--policy FILE] [--only A,B] [--agent LABEL] -- <command> [args...]`: runs one command with the selected variables as environment variables of that child process only. The dialog opens on every run (Deny / Approve, never Always allow) and shows the executable, its full arguments, the working directory and each variable name with its source. Generated variables are skipped unless named, and naming one is a usage error. zks exits with the command's own exit code and forwards `SIGINT`, `SIGTERM` and `SIGHUP`. Each run is audited per variable (`action: "run"`), never with values or arguments.
+- `zks capture login`: logs an ego-browser session into a website with a Keychain password the agent never sees (username as a plain `--user` flag; the password is read and typed inside the ego script like `fill --from`). The dialog opens on every login. Reports `loggedIn`, or `pending: 2fa|captcha|unknown` (exit 0) for the human to finish; leaving the origin is `login_redirected` with the final origin only. Audited as `provider: "capture"`, `sourceKind: "capture-login"`, target the origin, without the username.
+- `zks capture recipes` and `--recipe NAME`: login recipes for `hostgator` and `cpanel` (`verified: false`: selectors from public documentation, confirmed on the first real run).
 
 ## [0.2.0] - 2026-11-12
 
