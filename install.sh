@@ -14,6 +14,8 @@
 #   /usr/local/libexec/zks/bin/zks         root:wheel launcher (555), on PATH via /etc/paths.d/zks
 #   /usr/local/libexec/zks/integrity.json  root:wheel manifest (444)
 # The build, the skill and ~/AGENTS.md still run and write as the invoking user ($SUDO_USER).
+# Both `npm ci` runs (the build in the repository, the production one in the app) are isolated from
+# the user's npm config, cache and logs: env -i, private HOME/cache/logs, no user or global npmrc.
 # --dry-run prints the layout and exits without writing anything.
 # Run from the repository root. It never reads, prints or stores a secret value.
 set -eu
@@ -118,11 +120,35 @@ if [ "$MODE" = system ]; then
   done
 fi
 
+# Every `npm ci` (they fetch packages) runs through isolated_npm: env -i with a private HOME, cache
+# and logs keeps it away from the user's ~/.npm and ~/.npmrc (a modified registry or config there
+# would feed the build, and root writes there would follow user-planted symlinks).
+# npm runs under the same checked node ($NODE_BIN), not whatever node SAFE_PATH would find; the
+# global npmrc is an empty private file (npm refuses /dev/null for both user and global config).
+# Root still executes the user's npm and node files: same-user limit, see README.
+NPM_CLI="$(node -p 'require("node:fs").realpathSync(process.argv[1])' "$(command -v npm)")"
+# isolated_npm RUN SCRATCH DIR ARGS...: npm ARGS in DIR, run through RUN (as_user, or command for
+# the installing user); SCRATCH holds HOME, cache, logs and the empty global npmrc, writable by RUN.
+isolated_npm() {
+  run="$1"
+  scratch="$2"
+  dir="$3"
+  shift 3
+  "$run" /bin/sh -c ': >"$1"' sh "$scratch/globalnpmrc"
+  (cd "$dir" && "$run" /usr/bin/env -i HOME="$scratch" PATH="$(dirname "$NODE_BIN"):$SAFE_PATH" \
+    npm_config_userconfig=/dev/null npm_config_globalconfig="$scratch/globalnpmrc" \
+    npm_config_cache="$scratch/npm-cache" npm_config_logs_dir="$scratch/npm-logs" npm_config_update_notifier=false \
+    "$NODE_BIN" "$NPM_CLI" "$@")
+}
+
 TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
+BUILD_TMP=""
+trap 'rm -rf "$TMP_DIR"; [ -z "$BUILD_TMP" ] || rm -rf "$BUILD_TMP"' EXIT INT TERM
+# The build runs as the user, so under sudo its scratch is the user's own; root keeps $TMP_DIR.
+if [ "$(id -u)" = 0 ]; then BUILD_TMP="$(as_user mktemp -d)"; else BUILD_TMP="$TMP_DIR"; fi
 
 printf '==> Checking and building zks %s\n' "$VERSION"
-as_user npm ci
+isolated_npm as_user "$BUILD_TMP" "$REPO" ci
 as_user npm run check
 printf '==> Checking dependencies (pinned versions, lockfile, npm audit)\n'
 as_user npm run --silent deps:check || die "dependency check failed (see the JSON above)"
@@ -139,17 +165,8 @@ if [ "$MODE" = system ]; then umask 022; fi
 mkdir -p "$DEST"
 cp -R dist bin package.json package-lock.json "$DEST/"
 # --no-bin-links: no node_modules/.bin symlinks (zks runs none, and a system install allows no symlink).
-# Under sudo this npm runs as root: env -i with a private HOME, cache and logs keeps it away from
-# the user's ~/.npm and ~/.npmrc (root writes there would follow user-planted symlinks).
-# npm runs under the same checked node ($NODE_BIN), not whatever node SAFE_PATH would find; the
-# global npmrc is an empty private file (npm refuses /dev/null for both user and global config).
-# Root still executes the user's npm and node files here: same-user limit, see README.
-NPM_CLI="$(node -p 'require("node:fs").realpathSync(process.argv[1])' "$(command -v npm)")"
-: >"$TMP_DIR/globalnpmrc"
-(cd "$DEST" && /usr/bin/env -i HOME="$TMP_DIR" PATH="$(dirname "$NODE_BIN"):$SAFE_PATH" \
-  npm_config_userconfig=/dev/null npm_config_globalconfig="$TMP_DIR/globalnpmrc" \
-  npm_config_cache="$TMP_DIR/npm-cache" npm_config_logs_dir="$TMP_DIR/npm-logs" npm_config_update_notifier=false \
-  "$NODE_BIN" "$NPM_CLI" ci --omit=dev --ignore-scripts --no-bin-links)
+# Under sudo this npm runs as root, with the root-owned $TMP_DIR as its scratch (see isolated_npm).
+isolated_npm command "$TMP_DIR" "$DEST" ci --omit=dev --ignore-scripts --no-bin-links
 # CycloneDX SBOM of the production dependencies, inside the install so the digest covers it.
 as_user npm run --silent sbom >"$DEST/sbom.cdx.json" || die "could not write the SBOM"
 if [ "$MODE" = system ]; then
