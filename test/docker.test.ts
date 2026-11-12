@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { createServer, type Server } from "node:net";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { createExec } from "../src/platform/exec.ts";
 import { parseToolPins, parseToolsFile, pinnedExec, resolveTools } from "../src/platform/tools.ts";
 import { describeDestination, describeEffect } from "../src/policy/describe.ts";
@@ -19,7 +20,22 @@ import { CANARY, TEST_TOOLS, auditBytes, fakeAws, fakeExec, fakeFetch, fakeKeych
 
 const REPO = join(import.meta.dirname, "..");
 const DOCKER = TEST_TOOLS.docker as string;
-const SOCK = "unix:///var/run/docker.sock";
+
+/** A real unix socket in a fresh temp dir (the sink lstats unix:// hosts); closed after the tests. */
+async function realSocket(): Promise<{ path: string; host: string; server: Server }> {
+  const path = join(tempDir(), "docker.sock");
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(path, () => resolve());
+  });
+  return { path, host: `unix://${path}`, server };
+}
+
+const socket = await realSocket();
+after(() => socket.server.close());
+const SOCK = socket.host;
+const TCP = "tcp://127.0.0.1:2375";
 
 function op(target: TargetConfig, name = "API_KEY"): Operation {
   return { name, targetKey: "t", target, variable: { sensitive: true, targets: ["t"], source: { kind: "prompt" } }, sourceKind: "prompt" };
@@ -71,9 +87,33 @@ test("S12: docker-swarm creates the secret with the value on stdin only", async 
   assert.ok(c.exec.calls.every((call) => call.args[0] === "--host" && call.args[1] === SOCK && !call.args.includes("--context")));
   assert.deepEqual(c.exec.calls.map((call) => call.env), [{ DOCKER_CONFIG: "/var/empty" }, { DOCKER_CONFIG: "/var/empty" }]);
 
-  const withContext = ctx(docker());
-  await dockerSwarmSink.apply(op({ provider: "docker-swarm", host: "ssh://deploy@swarm.example.com" }), SecretBuffer.fromString(CANARY), withContext.context);
-  assert.deepEqual(withContext.exec.calls[1]!.args, ["--host", "ssh://deploy@swarm.example.com", "secret", "create", "API_KEY", "-"]);
+  // tcp:// hosts have no local check.
+  const tcp = ctx(docker());
+  await dockerSwarmSink.apply(op({ provider: "docker-swarm", host: TCP }), SecretBuffer.fromString(CANARY), tcp.context);
+  assert.deepEqual(tcp.exec.calls[1]!.args, ["--host", TCP, "secret", "create", "API_KEY", "-"]);
+});
+
+test("S12 R1: a unix:// host must be a real socket, not a symlink, a missing path or a file; nothing runs when refused", async () => {
+  assert.ok(lstatSync(socket.path).isSocket());
+  const dir = tempDir();
+  const link = join(dir, "link.sock");
+  symlinkSync(socket.path, link);
+  const file = join(dir, "file.sock");
+  writeFileSync(file, "");
+  const missing = join(dir, "missing.sock");
+  for (const path of [link, missing, file]) {
+    const c = ctx(docker());
+    await rejects(
+      dockerSwarmSink.apply(op({ provider: "docker-swarm", host: `unix://${path}` }), SecretBuffer.fromString(CANARY), c.context),
+      "docker_host_invalid",
+      `${path} is not a socket; zks talks only to a real docker socket, not a symlink`,
+    );
+    assert.equal(c.exec.calls.length, 0, path);
+  }
+
+  const real = ctx(docker());
+  await dockerSwarmSink.apply(op({ provider: "docker-swarm", host: SOCK }), SecretBuffer.fromString(CANARY), real.context);
+  assert.equal(real.exec.calls.length, 2);
 });
 
 test("S12: an existing docker secret is secret_exists unless replace: true, which removes then creates it", async () => {
@@ -241,10 +281,15 @@ test("S12: docker-swarm and compose targets are validated; docker secret names f
   };
   assert.deepEqual(issues(policy({ provider: "docker-swarm", host: "tcp://10.0.0.5:2376", replace: true })), []);
   assert.deepEqual(issues(policy({ provider: "compose", dir: "./secrets" })), []);
+  assert.deepEqual(issues(policy({ provider: "docker-swarm", host: "unix:///run/docker.sock" })), []);
   assert.deepEqual(issues(policy({ provider: "docker-swarm", host: "prod", replace: "yes" })), [
-    "targets.t.host: must be unix:///path, tcp://host:port or ssh://user@host",
+    "targets.t.host: must be unix:///path or tcp://host:port",
     "targets.t.replace: must be a boolean",
   ]);
+  // R1: ssh:// resolves through the user's ssh client config, so it is refused; tcp:// needs a port.
+  for (const host of ["ssh://deploy@h", "ssh://deploy@swarm.example.com:22", "tcp://10.0.0.5", "unix://run/docker.sock"]) {
+    assert.deepEqual(issues(policy({ provider: "docker-swarm", host })), ["targets.t.host: must be unix:///path or tcp://host:port"], host);
+  }
   assert.deepEqual(issues(policy({ provider: "docker-swarm", host: SOCK }, "_KEY_")), ["variables._KEY_: docker secret names must start and end with a letter or digit (target \"t\")"]);
   assert.deepEqual(issues(policy({ provider: "compose", dir: "" })), ["targets.t.dir: must be a path of 1 to 200 printable characters"]);
   assert.deepEqual(issues(policy({ provider: "compose", dir: "a\nb" })), ["targets.t.dir: must be a path of 1 to 200 printable characters"]);

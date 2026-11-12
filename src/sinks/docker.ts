@@ -1,3 +1,4 @@
+import { lstat } from "node:fs/promises";
 import type { ExecResult } from "../platform/exec.ts";
 import type { DockerSwarmTarget } from "../policy/types.ts";
 import { SinkError, type Sink } from "./types.ts";
@@ -19,12 +20,27 @@ function unavailable(): SinkError {
  * and config, which a same-user agent could edit, never choose where the value goes.
  */
 const DOCKER_ENV = { DOCKER_CONFIG: "/var/empty" };
+const UNIX = "unix://";
+
+/**
+ * A `unix://` host must be a real socket: lstat (never following a symlink) refuses a symlink, a
+ * missing path or anything else before docker runs. `tcp://` hosts have no local check.
+ */
+async function checkHost(host: string): Promise<void> {
+  if (!host.startsWith(UNIX)) return;
+  const path = host.slice(UNIX.length);
+  const stats = await lstat(path).catch(() => null);
+  if (!stats || !stats.isSocket()) {
+    throw new SinkError("docker_host_invalid", `${path} is not a socket; zks talks only to a real docker socket, not a symlink`);
+  }
+}
 
 export const dockerSwarmSink: Sink = {
   async apply(op, value, ctx) {
     const target = op.target as DockerSwarmTarget;
     const docker = ctx.tools.docker;
     if (!docker) throw unavailable();
+    await checkHost(target.host);
     const prefix = ["--host", target.host];
     const run = async (args: string[], input?: Buffer): Promise<ExecResult> => {
       try {
