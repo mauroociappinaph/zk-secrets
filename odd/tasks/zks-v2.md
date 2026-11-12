@@ -48,10 +48,10 @@ Each spec quotes the list item the user selected by number, then the user's deci
 - T3 [S3] capture in an isolated ego-browser profile/space — P1 — worker — 73bbc31 — done (page p1 confirmed against real ego; isolated flow not run against a real second profile)
 - T4 [S4] SBOM, npm audit in install/CI, pinned lockfile check — P1 — inline — 464388e — done (socket.dev skipped: needs account+token)
 - T5 [S5,S6] formatted generators and derived sources — P2 — worker — e77fbb4 — done (one ~975-line commit: generators and derived sources share the resolver; selection rule for derived values added)
-- T6 [S7] `zks rotate NAME` — P2 — pending
-- T7 [S8] `zks inventory` — P2 — pending
-- T8 [S9] plan effects — P2 — pending
-- T9 [S10] `zks doctor --fix` — P2 — pending
+- T6 [S7] `zks rotate NAME` — P2 — worker — 7ae4f28 — done
+- T7 [S8] `zks inventory` — P2 — worker — 7ae4f28 — done
+- T8 [S9] plan effects — P2 — worker — 7ae4f28 — done
+- T9 [S10] `zks doctor --fix` — P2 — worker — 7ae4f28 — done
 - T10 [S11] Netlify sink — P3 — pending
 - T11 [S12] Docker Swarm / Compose secret sinks — P3 — pending
 - T12 [S13] dotenv file sink (mode 600) — P3 — pending
@@ -88,3 +88,4 @@ Each spec quotes the list item the user selected by number, then the user's deci
 - L7 (P1 close): native assess for P1 (develop..feature/zks-v2-security, 1517 lines) returned reviewDue high_risk (install.sh, ci.yml). Native review needs the human's provider consent, which L3 does not grant; deferred to the end so the user answers once per phase candidate. P2 branched from P1.
 - L8 (native review review-aa2f405c628ebf4d of P1, lenses risk+reliability): correction_required with R1-agents-symlink-root-chown (CRITICAL: --system wrote ~/AGENTS.md as root, following a user-planted symlink into a root-owned path) and R3-ownership-symlink-bin-links (CRITICAL: npm bin symlinks would make doctor report "ownership" on a correct system install). Both fixed (AGENTS update runs entirely as the user; production `npm ci --no-bin-links`). The correction capture could not be submitted: the facade loops between "intended untracked selection required" and "untracked inventory changed" while T5 work sat untracked in the tree (harness incident); the fix was committed as an ordinary commit and the lineage is left for a fresh review.
 - L9 (user, verbatim): "Podes parar cuando la phase 2 este completa ?" — stop after P2 (T6-T9) is committed and reported; P3-P5 (T10-T18) stay pending.
+- L10 (P2 close): T6-T9 in 7ae4f28 (one commit, ~900 lines). npm run check 233/233; smoke with the dev launcher on zks.policy.example.json: plan shows effects, inventory lists never_written entries, rotate of an unknown name is a usage error. Native review of P2 not run (stop requested in L9; RDD review needs the user's consent). Stopped here per L9; T10-T18 pending.
