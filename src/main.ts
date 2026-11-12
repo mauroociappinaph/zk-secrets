@@ -11,6 +11,7 @@ import { createExec } from "./platform/exec.ts";
 import { checkIntegrity, checkOwnership } from "./platform/integrity.ts";
 import { ZKS_KEYCHAIN_SERVICE, createKeychain } from "./platform/keychain.ts";
 import { SYSTEM_LIBEXEC, installLayout, zksPaths } from "./platform/paths.ts";
+import { fixPermissions } from "./platform/permissions.ts";
 import { NO_PINS, TOOLS_FILE, parseToolPins, pinnedExec, resolveTools, sha256File, type ToolPaths, type ToolPins } from "./platform/tools.ts";
 import { loadTrust, type TrustFile } from "./policy/trust.ts";
 import { TOKEN_ACCOUNTS, run, type Deps, type ZksConfig } from "./run.ts";
@@ -174,6 +175,7 @@ export async function main(identity: Identity): Promise<number> {
         trustedDestinations: trust.destinations.length,
       };
     },
+    fixPermissions: () => fixPermissions(paths),
     randomBytes,
   };
 

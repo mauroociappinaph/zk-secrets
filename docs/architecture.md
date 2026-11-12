@@ -79,6 +79,8 @@ The policy file is written by the agent and is **not trusted**: it is validated 
 10. The audit head (`<count>:<hash>`) is stored in the Keychain item `zks`/`audit-head`; `zks audit verify` and `zks doctor` check the chain against it. The mirror pushes pending records to the Sheet (failures stay pending locally).
 11. stdout gets JSON results (with `approval` and, after "Always allow", `trusted`), passed through `Redactor.scrub`; exit 0 if every write applied, else 1.
 
+`zks plan` adds a fixed `effect` text per operation (what the human must redeploy or restart; zks triggers nothing) and an `effects` summary. `zks rotate NAME` runs steps 2-11 on the operations of one `generate` variable and its derived variables, with two differences: the dialog always opens (trust never skips it) and records carry `action: "rotate"`; other variables are refused with `not_rotatable` before anything is resolved. `zks inventory` only reads the audit store (latest applied `set`/`rotate` per provider × target × variable) and the policy; it makes no network call. `zks doctor --fix` only changes the modes of `~/.config/zks`, `~/.local/state/zks` (700) and their `config.json`, `trust.json`, `audit.db*` (600), through `O_NOFOLLOW` descriptors; integrity, trust content, the audit chain and the Keychain stay as they are and are listed as `notFixable` with the command to run.
+
 ## Capture data flow
 
 1. The agent opens the provider or site page in one ego-browser TaskSpace and does every non-secret step (log in with the user's session, fill the token name and expiry). It stops before the click that reveals a value.
@@ -247,7 +249,7 @@ Variable
 | `project` | policy project; for a capture the Keychain service |
 | `provider`, `target`, `environment` | where the write went; for a capture `keychain`, `<service>/<account>` and the page origin (`""` without `--origin`) |
 | `variableName` | name only; for a capture the Keychain account |
-| `action` | `set` (apply) or `capture` |
+| `action` | `set` (apply), `rotate` (rotate) or `capture` |
 | `sensitive` | boolean |
 | `sourceKind` | `op`, `keychain`, `prompt`, `generate`, `dotenv`, `public-key`, `template` or `literal`; for a capture `capture-read`, `capture-generate` or `capture-from` |
 | `result` | `applied`, `denied` or `failed` |

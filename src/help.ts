@@ -12,6 +12,11 @@ Usage:
                                               List the writes apply would make (no network)
   zks apply [--policy FILE] [--only A,B] [--target t1,t2] [--agent LABEL]
                                               Ask for approval, then write values to providers
+  zks rotate NAME [--target t1,t2] [--policy FILE]
+                                              Write a NEW value of a generated variable to its targets
+                                              and its derived variables; always asks (no revocation)
+  zks inventory [--project P] [--policy FILE] Which variable is in which destination and how old
+                                              (audit log metadata, no network)
   zks auth status                             Show which provider tokens are in the Keychain
   zks auth set <vercel|railway|supabase|sheets-hmac>
                                               Store a token through a hidden dialog
@@ -39,7 +44,9 @@ Usage:
   zks config unset sheets-webhook
   zks config set capture-profile <profileId>  Separate ego-browser profile for capture --isolated
   zks config unset capture-profile
-  zks doctor                                  Check tools, tokens, audit and install integrity
+  zks doctor [--fix]                          Check tools, tokens, audit and install integrity;
+                                              --fix creates/chmods ~/.config/zks, ~/.local/state/zks
+                                              (700) and their files (600) and lists what it cannot fix
   zks --version | zks help
 
 Sources (variables.<NAME>.source.kind): op, keychain, prompt, generate, dotenv, public-key, template.

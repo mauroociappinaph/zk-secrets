@@ -257,6 +257,8 @@ export function harness(
       h.trust = structuredClone(file);
     },
     doctor: async () => ({ doctor: "fake" }),
+    // Never the real fixer: it would chmod the user's ~/.config/zks.
+    fixPermissions: async () => ({ fixed: [], failed: [] }),
     randomBytes: (n) => Buffer.alloc(n, 7),
   };
   return h;

@@ -213,6 +213,7 @@ test("plan lists operations without network, dialogs or audit", async () => {
         destination: "github acme/web env production secret",
         sensitive: true,
         source: "Keychain hismia/stripe",
+        effect: "used by the next workflow run",
       },
       {
         name: "STRIPE_SECRET_KEY",
@@ -222,7 +223,12 @@ test("plan lists operations without network, dialogs or audit", async () => {
         destination: "supabase project abcdefghijklmnopqrst",
         sensitive: true,
         source: "Keychain hismia/stripe",
+        effect: "Edge Functions use it on their next invocation",
       },
+    ],
+    effects: [
+      { effect: "used by the next workflow run", operations: 1, targets: ["gh"] },
+      { effect: "Edge Functions use it on their next invocation", operations: 1, targets: ["supa"] },
     ],
   });
   assert.equal(h.human.approvals.length + h.fetch.calls.length + h.exec.calls.length, 0);

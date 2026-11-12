@@ -418,7 +418,7 @@ export function planOperations(policy: Policy, selection: Selection = {}): Opera
 }
 
 /** Generated variables a variable's value is derived from, directly or through other derived variables. */
-function generatedDependencies(policy: Policy, name: string): string[] {
+export function generatedDependencies(policy: Policy, name: string): string[] {
   const found: string[] = [];
   const seen = new Set<string>([name]);
   const walk = (current: string): void => {
@@ -431,6 +431,23 @@ function generatedDependencies(policy: Policy, name: string): string[] {
   };
   walk(name);
   return found;
+}
+
+/** Variables whose value is derived from name, directly or through other derived variables, in policy order. */
+export function dependentsOf(policy: Policy, name: string): string[] {
+  const found = new Set<string>();
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const [candidate, spec] of Object.entries(policy.variables)) {
+      if (candidate === name || found.has(candidate)) continue;
+      if (dependenciesOf(spec.source).some((dep) => dep === name || found.has(dep))) {
+        found.add(candidate);
+        grew = true;
+      }
+    }
+  }
+  return Object.keys(policy.variables).filter((n) => found.has(n));
 }
 
 const ROTATES = " - NEW value on every apply";

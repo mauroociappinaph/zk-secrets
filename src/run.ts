@@ -1,16 +1,35 @@
 import { randomBytes as nodeRandomBytes } from "node:crypto";
 import { readAuditAnchor, writeAuditAnchor } from "./audit/anchor.ts";
 import { SHEETS_WEBHOOK_URL } from "./audit/mirror.ts";
-import type { ApprovalMode, AuditRecord, AuditResult, AuditStore, CaptureSourceKind, Mirror, MirrorResult } from "./audit/types.ts";
+import type {
+  ApprovalMode,
+  AuditRecord,
+  AuditResult,
+  AuditStore,
+  CaptureSourceKind,
+  Mirror,
+  MirrorResult,
+  WrittenDestination,
+} from "./audit/types.ts";
 import { runCapture } from "./capture/run.ts";
 import { CAPTURE_WAIT_MS, type CaptureErrorCode } from "./capture/script.ts";
 import type { HumanChannel } from "./gate/dialog.ts";
 import type { Exec } from "./platform/exec.ts";
 import { ZKS_KEYCHAIN_SERVICE, type Keychain } from "./platform/keychain.ts";
+import type { PermissionFix } from "./platform/permissions.ts";
 import type { ToolPaths } from "./platform/tools.ts";
-import { describeDestination } from "./policy/describe.ts";
+import { describeDestination, describeEffect, summarizeEffects } from "./policy/describe.ts";
 import { describeTrustKey, loadTrust, saveTrust, trustKeyOf, type TrustFile, type TrustIo } from "./policy/trust.ts";
-import { PolicyError, describeSource, planOperations, validatePolicy } from "./policy/validate.ts";
+import {
+  PROJECT_NAME,
+  PolicyError,
+  dependentsOf,
+  describeSource,
+  generatedDependencies,
+  planOperations,
+  sourceKindOf,
+  validatePolicy,
+} from "./policy/validate.ts";
 import type { Operation, Policy, Provider, TargetConfig } from "./policy/types.ts";
 import { Redactor } from "./secret/redactor.ts";
 import { SecretBuffer } from "./secret/secret-buffer.ts";
@@ -67,6 +86,8 @@ export interface Deps {
   readTrust(): Promise<TrustFile | null>;
   writeTrust(file: TrustFile): Promise<void>;
   doctor(): Promise<Record<string, unknown>>;
+  /** `zks doctor --fix`: directory and file modes of ~/.config/zks and ~/.local/state/zks only. */
+  fixPermissions(): Promise<PermissionFix>;
   randomBytes?: (size: number) => Buffer;
 }
 
@@ -124,6 +145,9 @@ const COMMAND_FLAGS: Record<string, string[]> = {
   validate: ["--policy"],
   plan: ["--policy", "--only", "--target"],
   apply: ["--policy", "--only", "--target", "--agent"],
+  rotate: ["--policy", "--target"],
+  inventory: ["--policy", "--project"],
+  doctor: ["--fix"],
   "audit list": ["--limit", "--project"],
   "capture read": ["--space", "--page", "--selector", "--store", "--click", "--origin", "--isolated", "--url"],
   "capture fill": ["--space", "--page", "--selector", "--store", "--generate", "--from", "--origin", "--isolated", "--url"],
@@ -135,7 +159,7 @@ const SUBCOMMANDS: Record<string, string[]> = {
   trust: ["list", "remove"],
   capture: ["read", "fill"],
 };
-const COMMANDS = ["init", "validate", "plan", "apply", "doctor", ...Object.keys(SUBCOMMANDS)];
+const COMMANDS = ["init", "validate", "plan", "apply", "rotate", "inventory", "doctor", ...Object.keys(SUBCOMMANDS)];
 
 interface ParsedArgs {
   positionals: string[];
@@ -158,8 +182,8 @@ function parseArgs(argv: string[]): ParsedArgs {
         "zks never accepts secret values on the command line; declare a source in zks.policy.json or use `zks auth set`",
       );
     }
-    if (flag === "--isolated") {
-      if (inline !== undefined) throw new UsageError("option --isolated takes no value");
+    if (flag === "--isolated" || flag === "--fix") {
+      if (inline !== undefined) throw new UsageError(`option ${flag} takes no value`);
       flags.set(flag, "true");
       continue;
     }
@@ -182,8 +206,11 @@ function positionalLimit(command: string, sub: string | undefined): number | und
     case "validate":
     case "plan":
     case "apply":
+    case "inventory":
     case "doctor":
       return 1;
+    case "rotate":
+      return 2;
     case "audit":
       return 2;
     case "auth":
@@ -252,12 +279,13 @@ function describeOperation(op: Operation, cwd: string): Record<string, unknown> 
     destination: describeDestination(op),
     sensitive: op.variable.sensitive,
     source: describeSource(op.variable.source, cwd),
+    effect: describeEffect(op),
   };
 }
 
 /** Every write in full; writes to a destination that is not trusted yet end with [NEW destination]. */
-function approvalLines(policy: Policy, ops: Operation[], cwd: string, newKeys: Set<string>): string[] {
-  const lines = [`Project: ${policy.project}`, `Write ${ops.length} value(s):`, ""];
+function approvalLines(policy: Policy, ops: Operation[], cwd: string, newKeys: Set<string>, header: string[] = []): string[] {
+  const lines = [...header, `Project: ${policy.project}`, `Write ${ops.length} value(s):`, ""];
   for (const op of ops) {
     lines.push(
       `- ${op.name} -> ${describeDestination(op)} ` +
@@ -315,10 +343,19 @@ async function dispatch(argv: string[], deps: Deps, redactor: Redactor): Promise
     case "plan": {
       const policy = await loadPolicy(deps, flags.get("--policy"));
       const ops = planOperations(policy, selection(flags));
-      return json(EXIT_OK, { ok: true, project: policy.project, operations: ops.map((op) => describeOperation(op, deps.cwd)) });
+      return json(EXIT_OK, {
+        ok: true,
+        project: policy.project,
+        operations: ops.map((op) => describeOperation(op, deps.cwd)),
+        effects: summarizeEffects(ops),
+      });
     }
     case "apply":
       return apply(deps, flags, redactor);
+    case "rotate":
+      return rotate(deps, sub, flags, redactor);
+    case "inventory":
+      return inventory(deps, flags);
     case "auth":
       return auth(deps, sub, arg);
     case "audit":
@@ -329,11 +366,49 @@ async function dispatch(argv: string[], deps: Deps, redactor: Redactor): Promise
       return trust(deps, sub, arg);
     case "capture":
       return capture(deps, sub, flags, redactor);
-    case "doctor":
-      return json(EXIT_OK, { ok: true, ...(await deps.doctor()) });
+    case "doctor": {
+      if (!flags.has("--fix")) return json(EXIT_OK, { ok: true, ...(await deps.doctor()) });
+      // Fix first, so the report shows the repaired state.
+      const fix = await deps.fixPermissions();
+      const report = await deps.doctor();
+      return json(EXIT_OK, { ok: true, ...report, fixed: fix.fixed, notFixable: notFixable(fix, report) });
+    }
     default:
       throw new UsageError(`unknown command ${command}; run \`zks help\``);
   }
+}
+
+interface NotFixable {
+  check: string;
+  status: string;
+  command: string;
+}
+
+const field = (value: unknown, key: string): unknown =>
+  typeof value === "object" && value !== null ? (value as Record<string, unknown>)[key] : undefined;
+
+/** What `doctor --fix` leaves alone (integrity, pins, trust, audit chain, Keychain), each with the command to run. */
+function notFixable(fix: PermissionFix, report: Record<string, unknown>): NotFixable[] {
+  const out: NotFixable[] = fix.failed.map((f) => ({ check: `permissions ${f.path}`, status: f.reason, command: `ls -l ${f.path}` }));
+  const install = field(report, "install");
+  const reinstall = field(install, "mode") === "system" ? "sudo ./install.sh --system" : "./install.sh";
+  const installStatus = field(install, "status");
+  if (typeof installStatus === "string" && installStatus !== "ok") out.push({ check: "install", status: installStatus, command: reinstall });
+  const pins = field(field(report, "tools"), "pins");
+  for (const [tool, status] of Object.entries(typeof pins === "object" && pins !== null ? pins : {})) {
+    if (status === "changed") out.push({ check: `tools.pins.${tool}`, status, command: reinstall });
+  }
+  if (field(report, "trust") === "invalid") {
+    out.push({ check: "trust", status: "invalid", command: "zks trust list, then choose Always allow in the next apply to sign trust.json again" });
+  }
+  if (field(field(report, "audit"), "ok") === false) out.push({ check: "audit", status: "broken", command: "zks audit verify" });
+  const tokens = field(report, "tokens");
+  for (const account of TOKEN_ACCOUNTS) {
+    // The HMAC token only matters once a Sheets mirror is configured.
+    if (account === "sheets-hmac" && field(field(report, "mirror"), "sheetsWebhook") !== true) continue;
+    if (field(tokens, account) === false) out.push({ check: `tokens.${account}`, status: "missing", command: `zks auth set ${account}` });
+  }
+  return out;
 }
 
 function selection(flags: Map<string, string>) {
@@ -344,6 +419,222 @@ async function apply(deps: Deps, flags: Map<string, string>, redactor: Redactor)
   const policy = await loadPolicy(deps, flags.get("--policy"));
   const ops = planOperations(policy, selection(flags));
   if (ops.length === 0) return json(EXIT_OK, { ok: true, project: policy.project, results: [] });
+  return writeOperations(deps, redactor, policy, ops, {
+    agent: flags.get("--agent") ?? deps.agentId,
+    action: "set",
+    alwaysAsk: false,
+    title: "zks: approve secret changes",
+    header: [],
+    extra: {},
+  });
+}
+
+const ROTATE_USAGE = "usage: zks rotate NAME [--target t1,t2] [--policy FILE]";
+
+/**
+ * Writes a NEW value of a generated variable to its targets (or the --target subset) and rewrites
+ * the variables derived from it, in one apply that always shows the approval dialog. Nothing is
+ * revoked at the provider the old value came from.
+ */
+async function rotate(deps: Deps, name: string | undefined, flags: Map<string, string>, redactor: Redactor): Promise<RunOutput> {
+  if (name === undefined) throw new UsageError(ROTATE_USAGE);
+  const policy = await loadPolicy(deps, flags.get("--policy"));
+  // The name is only echoed once it is known: it might be a pasted secret.
+  if (!Object.hasOwn(policy.variables, name)) throw new UsageError("not a variable of the policy; see `zks plan`");
+  const variable = policy.variables[name] as Policy["variables"][string];
+  const subset = list(flags.get("--target"));
+  if (subset) {
+    const unknown = subset.filter((t) => !Object.hasOwn(policy.targets, t));
+    if (unknown.length > 0) throw new PolicyError(unknown.map((t) => `--target: unknown target "${t}"`));
+    const foreign = subset.find((t) => !variable.targets.includes(t));
+    if (foreign !== undefined) throw new UsageError(`--target: "${foreign}" is not a target of ${name}`);
+  }
+
+  let refusal: string | null = null;
+  if (variable.source?.kind !== "generate") {
+    refusal = `${name} is not generated by zks; only variables with a generate source can be rotated`;
+  }
+  const dependents = refusal === null ? dependentsOf(policy, name) : [];
+  for (const dependent of dependents) {
+    const other = generatedDependencies(policy, dependent).find((dep) => dep !== name);
+    if (other !== undefined && refusal === null) {
+      refusal = `${dependent} also uses ${other}, another generated value; rotating ${name} alone would replace it too`;
+    }
+  }
+  const agent = deps.agentId;
+  if (refusal !== null) {
+    // Nothing is resolved or written; every write the rotation would have made is audited failed.
+    const store = deps.openAudit();
+    try {
+      const refused: Operation[] = variable.targets
+        .filter((targetKey) => !subset || subset.includes(targetKey))
+        .map((targetKey) => ({ name, targetKey, target: policy.targets[targetKey] as TargetConfig, variable, sourceKind: sourceKindOf(variable) }));
+      const results = refused.map((op) => {
+        const entry = appendOperation(deps, store, { project: policy.project, agent, action: "rotate" }, op, "failed", {
+          errorCode: "not_rotatable",
+        });
+        return toResult(op, entry, "failed", undefined, { code: "not_rotatable", message: refusal as string });
+      });
+      const anchorError = await saveAnchor(deps, store);
+      const mirror = await deps.mirror.sync(store);
+      return json(EXIT_USAGE, {
+        ok: false,
+        project: policy.project,
+        error: { code: "not_rotatable", message: refusal },
+        results,
+        mirror,
+        ...anchorError,
+      });
+    } finally {
+      store.close();
+    }
+  }
+
+  const ops = planOperations(policy, { only: [name, ...dependents], targets: subset });
+  const written = [...new Set(ops.map((op) => op.name))].filter((n) => n !== name);
+  return writeOperations(deps, redactor, policy, ops, {
+    agent,
+    action: "rotate",
+    alwaysAsk: true,
+    title: "zks: approve secret rotation",
+    header: [
+      `Rotate ${name}: a NEW value replaces the current one${written.length > 0 ? `; derived ${written.join(", ")} rewritten with it` : ""}.`,
+      "The old value is not revoked anywhere.",
+      "",
+    ],
+    extra: { rotated: name, dependents: written },
+  });
+}
+
+const DAY_MS = 86_400_000;
+
+interface InventoryEntry {
+  variable: string;
+  provider: string;
+  target: string;
+  environment: string;
+  lastWrittenAt: string | null;
+  ageDays: number | null;
+  writes: number;
+  status: "written" | "never_written" | "not_in_policy";
+}
+
+/**
+ * Which variable was written to which destination and when, from the local audit log only (no
+ * network, no values). Compared with the policy of the same project when there is one.
+ */
+async function inventory(deps: Deps, flags: Map<string, string>): Promise<RunOutput> {
+  const project = flags.get("--project");
+  if (project !== undefined && !PROJECT_NAME.test(project)) throw new UsageError(`--project must match ${PROJECT_NAME}`);
+  const policyFlag = flags.get("--policy");
+  const policyFile = resolvePath(deps.cwd, policyFlag ?? "zks.policy.json");
+  // With --project and no --policy, a missing default policy only means there is nothing to compare with.
+  const readPolicy =
+    policyFlag !== undefined || project === undefined || (await deps.readFile(policyFile).then(() => true, () => false));
+  const loaded = readPolicy ? await loadPolicy(deps, policyFlag) : null;
+  const name = project ?? (loaded as Policy).project;
+  const policy = loaded !== null && loaded.project === name ? loaded : null;
+
+  const store = deps.openAudit();
+  let rows: WrittenDestination[];
+  try {
+    rows = store.writtenDestinations(name);
+  } finally {
+    store.close();
+  }
+  const now = deps.now().getTime();
+  const key = (variable: string, target: string, provider: string) => `${variable}\u0000${target}\u0000${provider}`;
+  const planned = new Map((policy ? planOperations(policy) : []).map((op) => [key(op.name, op.targetKey, op.target.provider), op]));
+  const entries: InventoryEntry[] = rows.map((row) => {
+    const age = Math.floor((now - Date.parse(row.lastWrittenAt)) / DAY_MS);
+    const k = key(row.variableName, row.target, row.provider);
+    const inPolicy = planned.delete(k) || policy === null;
+    return {
+      variable: row.variableName,
+      provider: row.provider,
+      target: row.target,
+      environment: row.environment,
+      lastWrittenAt: row.lastWrittenAt,
+      ageDays: Number.isFinite(age) ? age : null,
+      writes: row.writes,
+      status: inPolicy ? "written" : "not_in_policy",
+    };
+  });
+  for (const op of planned.values()) {
+    entries.push({
+      variable: op.name,
+      provider: op.target.provider,
+      target: op.targetKey,
+      environment: environmentOf(op.target),
+      lastWrittenAt: null,
+      ageDays: null,
+      writes: 0,
+      status: "never_written",
+    });
+  }
+  const order = (e: InventoryEntry) => [e.variable, e.target, e.provider];
+  entries.sort((a, b) => {
+    const [x, y] = [order(a), order(b)];
+    for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return (x[i] as string) < (y[i] as string) ? -1 : 1;
+    return 0;
+  });
+  return json(EXIT_OK, { ok: true, project: name, policy: policy ? policyFile : null, entries });
+}
+
+interface AuditContext {
+  project: string;
+  agent: string;
+  action: "set" | "rotate";
+}
+
+function appendOperation(
+  deps: Deps,
+  store: AuditStore,
+  ctx: AuditContext,
+  op: Operation,
+  result: OperationResult["result"],
+  extra: { version?: string; errorCode?: string },
+  approval?: ApprovalMode,
+): AuditRecord {
+  return store.append({
+    ts: deps.now().toISOString(),
+    actorHuman: deps.user,
+    actorAgent: ctx.agent,
+    project: ctx.project,
+    provider: op.target.provider,
+    target: op.targetKey,
+    environment: environmentOf(op.target),
+    variableName: op.name,
+    action: ctx.action,
+    sensitive: op.variable.sensitive,
+    sourceKind: op.sourceKind,
+    result,
+    providerVersion: extra.version ?? "",
+    errorCode: extra.errorCode ?? "",
+    ...(approval ? { approval } : {}),
+  });
+}
+
+interface WriteOptions {
+  agent: string;
+  action: "set" | "rotate";
+  /** Show the dialog even when every destination is trusted. */
+  alwaysAsk: boolean;
+  title: string;
+  /** Lines shown above the writes in the dialog. */
+  header: string[];
+  /** Fields added to the JSON output. */
+  extra: Record<string, unknown>;
+}
+
+/** Approves, resolves and writes ops in one apply; every write is audited with opts.action. */
+async function writeOperations(
+  deps: Deps,
+  redactor: Redactor,
+  policy: Policy,
+  ops: Operation[],
+  opts: WriteOptions,
+): Promise<RunOutput> {
   if (ops.length > MAX_OPERATIONS_PER_APPROVAL) {
     return json(EXIT_USAGE, {
       ok: false,
@@ -357,7 +648,7 @@ async function apply(deps: Deps, flags: Map<string, string>, redactor: Redactor)
   const trustState = await loadTrust(trustIo(deps));
   const trustedKeys = new Set(trustState.destinations.map((d) => d.key));
   const newKeys = [...new Set(ops.map(trustKeyOf))].filter((key) => !trustedKeys.has(key));
-  const lines = approvalLines(policy, ops, deps.cwd, new Set(newKeys));
+  const lines = approvalLines(policy, ops, deps.cwd, new Set(newKeys), opts.header);
   if (lines.some((line) => line.length > MAX_DIALOG_LINE) || lines.join("\n").length > MAX_DIALOG_TEXT) {
     return json(EXIT_USAGE, {
       ok: false,
@@ -366,32 +657,18 @@ async function apply(deps: Deps, flags: Map<string, string>, redactor: Redactor)
   }
   const trustReport = trustState.valid ? {} : { trust: "invalid" as const };
 
-  const agent = flags.get("--agent") ?? deps.agentId;
-  // Every destination already trusted: no dialog. Otherwise the human sees every write.
-  const approval: ApprovalMode = newKeys.length === 0 ? "trusted" : "dialog";
+  const agent = opts.agent;
+  const extra = opts.extra;
+  // Every destination already trusted: no dialog (unless the command always asks). Otherwise the human sees every write.
+  const approval: ApprovalMode = newKeys.length === 0 && !opts.alwaysAsk ? "trusted" : "dialog";
   const store = deps.openAudit();
   const results: OperationResult[] = [];
   try {
+    const ctx: AuditContext = { project: policy.project, agent, action: opts.action };
     const record = (op: Operation, result: OperationResult["result"], extra: { version?: string; errorCode?: string }) =>
-      store.append({
-        ts: deps.now().toISOString(),
-        actorHuman: deps.user,
-        actorAgent: agent,
-        project: policy.project,
-        provider: op.target.provider,
-        target: op.targetKey,
-        environment: environmentOf(op.target),
-        variableName: op.name,
-        action: "set",
-        sensitive: op.variable.sensitive,
-        sourceKind: op.sourceKind,
-        result,
-        providerVersion: extra.version ?? "",
-        errorCode: extra.errorCode ?? "",
-        approval,
-      });
+      appendOperation(deps, store, ctx, op, result, extra, approval);
 
-    const decision = approval === "trusted" ? "once" : await deps.human.approveWithTrust("zks: approve secret changes", lines);
+    const decision = approval === "trusted" ? "once" : await deps.human.approveWithTrust(opts.title, lines);
     if (decision === "deny") {
       for (const op of ops) {
         const entry = record(op, "denied", { errorCode: "not_approved" });
@@ -399,7 +676,7 @@ async function apply(deps: Deps, flags: Map<string, string>, redactor: Redactor)
       }
       const anchorError = await saveAnchor(deps, store);
       const mirror = await deps.mirror.sync(store);
-      return json(EXIT_DENIED, { ok: false, project: policy.project, approval, results, mirror, ...trustReport, ...anchorError });
+      return json(EXIT_DENIED, { ok: false, project: policy.project, ...extra, approval, results, mirror, ...trustReport, ...anchorError });
     }
 
     let trustChange: { trusted?: string[]; trustError?: string } = {};
@@ -480,7 +757,7 @@ async function apply(deps: Deps, flags: Map<string, string>, redactor: Redactor)
       if (!(error instanceof AuditWriteError)) throw error;
       // Stop: further writes would go unaudited.
       await saveAnchor(deps, store);
-      return json(EXIT_FAILED, { ok: false, error: { code: "audit_failed", message: error.message }, approval, results, ...trustChange });
+      return json(EXIT_FAILED, { ok: false, error: { code: "audit_failed", message: error.message }, ...extra, approval, results, ...trustChange });
     } finally {
       resolver.dispose();
     }
@@ -491,6 +768,7 @@ async function apply(deps: Deps, flags: Map<string, string>, redactor: Redactor)
     return json(ok ? EXIT_OK : EXIT_FAILED, {
       ok,
       project: policy.project,
+      ...extra,
       approval,
       results,
       mirror,

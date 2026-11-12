@@ -57,6 +57,11 @@ zks plan [--policy FILE] [--only A,B] [--target t1,t2]
                                             List the writes apply would make (no network)
 zks apply [--policy FILE] [--only A,B] [--target t1,t2] [--agent LABEL]
                                             Ask for approval, then write values to providers
+zks rotate NAME [--target t1,t2] [--policy FILE]
+                                            Write a NEW value of a generated variable to its targets
+                                            and its derived variables; always asks (no revocation)
+zks inventory [--project P] [--policy FILE] Which variable is in which destination and how old
+                                            (audit log metadata, no network)
 zks auth status                             Show which provider tokens are in the Keychain
 zks auth set <vercel|railway|supabase|sheets-hmac>
                                             Store a token through a hidden dialog
@@ -84,7 +89,9 @@ zks config set sheets-webhook <url>         Apps Script /exec URL for the audit 
 zks config unset sheets-webhook
 zks config set capture-profile <profileId>  Separate ego-browser profile for capture --isolated
 zks config unset capture-profile
-zks doctor                                  Check tools, tokens, audit and install integrity
+zks doctor [--fix]                          Check tools, tokens, audit and install integrity;
+                                            --fix creates/chmods ~/.config/zks, ~/.local/state/zks
+                                            (700) and their files (600) and lists what it cannot fix
 zks --version | zks help
 ```
 
@@ -167,6 +174,41 @@ The first write to a destination opens the dialog with three buttons: **Deny** (
 
 Keys trusted before this format (`vercel:<teamId>`) no longer match any write; `zks trust list` describes them as an old Vercel key format and `zks trust remove <key>` drops them. The keys live in `~/.config/zks/trust.json` (mode `600`), signed with HMAC-SHA256 by a key in the Keychain item `zks`/`trust-hmac`. A file that is unparsable or whose signature does not match trusts nothing: every write asks again and `apply` and `doctor` report `trust: "invalid"`. `zks trust list` shows the keys; `zks trust remove <key>` drops one without a dialog.
 
+## Rotate
+
+`zks rotate NAME [--target t1,t2]` writes a NEW value of a variable with a `generate` source to every one of its targets (or the `--target` subset, which must be targets of NAME) and, in the same apply, rewrites the variables derived from it (`template` and `public-key` sources referencing it) with the new value. The approval dialog always opens, even when every destination is trusted (`approval: "dialog"`); it starts with `Rotate NAME: a NEW value replaces the current one...` and lists every write. Records are audited with `action: "rotate"`; a denial writes nothing and is audited `denied` (exit 3). The old value is not revoked at any provider.
+
+- A variable without a `generate` source (op, keychain, prompt, dotenv, template, public-key or a literal) is refused with `not_rotatable` (exit 2): nothing is resolved or written, and each of its targets is audited `failed` with that code.
+- A derived variable that also uses another generated value is refused the same way (`AB also uses B, another generated value; rotating A alone would replace it too`).
+- The output is the `apply` output plus `rotated` (NAME) and `dependents` (the derived variables written).
+
+## Inventory
+
+`zks inventory [--project P] [--policy FILE]` reads only the local audit log (no network, no values) and the policy. For each variable × destination it prints `{variable, provider, target, environment, lastWrittenAt, ageDays, writes, status}`: the latest applied `set` or `rotate` record, its age in whole days and how many applied writes there were. `status` is `written`, `never_written` (in the policy, never written: `lastWrittenAt` and `ageDays` are `null`, `writes` 0) or `not_in_policy` (written before, no longer in the policy). Denied and failed writes and captures do not count.
+
+The project is `--project` or the policy's `project`. With `--project` and no policy file in the directory, or a policy of another project, the audit entries are listed without a comparison (`policy: null`, every entry `written`).
+
+## Plan effects
+
+Every `plan` operation carries `effect`, and `effects` groups the operations by effect (`{effect, operations, targets}`). zks never redeploys anything.
+
+| Provider | `effect` |
+|---|---|
+| vercel | `applies on the next deployment; redeploy to use it now` |
+| railway | `Railway redeploys the service` (`applies on the next Railway deploy (skipDeploys)` with `skipDeploys: true`) |
+| github | `used by the next workflow run` |
+| aws-ssm, aws-sm | `consumers read it on their next fetch` |
+| supabase | `Edge Functions use it on their next invocation` |
+
+## Doctor --fix
+
+`zks doctor --fix` repairs only file modes, then prints the usual doctor report plus `fixed` (the equivalent shell command of each change) and `notFixable`:
+
+- creates `~/.config/zks` and `~/.local/state/zks` with mode `700` (and chmods them to `700`);
+- chmods `config.json`, `trust.json`, `audit.db`, `audit.db-wal` and `audit.db-shm` to `600`.
+
+It never follows a symlink (reported in `notFixable` as `symlink`) and never touches the install, `integrity.json`, trust content, the audit chain or the Keychain. Those appear in `notFixable` as `{check, status, command}`: a modified install or a changed tool pin → `./install.sh` (`sudo ./install.sh --system` for a system install), `trust: "invalid"` → re-trust in the next apply, a broken audit chain → `zks audit verify`, a missing token → `zks auth set <provider>`. `zks doctor` without `--fix` changes nothing.
+
 ## Web token capture
 
 The agent drives the non-secret steps in an ego-browser TaskSpace (open the token page, fill the token name and expiry), then hands the secret step to zks:
@@ -221,7 +263,7 @@ zks capture read --isolated --url https://vercel.com/account/settings/tokens --c
 
 ## Audit
 
-Every apply appends one record per variable × target to `~/.local/state/zks/audit.db` (SQLite, append-only triggers, SHA-256 hash chain): time, human, agent, project, provider, target, environment, variable name, sensitive flag, source kind, result, provider version, error code, approval mode (`dialog` or `trusted`). There is no field for a value or a hash of a value.
+Every apply and rotate appends one record per variable × target (`action: "set"` or `"rotate"`) to `~/.local/state/zks/audit.db` (SQLite, append-only triggers, SHA-256 hash chain): time, human, agent, project, provider, target, environment, variable name, sensitive flag, source kind, result, provider version, error code, approval mode (`dialog` or `trusted`). There is no field for a value or a hash of a value.
 
 - `zks audit list` — read records.
 - `zks audit verify` — check the chain, and check it against the anchor (record count and last hash) that every apply stores in the Keychain item `zks`/`audit-head`; a deleted tail fails with `brokenAt: "truncated"`.

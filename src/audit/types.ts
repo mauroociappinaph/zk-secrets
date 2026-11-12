@@ -19,7 +19,8 @@ export interface AuditEntryInput {
   target: string;
   environment: string;
   variableName: string;
-  action: "set" | "capture";
+  /** "rotate": a write made by `zks rotate`. */
+  action: "set" | "rotate" | "capture";
   sensitive: boolean;
   sourceKind: SourceKind | CaptureSourceKind;
   result: AuditResult;
@@ -49,6 +50,16 @@ export interface AuditAnchor {
   hash: string;
 }
 
+/** The latest applied write (set or rotate) of one variable to one destination, and how many there were. */
+export interface WrittenDestination {
+  provider: string;
+  target: string;
+  environment: string;
+  variableName: string;
+  lastWrittenAt: string;
+  writes: number;
+}
+
 export interface AuditStore {
   append(entry: AuditEntryInput): AuditRecord;
   list(options?: { limit?: number; project?: string }): AuditRecord[];
@@ -63,6 +74,8 @@ export interface AuditStore {
   /** Origin and time of the last applied capture-read/capture-generate of target. */
   /** itemModified: the Keychain item's modification time recorded at capture (ISO), or "". */
   lastCapture(target: string): { origin: string; ts: string; itemModified: string } | null;
+  /** Per (provider, target, variable) of project: its latest applied set/rotate record. */
+  writtenDestinations(project: string): WrittenDestination[];
   pendingMirror(limit: number): AuditRecord[];
   markMirrored(auditIds: string[], ts: string): void;
   close(): void;
