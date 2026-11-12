@@ -50,7 +50,7 @@ zks apply --only STRIPE_SECRET_KEY --target vercel-prod
 
 A policy using every provider lives in [`zks.policy.example.json`](./zks.policy.example.json).
 
-## What 0.2.0 adds
+## What 0.2.0 and 0.3.0 add
 
 | Area | Feature | Where to read |
 | --- | --- | --- |
@@ -59,6 +59,8 @@ A policy using every provider lives in [`zks.policy.example.json`](./zks.policy.
 | Sources | `generate` formats (`uuid`, `jwt-secret`, `password`, `rsa-private-key`, `ed25519-private-key`), `template` (`${NAME}`, `${NAME:url}`) and `public-key` derived in memory | [Sources](#sources) |
 | Lifecycle | `zks rotate NAME`, `zks inventory`, `plan` effects per provider, `zks doctor --fix` | [Rotate](#rotate), [Inventory](#inventory), [Plan effects](#plan-effects), [Doctor --fix](#doctor---fix) |
 | Destinations | `netlify`, `docker-swarm` (unix socket only), `compose` secret files, `dotenv` (`.env*` files, mode 600) | [Providers](#providers) |
+| Run (0.3.0) | `zks run -- <command>`: the selected secrets exist only in that child process; dialog every time | [Run](#run) |
+| Login (0.3.0) | `zks capture login` with recipes (`hostgator`, `cpanel`): the agent's browser logs in with a Keychain password it never sees | [Login](#login-capture-login) |
 
 Planned next (not built yet): capture recipes per provider (`zks capture recipe vercel-token`), a Playwright/Chrome capture backend, reading tokens that arrive as a downloaded file, capture inside modals and shadow DOM, a `zks mcp` stdio server so any agent can call `plan`/`apply`/`capture` without a shell, and `zks init --detect` that drafts the policy from `.env.example`, `vercel.json` and `railway.toml`. Tracked in [`odd/tasks/zks-v2.md`](./odd/tasks/zks-v2.md).
 
