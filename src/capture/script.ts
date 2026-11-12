@@ -211,13 +211,21 @@ async function fill(page) {
   const prepared = pageResult(await page.evaluate(preparePassword, { selector: spec.selector, expected: spec.origin }));
   if (!prepared.ok) return prepared;
   if (!(await originMatches(page))) return { ok: false, code: "origin_mismatch" };
-  const found = spawnSync(SECURITY, ["find-generic-password", "-s", spec.service, "-a", spec.account, "-w"], { timeout: 15000 });
+  // -g, not -w: -w prints non-printable values as hex, indistinguishable from a hex-looking value.
+  const found = spawnSync(SECURITY, ["find-generic-password", "-s", spec.service, "-a", spec.account, "-g"], { timeout: 15000 });
   if (found.status === 44) return { ok: false, code: "not_found" };
-  if (found.status !== 0 || !found.stdout) return { ok: false, code: "keychain_failed" };
-  const bytes = found.stdout;
-  const end = bytes.length > 0 && bytes[bytes.length - 1] === 10 ? bytes.length - 1 : bytes.length;
-  let value = bytes.subarray(0, end).toString("utf8");
+  if (found.status !== 0 || !found.stderr) return { ok: false, code: "keychain_failed" };
+  const bytes = found.stderr;
+  const line = /^password: (.*)$/m.exec(bytes.toString("latin1"));
+  const rest = line ? line[1] : null;
+  const hex = rest === null ? null : /^0x([0-9A-Fa-f]*)(?:\s|$)/.exec(rest);
+  let value = null;
+  if (rest === "") value = "";
+  else if (hex && hex[1].length % 2 === 0) value = Buffer.from(hex[1], "hex").toString("utf8");
+  else if (rest !== null && rest.length >= 2 && rest.startsWith('"') && rest.endsWith('"')) value = rest.slice(1, -1);
   bytes.fill(0);
+  if (found.stdout) found.stdout.fill(0);
+  if (value === null) return { ok: false, code: "keychain_failed" };
   if (value.length === 0) return { ok: false, code: "not_found" };
   const length = value.length;
   let typed = false;

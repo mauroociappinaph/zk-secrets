@@ -52,10 +52,10 @@ const spec = (over: Partial<CaptureScriptSpec> = {}): CaptureScriptSpec => ({
 
 const AsyncFunction = Object.getPrototypeOf(async () => undefined).constructor as new (...args: string[]) => (...a: unknown[]) => Promise<void>;
 
-/** A stand-in for /usr/bin/security: `-i` swallows stdin, find-generic-password prints CANARY. */
+/** A stand-in for /usr/bin/security: `-i` swallows stdin, find-generic-password -g prints CANARY's password line on stderr. */
 function fakeSecurity(exitCode = 0): string {
   const path = join(tempDir(), "security");
-  writeFileSync(path, `#!/bin/sh\nif [ "$1" = "-i" ]; then cat >/dev/null; exit ${exitCode}; fi\nprintf '%s\\n' '${CANARY}'\nexit ${exitCode}\n`);
+  writeFileSync(path, `#!/bin/sh\nif [ "$1" = "-i" ]; then cat >/dev/null; exit ${exitCode}; fi\nprintf 'password: "%s"\\n' '${CANARY}' >&2\nexit ${exitCode}\n`);
   chmodSync(path, 0o700);
   return path;
 }
