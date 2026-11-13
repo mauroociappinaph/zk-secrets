@@ -50,7 +50,7 @@ zks apply --only STRIPE_SECRET_KEY --target vercel-prod
 
 A policy using every provider lives in [`zks.policy.example.json`](./zks.policy.example.json).
 
-## What 0.2.0 to 0.5.0 add
+## What 0.2.0 to 0.6.0 add
 
 | Area | Feature | Where to read |
 | --- | --- | --- |
@@ -256,9 +256,32 @@ zks run --only DATABASE_URL,STRIPE_SECRET_KEY -- pnpm test
 
 ## Inventory
 
-`zks inventory [--project P] [--policy FILE] [--older-than <N>d]` reads only the local audit log (no network, no values) and the policy. For each variable × destination it prints `{variable, provider, target, environment, lastWrittenAt, ageDays, writes, status}`: the latest applied `set` or `rotate` record, its age in whole days and how many applied writes there were. `status` is `written`, `never_written` (in the policy, never written: `lastWrittenAt` and `ageDays` are `null`, `writes` 0) or `not_in_policy` (written before, no longer in the policy). Denied and failed writes, captures and `zks run` records do not count.
+`zks inventory [--project P] [--policy FILE] [--older-than <N>d]` reads only the local audit log (no network, no values) and the policy. For each variable × destination it prints `{variable, provider, target, environment, lastWrittenAt, ageDays, writes, status, renew}`: the latest applied `set` or `rotate` record, its age in whole days and how many applied writes there were. `status` is `written`, `never_written` (in the policy, never written: `lastWrittenAt` and `ageDays` are `null`, `writes` 0) or `not_in_policy` (written before, no longer in the policy). Denied and failed writes, captures and `zks run` records do not count.
 
-`--older-than <N>d` (N a whole number of days from 1 to 3650, e.g. `--older-than 90d`) lists only what is due for rotation: entries whose last applied write is strictly more than N days old, plus `never_written` entries (unknown age). The output then adds `olderThanDays: N`; names, destinations and dates only, never a value. Any other form is a usage error (exit 2). Without the option the output is unchanged.
+`--older-than <N>d` (N a whole number of days from 1 to 3650, e.g. `--older-than 90d`) lists only what is due for rotation: entries whose last applied write is strictly more than N days old, plus `never_written` entries (unknown age). The output then adds `olderThanDays: N`; names, destinations and dates only, never a value. Any other form is a usage error (exit 2). Without the option every entry is listed and there is no `olderThanDays`.
+
+Every entry of a policy variable (with or without `--older-than`) ends with `renew`, how to replace its value (metadata only, never a value):
+
+- `generate`: `{"how":"rotate","command":"zks rotate NAME"}`. A `template` or `public-key` derived from generated variables names the first in policy order and lists the others in `also`; one derived from no generated variable lists the sources it reads in `from` (`{variable, source, step}`), or is `how: "edit"` when they are all literals.
+- `keychain`, `op`, `dotenv`, `prompt`, `clipboard`: `{"how":"source","source":KIND,"step":...,"then":"zks apply --only NAME"}`.
+- literal values: `{"how":"edit","step":"change the value in the policy","then":"zks apply --only NAME"}`.
+- `not_in_policy` entries, and every entry without a policy to compare with, have no `renew`.
+
+zks never revokes the old value at the provider: every `rotate` and `source` hint adds `"revoke":"delete the old value at the provider yourself"`.
+
+```json
+{
+  "variable": "STRIPE_SECRET_KEY", "provider": "vercel", "target": "web", "environment": "production",
+  "lastWrittenAt": "2026-08-01T08:00:00.000Z", "ageDays": 104, "writes": 1, "status": "written",
+  "renew": {
+    "how": "source",
+    "source": "keychain",
+    "step": "replace the Keychain item stripe/secret with a new value from the provider (zks capture read or zks capture file)",
+    "then": "zks apply --only STRIPE_SECRET_KEY",
+    "revoke": "delete the old value at the provider yourself"
+  }
+}
+```
 
 The project is `--project` or the policy's `project`. With `--project` and no policy file in the directory, or a policy of another project, the audit entries are listed without a comparison (`policy: null`, every entry `written`).
 

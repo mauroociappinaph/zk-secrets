@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-13
+
+### Added
+
+- `zks inventory`: every entry of a policy variable carries `renew`, how to replace its value, metadata only. `how: "rotate"` with the `zks rotate` command (for a derived value, the generated variable it comes from, plus `also`); `how: "source"` with the step for its source (Keychain item, 1Password reference, dotenv key, dialog, clipboard) and `then: "zks apply --only NAME"`; `how: "edit"` for literal values. zks never revokes the old value: `revoke` reminds you to delete it at the provider.
+
 ## [0.5.0] - 2026-11-13
 
 ### Added
@@ -71,7 +77,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hardening: zks ignores the caller's environment (`env -i`), ignores AWS `endpoint_url` and `gh` host config, rejects prototype keys and bounds the dialog size.
 - `install.sh` and `uninstall.sh`, a global agent skill (`skill/SKILL.md`), a `~/AGENTS.md` rule, architecture and agent-flow docs, and CI.
 
-[Unreleased]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.2.0...v0.3.0
