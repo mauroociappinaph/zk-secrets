@@ -33,7 +33,9 @@ import {
   planOperations,
   sourceKindOf,
   validatePolicy,
+  VARIABLE_NAME,
 } from "./policy/validate.ts";
+import { WHERE_MAX_FILES, isDotenvTemplate, scanProject, type Reference } from "./where/scan.ts";
 import type { Operation, Policy, Provider, SourceSpec, TargetConfig } from "./policy/types.ts";
 import { Redactor } from "./secret/redactor.ts";
 import { SecretBuffer } from "./secret/secret-buffer.ts";
@@ -101,6 +103,8 @@ export interface Deps {
   home: string;
   /** `zks capture file`: lstat, realpath, no-follow read and unlink. */
   fileIo: FileIo;
+  /** `zks where`: most files read (default WHERE_MAX_FILES); tests lower it. */
+  whereMaxFiles?: number;
 }
 
 export interface RunOutput {
@@ -167,6 +171,7 @@ const COMMAND_FLAGS: Record<string, string[]> = {
   rotate: ["--policy", "--target"],
   run: ["--policy", "--only", "--agent"],
   inventory: ["--policy", "--project", "--older-than"],
+  where: ["--policy"],
   doctor: ["--fix"],
   "audit list": ["--limit", "--project"],
   "capture read": ["--space", "--page", "--selector", "--store", "--click", "--origin", "--isolated", "--url"],
@@ -197,7 +202,7 @@ const SUBCOMMANDS: Record<string, string[]> = {
   trust: ["list", "remove"],
   capture: ["read", "fill", "login", "recipes", "clipboard", "file"],
 };
-const COMMANDS = ["init", "validate", "plan", "apply", "rotate", "run", "inventory", "doctor", ...Object.keys(SUBCOMMANDS)];
+const COMMANDS = ["init", "validate", "plan", "apply", "rotate", "run", "inventory", "where", "doctor", ...Object.keys(SUBCOMMANDS)];
 
 interface ParsedArgs {
   positionals: string[];
@@ -249,6 +254,7 @@ function positionalLimit(command: string, sub: string | undefined): number | und
     case "run":
       return 1;
     case "rotate":
+    case "where":
       return 2;
     case "audit":
       return 2;
@@ -415,6 +421,8 @@ async function dispatch(argv: string[], deps: Deps, redactor: Redactor): Promise
       return runCommand(deps, runArgv, flags, redactor);
     case "inventory":
       return inventory(deps, flags);
+    case "where":
+      return where(deps, sub, flags);
     case "auth":
       return auth(deps, sub, arg);
     case "audit":
@@ -954,6 +962,72 @@ async function inventory(deps: Deps, flags: Map<string, string>): Promise<RunOut
     return !Number.isFinite(written) || now - written > limit;
   });
   return json(EXIT_OK, { ok: true, project: name, policy: policy ? policyFile : null, olderThanDays, entries: old });
+}
+
+const WHERE_USAGE = "usage: zks where NAME [--policy FILE]";
+
+/** Whether a policy target of the variable writes the place a reference points at. */
+function coveredBy(ref: Reference, targets: TargetConfig[], cwd: string): boolean {
+  const providers = new Set(targets.map((t) => t.provider));
+  switch (ref.kind) {
+    case "github-workflow":
+      return providers.has("github");
+    case "compose":
+    case "dockerfile":
+      return providers.has("compose") || providers.has("docker-swarm");
+    case "railway":
+    case "vercel":
+    case "netlify":
+      return providers.has(ref.kind);
+    case "dotenv": {
+      const path = resolvePath(cwd, ref.path);
+      return targets.some((t) => t.provider === "dotenv" && t.path === path);
+    }
+    default:
+      return false;
+  }
+}
+
+/**
+ * Every file of the project that names NAME (whole word), split into places a policy target of
+ * NAME writes, places zks does not know and code or scripts that read it. Read-only, metadata
+ * only: paths, line numbers and kinds, never a line of text; no dialog, no audit, no network.
+ */
+async function where(deps: Deps, name: string | undefined, flags: Map<string, string>): Promise<RunOutput> {
+  if (name === undefined) throw new UsageError(WHERE_USAGE);
+  // Never echoed when invalid: it might be a pasted secret.
+  if (!VARIABLE_NAME.test(name)) throw new UsageError(`NAME must match ${VARIABLE_NAME}`);
+  const policyFlag = flags.get("--policy");
+  const policy = await loadPolicy(deps, policyFlag);
+  const inPolicy = Object.hasOwn(policy.variables, name);
+  const keys = inPolicy ? (policy.variables[name] as Policy["variables"][string]).targets : [];
+  const configs = keys.map((key) => policy.targets[key] as TargetConfig);
+  const scan = await scanProject(deps.cwd, name, {
+    exec: deps.exec,
+    limit: deps.whereMaxFiles ?? WHERE_MAX_FILES,
+    // The policy names every variable; it is zks's own file, not a reference.
+    exclude: new Set([resolvePath(deps.cwd, policyFlag ?? "zks.policy.json")]),
+  });
+  const managed: Reference[] = [];
+  const unmanaged: Reference[] = [];
+  const consumers: Reference[] = [];
+  for (const ref of scan.references) {
+    if (ref.kind === "code" || ref.kind === "script") consumers.push(ref);
+    // A dotenv template only documents the name: managed as soon as the policy has NAME.
+    else if ((ref.kind === "dotenv" && isDotenvTemplate(ref.path)) ? inPolicy : coveredBy(ref, configs, deps.cwd)) managed.push(ref);
+    else unmanaged.push(ref);
+  }
+  return json(EXIT_OK, {
+    ok: true,
+    name,
+    inPolicy,
+    targets: keys.map((key, i) => ({ target: key, provider: (configs[i] as TargetConfig).provider })),
+    managed,
+    unmanaged,
+    consumers,
+    scanned: scan.scanned,
+    truncated: scan.truncated,
+  });
 }
 
 interface AuditContext {

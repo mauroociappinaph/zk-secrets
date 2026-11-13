@@ -50,7 +50,7 @@ zks apply --only STRIPE_SECRET_KEY --target vercel-prod
 
 A policy using every provider lives in [`zks.policy.example.json`](./zks.policy.example.json).
 
-## What 0.2.0 to 0.6.0 add
+## What 0.2.0 to 0.7.0 add
 
 | Area | Feature | Where to read |
 | --- | --- | --- |
@@ -63,6 +63,7 @@ A policy using every provider lives in [`zks.policy.example.json`](./zks.policy.
 | Login (0.3.0) | `zks capture login` with recipes (`hostgator`, `cpanel`): the agent's browser logs in with a Keychain password it never sees | [Login](#login-capture-login) |
 | Clipboard (0.4.0) | `{"kind":"clipboard"}` source (to any destination, GitHub Actions included) and `zks capture clipboard --store SERVICE/ACCOUNT`; always asks, even for trusted destinations; the clipboard is cleared after reading only if unchanged | [Sources](#sources), [Clipboard capture](#clipboard-capture) |
 | File (0.5.0) | `zks capture file --store SERVICE/ACCOUNT PATH`: a downloaded key file (Google `.json`, Apple `.p8`) from `~/Downloads` or the project into the Keychain, then the file is deleted; always asks; never deleted on failure | [File capture](#file-capture) |
+| Where (0.7.0) | `zks where NAME`: every project file that names a key (workflows, Compose, Dockerfile, Railway, Vercel, Netlify, dotenv files, other CI, scripts, code), split into places zks manages, places it does not know and consumers; paths and line numbers only, never a line | [Where](#where) |
 
 Planned next (not built yet): capture recipes per provider (`zks capture recipe vercel-token`), a Playwright/Chrome capture backend, capture inside modals and shadow DOM, a `zks mcp` stdio server so any agent can call `plan`/`apply`/`capture` without a shell, and `zks init --detect` that drafts the policy from `.env.example`, `vercel.json` and `railway.toml`. Tracked in [`odd/tasks/zks-v2.md`](./odd/tasks/zks-v2.md).
 
@@ -86,6 +87,8 @@ zks inventory [--project P] [--policy FILE] [--older-than <N>d]
                                             Which variable is in which destination and how old
                                             (audit log metadata, no network); --older-than keeps
                                             writes older than N days (1-3650) and never-written ones
+zks where NAME [--policy FILE]              Every project file that names NAME: managed, unmanaged
+                                            and consumers (paths and line numbers, never a line)
 zks auth status                             Show which provider tokens are in the Keychain
 zks auth set <vercel|railway|supabase|netlify|sheets-hmac>
                                             Store a token through a hidden dialog
@@ -284,6 +287,31 @@ zks never revokes the old value at the provider: every `rotate` and `source` hin
 ```
 
 The project is `--project` or the policy's `project`. With `--project` and no policy file in the directory, or a policy of another project, the audit entries are listed without a comparison (`policy: null`, every entry `written`).
+
+## Where
+
+`zks where NAME [--policy FILE]` answers "which places use this key" before a rotation or a renew, so none is left with the old value. It searches the project for **the name only**, never a value, and prints paths, line numbers and kinds; never a line of text (a dotenv line holds the value). Read-only: no dialog, no audit record, no network.
+
+- `NAME` must match the policy variable-name rule (`^[A-Za-z_][A-Za-z0-9_]{0,127}$`, otherwise exit 2 without echoing it); it need not be in the policy.
+- Files: `git ls-files --cached --others --exclude-standard` when the current directory is in a Git work tree (tracked and untracked, `.gitignore` respected), otherwise a walk of the current directory. Always skipped: `node_modules`, `.git`, `dist` and `build` directories, symlinks, files over 1 MiB, binary files (a NUL byte) and the policy file itself. At most 20,000 files; beyond that `truncated` is `true`.
+- Matches are whole words (`[A-Za-z0-9_]` boundaries): `STRIPE_KEY` does not match `STRIPE_KEY_ID` or `MY_STRIPE_KEY`. A line counts once.
+- `kind` of each file: `github-workflow` (`.github/workflows/*.yml|yaml`), `compose` (`*compose*.yml|yaml`), `dockerfile` (`Dockerfile`, `Dockerfile.*`, `*.dockerfile`), `railway` (`railway.toml|json`), `vercel` (`vercel.json`), `netlify` (`netlify.toml`), `dotenv` (the file names a `dotenv` target accepts), `ci-other` (`.gitlab-ci.yml`, `bitbucket-pipelines.yml`, `azure-pipelines.yml`, `.travis.yml`, `.drone.yml`, `Jenkinsfile`, `.circleci/`, `.buildkite/`), `script` (`*.sh`, `Makefile`, `package.json`), `code` (anything else).
+- `managed`: a policy target of NAME writes that place: `github-workflow` ↔ a `github` target, `compose` and `dockerfile` ↔ `compose` or `docker-swarm`, `railway`, `vercel` and `netlify` ↔ the same provider, `dotenv` ↔ a `dotenv` target with that exact path. Dotenv templates (`*.example`, `*.sample`, `*.template`) only document the name: managed as soon as NAME is in the policy.
+- `unmanaged`: every other place (a `ci-other` file always is): **a place that uses this key and zks does not know**. Update it by hand or add a target, then rotate.
+- `consumers`: `code` and `script` references, which read the key at run time rather than store it.
+
+```json
+{
+  "ok": true, "name": "DB_PASSWORD", "inPolicy": true,
+  "targets": [{ "target": "web", "provider": "vercel" }],
+  "managed": [{ "path": "vercel.json", "line": 4, "kind": "vercel" }],
+  "unmanaged": [{ "path": "backup/docker-compose.yml", "line": 12, "kind": "compose" }],
+  "consumers": [{ "path": "src/db.ts", "line": 3, "kind": "code" }],
+  "scanned": 214, "truncated": false
+}
+```
+
+Exit 0 on every completed scan: unmanaged entries are a finding, not an error. Only files in the project are searched; a provider, server or backup job configured outside the repository is not, so tell the human to check those too.
 
 ## Plan effects
 

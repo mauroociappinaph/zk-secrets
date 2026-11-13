@@ -25,6 +25,10 @@ Usage:
                                               and how to renew each (renew: rotate, source or edit;
                                               audit log metadata, no network); --older-than keeps
                                               writes older than N days (1-3650) and never-written ones
+  zks where NAME [--policy FILE]              Every project file that names NAME (whole word; git ls-files
+                                              or a walk; never a line of text): managed (a policy target
+                                              of NAME writes it), unmanaged (zks does not know it) and
+                                              consumers (code, scripts); read-only, exit 0
   zks auth status                             Show which provider tokens are in the Keychain
   zks auth set <vercel|railway|supabase|netlify|sheets-hmac>
                                               Store a token through a hidden dialog
