@@ -1,4 +1,4 @@
-import { createPublicKey, generateKeyPair, randomBytes as nodeRandomBytes, timingSafeEqual } from "node:crypto";
+import { createPublicKey, generateKeyPair, randomBytes as nodeRandomBytes } from "node:crypto";
 import { promisify } from "node:util";
 import { readFile as nodeReadFile, realpath as nodeRealpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve as resolvePath } from "node:path";
@@ -323,7 +323,7 @@ export async function pasteClipboard(exec: Exec): Promise<SecretBuffer> {
 
 /**
  * Empties the clipboard only if it still holds `value` (the value zks read, same newline rule):
- * it is re-read and compared in constant time, so content the human copied since is left alone.
+ * it is re-read and its raw bytes compared in constant time, so content the human copied since is left alone.
  * False when the clipboard changed, could not be re-read, or pbcopy failed.
  */
 export async function clearClipboard(exec: Exec, value: SecretBuffer): Promise<boolean> {
@@ -331,14 +331,8 @@ export async function clearClipboard(exec: Exec, value: SecretBuffer): Promise<b
   if (!res) return false;
   const current = res.stdout;
   try {
-    if (res.code !== 0 || value.disposed) return false;
-    const read = Buffer.from(value.reveal(), "utf8");
-    try {
-      const end = trimmedLength(current);
-      if (read.length !== end || !timingSafeEqual(read, current.subarray(0, end))) return false;
-    } finally {
-      read.fill(0);
-    }
+    // Raw bytes against raw bytes: a non-UTF-8 clipboard compares as it is.
+    if (res.code !== 0 || value.disposed || !value.equals(current.subarray(0, trimmedLength(current)))) return false;
   } finally {
     current.fill(0);
   }

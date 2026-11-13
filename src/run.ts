@@ -154,6 +154,7 @@ const FLAGS_WITH_VALUE = [
   "--submit-selector",
   "--success-selector",
   "--recipe",
+  "--older-than",
 ];
 
 /** Options each command uses; any other option is refused. --help and --version are global. */
@@ -164,7 +165,7 @@ const COMMAND_FLAGS: Record<string, string[]> = {
   apply: ["--policy", "--only", "--target", "--agent"],
   rotate: ["--policy", "--target"],
   run: ["--policy", "--only", "--agent"],
-  inventory: ["--policy", "--project"],
+  inventory: ["--policy", "--project", "--older-than"],
   doctor: ["--fix"],
   "audit list": ["--limit", "--project"],
   "capture read": ["--space", "--page", "--selector", "--store", "--click", "--origin", "--isolated", "--url"],
@@ -796,6 +797,15 @@ async function syncAfterRun(deps: Deps, redactor: Redactor): Promise<void> {
 }
 
 const DAY_MS = 86_400_000;
+const OLDER_THAN_USAGE = "--older-than must be <N>d with N a whole number of days from 1 to 3650, e.g. 90d";
+
+/** Days of `--older-than <N>d`: N an integer from 1 to 3650, no sign, leading zero or other unit. */
+function parseOlderThan(value: string): number {
+  const match = /^([1-9][0-9]{0,3})d$/.exec(value);
+  const days = match ? Number(match[1]) : 0;
+  if (days < 1 || days > 3650) throw new UsageError(OLDER_THAN_USAGE);
+  return days;
+}
 
 interface InventoryEntry {
   variable: string;
@@ -815,6 +825,8 @@ interface InventoryEntry {
 async function inventory(deps: Deps, flags: Map<string, string>): Promise<RunOutput> {
   const project = flags.get("--project");
   if (project !== undefined && !PROJECT_NAME.test(project)) throw new UsageError(`--project must match ${PROJECT_NAME}`);
+  const olderThanFlag = flags.get("--older-than");
+  const olderThanDays = olderThanFlag === undefined ? undefined : parseOlderThan(olderThanFlag);
   const policyFlag = flags.get("--policy");
   const policyFile = resolvePath(deps.cwd, policyFlag ?? "zks.policy.json");
   // With --project and no --policy, a missing default policy only means there is nothing to compare with.
@@ -867,7 +879,14 @@ async function inventory(deps: Deps, flags: Map<string, string>): Promise<RunOut
     for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return (x[i] as string) < (y[i] as string) ? -1 : 1;
     return 0;
   });
-  return json(EXIT_OK, { ok: true, project: name, policy: policy ? policyFile : null, entries });
+  if (olderThanDays === undefined) return json(EXIT_OK, { ok: true, project: name, policy: policy ? policyFile : null, entries });
+  // Strictly older than N days; an entry never written (or with an unreadable date) has an unknown age and stays.
+  const limit = olderThanDays * DAY_MS;
+  const old = entries.filter((e) => {
+    const written = e.lastWrittenAt === null ? Number.NaN : Date.parse(e.lastWrittenAt);
+    return !Number.isFinite(written) || now - written > limit;
+  });
+  return json(EXIT_OK, { ok: true, project: name, policy: policy ? policyFile : null, olderThanDays, entries: old });
 }
 
 interface AuditContext {

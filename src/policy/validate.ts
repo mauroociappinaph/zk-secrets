@@ -522,7 +522,7 @@ export function describeSource(source: SourceSpec | undefined, cwd: string): str
     case "prompt":
       return "typed by you in a hidden dialog";
     case "clipboard":
-      return "the clipboard (cleared after reading)";
+      return "the clipboard (cleared once used, if unchanged)";
     case "generate":
       switch (source.format ?? "random") {
         case "random":

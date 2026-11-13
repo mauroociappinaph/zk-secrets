@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import { inspect } from "node:util";
 
 const REDACTED = "[REDACTED]";
@@ -35,6 +36,15 @@ export class SecretBuffer {
   reveal(): string {
     if (this.#disposed) throw new Error("secret already disposed");
     return this.#bytes.toString("utf8");
+  }
+
+  /**
+   * True when `bytes` holds exactly these raw bytes (no string round trip, so non-UTF-8 bytes
+   * compare as they are). Constant time for equal lengths; `bytes` is not modified or kept.
+   */
+  equals(bytes: Buffer): boolean {
+    if (this.#disposed) throw new Error("secret already disposed");
+    return bytes.length === this.#bytes.length && timingSafeEqual(this.#bytes, bytes);
   }
 
   dispose(): void {

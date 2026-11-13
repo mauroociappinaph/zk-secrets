@@ -82,8 +82,10 @@ zks run [--policy FILE] [--only A,B] [--agent LABEL] -- <command> [args...]
                                             Run one command with the variables as its env vars only;
                                             always asks (shows command, args, dir, names); exits
                                             with the command's code and prints nothing of its own
-zks inventory [--project P] [--policy FILE] Which variable is in which destination and how old
-                                            (audit log metadata, no network)
+zks inventory [--project P] [--policy FILE] [--older-than <N>d]
+                                            Which variable is in which destination and how old
+                                            (audit log metadata, no network); --older-than keeps
+                                            writes older than N days (1-3650) and never-written ones
 zks auth status                             Show which provider tokens are in the Keychain
 zks auth set <vercel|railway|supabase|netlify|sheets-hmac>
                                             Store a token through a hidden dialog
@@ -254,7 +256,9 @@ zks run --only DATABASE_URL,STRIPE_SECRET_KEY -- pnpm test
 
 ## Inventory
 
-`zks inventory [--project P] [--policy FILE]` reads only the local audit log (no network, no values) and the policy. For each variable × destination it prints `{variable, provider, target, environment, lastWrittenAt, ageDays, writes, status}`: the latest applied `set` or `rotate` record, its age in whole days and how many applied writes there were. `status` is `written`, `never_written` (in the policy, never written: `lastWrittenAt` and `ageDays` are `null`, `writes` 0) or `not_in_policy` (written before, no longer in the policy). Denied and failed writes, captures and `zks run` records do not count.
+`zks inventory [--project P] [--policy FILE] [--older-than <N>d]` reads only the local audit log (no network, no values) and the policy. For each variable × destination it prints `{variable, provider, target, environment, lastWrittenAt, ageDays, writes, status}`: the latest applied `set` or `rotate` record, its age in whole days and how many applied writes there were. `status` is `written`, `never_written` (in the policy, never written: `lastWrittenAt` and `ageDays` are `null`, `writes` 0) or `not_in_policy` (written before, no longer in the policy). Denied and failed writes, captures and `zks run` records do not count.
+
+`--older-than <N>d` (N a whole number of days from 1 to 3650, e.g. `--older-than 90d`) lists only what is due for rotation: entries whose last applied write is strictly more than N days old, plus `never_written` entries (unknown age). The output then adds `olderThanDays: N`; names, destinations and dates only, never a value. Any other form is a usage error (exit 2). Without the option the output is unchanged.
 
 The project is `--project` or the policy's `project`. With `--project` and no policy file in the directory, or a policy of another project, the audit entries are listed without a comparison (`policy: null`, every entry `written`).
 
