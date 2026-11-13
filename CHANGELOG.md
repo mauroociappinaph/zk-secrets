@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-13
+
+### Added
+
+- `zks capture file --store SERVICE/ACCOUNT PATH`: stores a downloaded key file (Google `.json`, Apple `.p8`) in a Keychain item exactly as read, then deletes the file. The file must be a regular, non-symlink UTF-8 text file of 1-65536 bytes inside `~/Downloads` or a current directory strictly below your home, never through a hidden directory (`.ssh`, `.aws`, `.git`). It always asks first (path, size, store); a denial or any failure keeps the file; a failed write restores the old item. Reports `length` and `fileDeleted`; audited as `capture-file` without the path. Errors `file_invalid`, `file_not_found`; the `zks` service is refused.
+- `zks inventory --older-than <N>d` (N 1-3650): only entries last written more than N days ago, plus entries with no known write; adds `olderThanDays`.
+
+### Changed
+
+- The clipboard compare-before-clear compares raw bytes, so an unchanged non-UTF-8 clipboard is cleared too. `plan` describes the clipboard source as "the clipboard (cleared once used, if unchanged)".
+
 ## [0.4.0] - 2026-11-13
 
 ### Added
@@ -60,7 +71,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hardening: zks ignores the caller's environment (`env -i`), ignores AWS `endpoint_url` and `gh` host config, rejects prototype keys and bounds the dialog size.
 - `install.sh` and `uninstall.sh`, a global agent skill (`skill/SKILL.md`), a `~/AGENTS.md` rule, architecture and agent-flow docs, and CI.
 
-[Unreleased]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.1.0...v0.2.0
