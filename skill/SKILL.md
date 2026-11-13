@@ -107,6 +107,7 @@ Capture straight into the Keychain item the app expects. Example: a tool that re
    | Already in the macOS Keychain | `{"kind":"keychain","service":"...","account":"..."}` |
    | Migrating an existing `.env` file | `{"kind":"dotenv","path":".env.production","key":"NAME"}` — pass the path, never open the file; it must be a relative `.env*` file inside the project (no `..`, no absolute path) |
    | Only the human knows it and no site issues it | `{"kind":"prompt"}` — zks opens a hidden dialog |
+   | The human says they already copied it | `{"kind":"clipboard"}` — read at apply and cleared; to keep it, `zks capture clipboard --store <svc>/<account>` then `keychain`. Never ask the human to copy a secret, and never run `pbpaste` yourself |
    | Non-sensitive config (`sensitive: false`) | `"value": "..."` instead of `source` |
 
 3. **Validate.** `zks validate`. Fix every listed issue and rerun until `"ok": true`.

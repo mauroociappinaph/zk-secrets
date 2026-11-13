@@ -13,9 +13,9 @@ Every spec keeps the v1 guarantees of `odd/tasks/zks.md` S1 (no value in argv, e
 
 ## Tasks
 
-- [ ] T1 — S1, S2: clipboard source, validation, describe, tests (inline) — commit: pending
-- [ ] T2 — S3: `zks capture clipboard` + tests (inline) — commit: pending
-- [ ] T3 — S4: help, docs, skill, CHANGELOG, version 0.4.0 (inline) — commit: pending
+- [x] T1 — S1, S2: clipboard source, validation, describe, tests (inline) — commit: 2952328
+- [x] T2 — S3: `zks capture clipboard` + tests (inline) — commit: c12628b
+- [x] T3 — S4: help, docs, skill, CHANGELOG, version 0.4.0 (inline) — commit: this docs commit
 
 ## Log
 
