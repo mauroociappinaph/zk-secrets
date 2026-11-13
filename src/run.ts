@@ -600,6 +600,8 @@ interface RotateCheck {
   status: "current" | "stale" | "missing" | "unknown";
   providerTime?: string;
   lastWrite?: string;
+  /** The newest applied write of the variable anywhere, when this destination did not get it. */
+  newestWrite?: string;
   reason?: string;
 }
 
@@ -626,16 +628,35 @@ async function rotateCheck(
   }
   const key = (variable: string, target: string, provider: string) => `${variable}\u0000${target}\u0000${provider}`;
   const lastWrites = new Map(rows.map((row) => [key(row.variableName, row.target, row.provider), row.lastWrittenAt]));
+  // The newest applied write of each variable to any destination: a destination it did not reach is stale,
+  // even when its provider time matches that destination's own older write (a partial rotation or renew).
+  const newest = new Map<string, number>();
+  for (const row of rows) {
+    const time = Date.parse(row.lastWrittenAt);
+    if (Number.isFinite(time) && time > (newest.get(row.variableName) ?? Number.NEGATIVE_INFINITY)) newest.set(row.variableName, time);
+  }
   const ctx = { fetch: deps.fetch, exec: deps.exec, keychain: deps.keychain, aws: deps.aws, tools: deps.tools };
 
   const checks: RotateCheck[] = [];
   for (const op of ops) {
     const provider = op.target.provider;
     const lastWrite = lastWrites.get(key(op.name, op.targetKey, provider));
-    const base = { variable: op.name, target: op.targetKey, provider, destination: describeDestination(op), ...(lastWrite ? { lastWrite } : {}) };
+    const own = lastWrite === undefined ? Number.NaN : Date.parse(lastWrite);
+    const newestTime = newest.get(op.name);
+    // Missed: the audit itself shows a newer write of this variable that did not reach this destination.
+    const missed = newestTime !== undefined && (!Number.isFinite(own) || own < newestTime - CHECK_TOLERANCE_MS);
+    const base = {
+      variable: op.name,
+      target: op.targetKey,
+      provider,
+      destination: describeDestination(op),
+      ...(lastWrite ? { lastWrite } : {}),
+      ...(missed ? { newestWrite: new Date(newestTime).toISOString() } : {}),
+    };
+    const missedReason = "the newest write of this variable did not reach this destination";
     const sink = deps.sinks[provider];
     if (!sink.lastModified) {
-      checks.push({ ...base, status: "unknown", reason: `${provider} exposes no last-modified time` });
+      checks.push(missed ? { ...base, status: "stale", reason: missedReason } : { ...base, status: "unknown", reason: `${provider} exposes no last-modified time` });
       continue;
     }
     let found: Date;
@@ -646,7 +667,7 @@ async function rotateCheck(
         continue;
       }
       if (result.status === "unsupported") {
-        checks.push({ ...base, status: "unknown", reason: result.reason });
+        checks.push(missed ? { ...base, status: "stale", reason: missedReason } : { ...base, status: "unknown", reason: result.reason });
         continue;
       }
       found = result.time;
@@ -656,12 +677,14 @@ async function rotateCheck(
       continue;
     }
     const withTime = { ...base, providerTime: found.toISOString() };
-    const written = lastWrite === undefined ? Number.NaN : Date.parse(lastWrite);
-    if (!Number.isFinite(written)) {
+    // Compared with the newest write of the variable anywhere, not only this destination's own.
+    const reference = newestTime ?? own;
+    if (!Number.isFinite(reference)) {
       checks.push({ ...withTime, status: "unknown", reason: "no applied zks write of this variable to this target in the audit log" });
       continue;
     }
-    checks.push({ ...withTime, status: found.getTime() >= written - CHECK_TOLERANCE_MS ? "current" : "stale" });
+    const current = !missed && found.getTime() >= reference - CHECK_TOLERANCE_MS;
+    checks.push(current ? { ...withTime, status: "current" } : { ...withTime, status: "stale", ...(missed ? { reason: missedReason } : {}) });
   }
   const ok = checks.every((c) => c.status === "current");
   return json(ok ? EXIT_OK : EXIT_FAILED, { ok, name, checks });

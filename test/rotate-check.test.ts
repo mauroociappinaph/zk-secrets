@@ -569,3 +569,26 @@ test("S2 PRESERVE: rotate without --check still refuses a non-generated variable
 test("S2: help documents rotate --check", () => {
   assert.match(HELP_TEXT, /zks rotate NAME --check \[--target t1,t2\] \[--policy FILE\]/);
 });
+
+test("S2: a destination the newest write did not reach is stale, even when its provider time matches its own last write", async () => {
+  const { h, fake } = setup(policyFor(["gh", "de", "rw"]), { "zks/railway": CANARY });
+  await applyAll(h, fake);
+  // A later write reached only gh (a partial rotation or renew).
+  const later = at(3600);
+  h.deps.now = () => later;
+  fake.phase = "apply";
+  const second = await run(["apply", "--target", "gh"], h.deps);
+  assert.equal(second.exitCode, 0, second.stdout);
+  fake.phase = "check";
+  fake.times = { TOKEN: later };
+  utimesSync(join(h.dir, VARS_FILE), at(0), at(0));
+
+  const { out, body } = await check(h);
+  assert.equal(out.exitCode, 1, out.stdout);
+  assert.equal(only(body, "gh").status, "current");
+  const de = only(body, "de");
+  assert.deepEqual([de.status, de.lastWrite, de.newestWrite], ["stale", WRITE, later.toISOString()]);
+  const rw = only(body, "rw");
+  assert.deepEqual([rw.status, rw.newestWrite], ["stale", later.toISOString()]);
+  assert.ok(!out.stdout.includes(CANARY));
+});

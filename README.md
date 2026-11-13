@@ -247,7 +247,8 @@ Keys trusted before this format (`vercel:<teamId>`) no longer match any write; `
 
 `zks rotate NAME --check [--target t1,t2]` answers "did every place get the new value?" after a rotation or a renew. For every write `zks rotate NAME` would make (NAME and the variables derived from it, on its targets or the `--target` subset), it asks the destination **when it last changed**, from provider metadata only (never a value), and compares that time with the latest applied `set` or `rotate` audit record of the same variable × target × provider. It generates nothing, writes nothing, opens no dialog and appends no audit record; it reads provider tokens like `apply` does. It also accepts a variable without a `generate` source (no `not_rotatable`), to check its destinations after a manual renew and `zks apply`.
 
-- `current`: the provider time is at or after the audit write minus 120 seconds (clock tolerance).
+- `current`: the provider time is at or after the **newest** applied write of that variable to any destination, minus 120 seconds (clock tolerance).
+- A destination the newest write did not reach (a partial rotation or renew, per the audit) is `stale` with `newestWrite` and a reason, even when its provider time matches its own older write or the provider gives no timestamp.
 - `stale`: older than that: this destination probably still has the old value.
 - `missing`: the destination has no such variable, secret or file.
 - `unknown` with `reason`: the provider exposes no timestamp, there is no applied audit write for it (`providerTime` is still shown), or the call failed (for example a missing provider token, with its `zks auth set` hint, or `AWS AccessDeniedException`).
