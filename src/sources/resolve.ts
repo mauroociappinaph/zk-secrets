@@ -60,6 +60,8 @@ async function resolveSource(name: string, source: SourceSpec, deps: SourceDeps)
       if (!value) throw new SourceError("source_cancelled", `no value entered for ${name}`);
       return value;
     }
+    case "clipboard":
+      return readClipboard(deps.exec);
     case "generate":
       return generate(source, deps.randomBytes ?? nodeRandomBytes);
     case "public-key":
@@ -277,6 +279,37 @@ async function generate(source: GenerateSource, random: (size: number) => Buffer
       return SecretBuffer.fromString(String(privateKey.export({ type: "pkcs8", format: "pem" })));
     }
   }
+}
+
+export const PBPASTE = "/usr/bin/pbpaste";
+export const PBCOPY = "/usr/bin/pbcopy";
+
+/**
+ * Reads the macOS clipboard, drops one trailing newline (a copy from a terminal adds it) and
+ * clears the clipboard so the value does not linger. An empty clipboard is source_missing and
+ * is left as is. Clearing is best effort: the value is already read.
+ */
+export async function readClipboard(exec: Exec): Promise<SecretBuffer> {
+  const res = await exec(PBPASTE, [], { timeoutMs: 10_000 }).catch(() => null);
+  if (!res) throw new SourceError("source_unavailable", "the clipboard is not available (pbpaste)");
+  if (res.code !== 0) {
+    res.stdout.fill(0);
+    throw new SourceError("source_failed", `pbpaste could not read the clipboard (exit ${res.code})`);
+  }
+  let end = res.stdout.length;
+  if (end > 0 && res.stdout[end - 1] === 0x0a) end--;
+  if (end > 0 && res.stdout[end - 1] === 0x0d) end--;
+  const copy = Buffer.from(res.stdout.subarray(0, end));
+  res.stdout.fill(0);
+  if (copy.length === 0) throw new SourceError("source_missing", "the clipboard is empty");
+  await clearClipboard(exec);
+  return SecretBuffer.adopt(copy);
+}
+
+/** Empties the clipboard; false when pbcopy failed. */
+export async function clearClipboard(exec: Exec): Promise<boolean> {
+  const res = await exec(PBCOPY, [], { input: Buffer.alloc(0), timeoutMs: 10_000 }).catch(() => null);
+  return res !== null && res.code === 0;
 }
 
 function adoptNonEmpty(name: string, bytes: Buffer): SecretBuffer {

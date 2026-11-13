@@ -124,6 +124,8 @@ export type SourceSpec =
   | { kind: "op"; ref: string }
   | { kind: "keychain"; service: string; account: string }
   | { kind: "prompt" }
+  /** macOS clipboard (pbpaste), cleared right after it is read. */
+  | { kind: "clipboard" }
   | GenerateSource
   | { kind: "dotenv"; path: string; key?: string }
   /** SPKI PEM public key of another variable's generated private key. */

@@ -68,7 +68,7 @@ const FORMAT_OPTIONS: Record<string, string[]> = {
 };
 const GENERATE_OPTIONS = ["bytes", "encoding", "length", ...PASSWORD_CLASSES, "bits"];
 const PRIVATE_KEY_FORMATS = ["rsa-private-key", "ed25519-private-key"];
-const SOURCE_KINDS = ["op", "keychain", "prompt", "generate", "dotenv", "public-key", "template"];
+const SOURCE_KINDS = ["op", "keychain", "prompt", "clipboard", "generate", "dotenv", "public-key", "template"];
 
 export class PolicyError extends Error {
   readonly issues: string[];
@@ -314,6 +314,15 @@ function validateSource(path: string, name: string, source: unknown, variables: 
       break;
     case "prompt":
       break;
+    case "clipboard": {
+      // The first read clears the clipboard, so a second variable would always find it empty.
+      const first = Object.keys(variables).find((key) => {
+        const spec = variables[key];
+        return isObject(spec) && isObject(spec.source) && spec.source.kind === "clipboard";
+      });
+      if (first !== name) issues.push(`${path}: only one variable can use the clipboard source`);
+      break;
+    }
     case "generate":
       validateGenerate(path, source, issues);
       break;
@@ -499,6 +508,8 @@ export function describeSource(source: SourceSpec | undefined, cwd: string): str
       return `Keychain ${source.service}/${source.account}`;
     case "prompt":
       return "typed by you in a hidden dialog";
+    case "clipboard":
+      return "the clipboard (cleared after reading)";
     case "generate":
       switch (source.format ?? "random") {
         case "random":
