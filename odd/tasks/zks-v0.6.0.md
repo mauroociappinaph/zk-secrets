@@ -16,9 +16,10 @@ Feature: `zks inventory` says, for each entry, how to replace its value. Branch 
 
 ## Tasks
 
-- [ ] T1 — S1, S2: renew hints + tests + docs (worker) — commit: pending
+- [x] T1 — S1, S2: renew hints + tests + docs (worker) — commit: 6f87035
 - [ ] T2 — release: CHANGELOG, version, verify, PR, merge, install (parent) — commit: pending
 
 ## Log
 
+- L2 (decision, CTO): accepted the worker's choices: a derived value with no generated dependency lists its sources in `from`; literal-only templates use `edit`; every source shape carries `source`.
 - L1 (user, on "¿Te interesa?" about renew hints per key): "Dale"

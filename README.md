@@ -50,7 +50,7 @@ zks apply --only STRIPE_SECRET_KEY --target vercel-prod
 
 A policy using every provider lives in [`zks.policy.example.json`](./zks.policy.example.json).
 
-## What 0.2.0 to 0.5.0 add
+## What 0.2.0 to 0.6.0 add
 
 | Area | Feature | Where to read |
 | --- | --- | --- |
