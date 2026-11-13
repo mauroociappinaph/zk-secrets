@@ -124,7 +124,10 @@ export type SourceSpec =
   | { kind: "op"; ref: string }
   | { kind: "keychain"; service: string; account: string }
   | { kind: "prompt" }
-  /** macOS clipboard (pbpaste), cleared right after it is read. */
+  /**
+   * macOS clipboard (pbpaste). Cleared once the value is used (apply: after every write succeeded;
+   * run and the resolver: right after the read), and only if the clipboard still holds it.
+   */
   | { kind: "clipboard" }
   | GenerateSource
   | { kind: "dotenv"; path: string; key?: string }
