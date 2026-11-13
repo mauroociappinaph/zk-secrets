@@ -237,10 +237,10 @@ test("S8: inventory lists each secret per destination with age and write count, 
     project: "acme",
     policy: `${h.dir}/zks.policy.json`,
     entries: [
-      { variable: "A", provider: "vercel", target: "v1", environment: "production", lastWrittenAt: "2026-11-03T09:30:00.000Z", ageDays: 10, writes: 2, status: "written" },
+      { variable: "A", provider: "vercel", target: "v1", environment: "production", lastWrittenAt: "2026-11-03T09:30:00.000Z", ageDays: 10, writes: 2, status: "written", renew: { how: "source", source: "keychain", step: "replace the Keychain item app/api with a new value from the provider (zks capture read or zks capture file)", then: "zks apply --only A", revoke: "delete the old value at the provider yourself" } },
       { variable: "A", provider: "vercel", target: "v2", environment: "production", lastWrittenAt: "2026-11-01T08:00:00.000Z", ageDays: 12, writes: 1, status: "not_in_policy" },
-      { variable: "B", provider: "vercel", target: "v1", environment: "production", lastWrittenAt: null, ageDays: null, writes: 0, status: "never_written" },
-      { variable: "G", provider: "vercel", target: "v2", environment: "production", lastWrittenAt: "2026-11-03T09:30:00.000Z", ageDays: 10, writes: 1, status: "written" },
+      { variable: "B", provider: "vercel", target: "v1", environment: "production", lastWrittenAt: null, ageDays: null, writes: 0, status: "never_written", renew: { how: "edit", step: "change the value in the policy", then: "zks apply --only B" } },
+      { variable: "G", provider: "vercel", target: "v2", environment: "production", lastWrittenAt: "2026-11-03T09:30:00.000Z", ageDays: 10, writes: 1, status: "written", renew: { how: "rotate", command: "zks rotate G", revoke: "delete the old value at the provider yourself" } },
       { variable: "OLD", provider: "vercel", target: "v1", environment: "production", lastWrittenAt: "2026-11-01T08:00:00.000Z", ageDays: 12, writes: 1, status: "not_in_policy" },
     ],
   });

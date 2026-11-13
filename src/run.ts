@@ -25,6 +25,7 @@ import { describeTrustKey, loadTrust, saveTrust, trustKeyOf, type TrustFile, typ
 import {
   PROJECT_NAME,
   PolicyError,
+  dependenciesOf,
   dependentsOf,
   describeSource,
   generatedDependencies,
@@ -33,7 +34,7 @@ import {
   sourceKindOf,
   validatePolicy,
 } from "./policy/validate.ts";
-import type { Operation, Policy, Provider, TargetConfig } from "./policy/types.ts";
+import type { Operation, Policy, Provider, SourceSpec, TargetConfig } from "./policy/types.ts";
 import { Redactor } from "./secret/redactor.ts";
 import { SecretBuffer } from "./secret/secret-buffer.ts";
 import { SinkError, type AwsClientFactory, type Sink } from "./sinks/types.ts";
@@ -816,6 +817,70 @@ interface InventoryEntry {
   ageDays: number | null;
   writes: number;
   status: "written" | "never_written" | "not_in_policy";
+  renew?: Renew;
+}
+
+const REVOKE = "delete the old value at the provider yourself";
+const EDIT_STEP = "change the value in the policy";
+
+type Renew =
+  | { how: "rotate"; command: string; also?: string[]; revoke: string }
+  | { how: "source"; source: string; step: string; then: string; revoke: string }
+  | { how: "source"; from: { variable: string; source: string; step: string }[]; then: string; revoke: string }
+  | { how: "edit"; step: string; then: string };
+
+/** What the human does to get a new value from a non-derived source (metadata only, never a value). */
+function sourceStep(name: string, source: SourceSpec | undefined, cwd: string): { source: string; step: string } {
+  switch (source?.kind) {
+    case "keychain":
+      return {
+        source: "keychain",
+        step: `replace the Keychain item ${source.service}/${source.account} with a new value from the provider (zks capture read or zks capture file)`,
+      };
+    case "op":
+      return { source: "op", step: `update ${source.ref} in 1Password` };
+    case "dotenv":
+      return { source: "dotenv", step: `update ${source.key ?? name} in ${resolvePath(cwd, source.path)}` };
+    case "prompt":
+      return { source: "prompt", step: "get a new value from the provider; zks asks for it in a dialog" };
+    case "clipboard":
+      return { source: "clipboard", step: "copy a new value from the provider" };
+    default:
+      return { source: "literal", step: EDIT_STEP };
+  }
+}
+
+/** How to replace the value of a policy variable: rotate its generated origin, renew its source, or edit the policy. */
+function renewOf(policy: Policy, name: string, cwd: string): Renew {
+  const order = Object.keys(policy.variables);
+  const source = policy.variables[name]?.source;
+  const then = `zks apply --only ${name}`;
+  const derived = (s: SourceSpec | undefined) => s?.kind === "template" || s?.kind === "public-key";
+  if (source?.kind === "generate") return { how: "rotate", command: `zks rotate ${name}`, revoke: REVOKE };
+  if (!derived(source)) {
+    if (source === undefined) return { how: "edit", step: EDIT_STEP, then };
+    return { how: "source", ...sourceStep(name, source, cwd), then, revoke: REVOKE };
+  }
+  const generated = generatedDependencies(policy, name).sort((a, b) => order.indexOf(a) - order.indexOf(b));
+  const [first, ...also] = generated;
+  if (first !== undefined) {
+    return { how: "rotate", command: `zks rotate ${first}`, ...(also.length > 0 ? { also } : {}), revoke: REVOKE };
+  }
+  // No generated origin: the value comes from the non-derived variables it reads, in policy order.
+  const leaves = new Set<string>();
+  const seen = new Set<string>([name]);
+  const walk = (current: string): void => {
+    for (const dep of dependenciesOf(policy.variables[current]?.source)) {
+      if (seen.has(dep) || !Object.hasOwn(policy.variables, dep)) continue;
+      seen.add(dep);
+      if (derived(policy.variables[dep]?.source)) walk(dep);
+      else leaves.add(dep);
+    }
+  };
+  walk(name);
+  const from = order.filter((n) => leaves.has(n)).map((n) => ({ variable: n, ...sourceStep(n, policy.variables[n]?.source, cwd) }));
+  if (from.every((f) => f.source === "literal")) return { how: "edit", step: EDIT_STEP, then };
+  return { how: "source", from, then, revoke: REVOKE };
 }
 
 /**
@@ -859,6 +924,7 @@ async function inventory(deps: Deps, flags: Map<string, string>): Promise<RunOut
       ageDays: Number.isFinite(age) ? age : null,
       writes: row.writes,
       status: inPolicy ? "written" : "not_in_policy",
+      ...(inPolicy && policy !== null ? { renew: renewOf(policy, row.variableName, deps.cwd) } : {}),
     };
   });
   for (const op of planned.values()) {
@@ -871,6 +937,7 @@ async function inventory(deps: Deps, flags: Map<string, string>): Promise<RunOut
       ageDays: null,
       writes: 0,
       status: "never_written",
+      renew: renewOf(policy as Policy, op.name, deps.cwd),
     });
   }
   const order = (e: InventoryEntry) => [e.variable, e.target, e.provider];

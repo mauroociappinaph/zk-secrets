@@ -21,8 +21,9 @@ Usage:
                                               always asks (shows command, args, dir, names); exits
                                               with the command's code and prints nothing of its own
   zks inventory [--project P] [--policy FILE] [--older-than <N>d]
-                                              Which variable is in which destination and how old
-                                              (audit log metadata, no network); --older-than keeps
+                                              Which variable is in which destination, how old,
+                                              and how to renew each (renew: rotate, source or edit;
+                                              audit log metadata, no network); --older-than keeps
                                               writes older than N days (1-3650) and never-written ones
   zks auth status                             Show which provider tokens are in the Keychain
   zks auth set <vercel|railway|supabase|netlify|sheets-hmac>
