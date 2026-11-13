@@ -78,6 +78,18 @@ export function upsertDotenv(text: string, key: string, line: string): string {
   return out.join("");
 }
 
+/** Whether key has a definition of its own (not a line inside another key's multi-line value). */
+export function definesDotenvKey(text: string, key: string): boolean {
+  const lines = splitLines(text);
+  for (let i = 0; i < lines.length; i++) {
+    const match = DEFINITION.exec((lines[i] as Line).text);
+    if (!match) continue;
+    if (match[3] === key) return true;
+    i = valueEnd(lines, i, match[4] ?? "");
+  }
+  return false;
+}
+
 const STRICT_UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 /** Reads the current file without following a symlink; empty when it does not exist. */
@@ -115,5 +127,22 @@ export const dotenvSink: Sink = {
       next.fill(0);
     }
     return {};
+  },
+
+  /** The file's mtime when it defines NAME; the text is read only to find the name, then zeroed. */
+  async lastModified(op) {
+    const target = op.target as DotenvTarget;
+    const stats = await regularFileOrNull(target.path);
+    if (stats === null) return { status: "missing" };
+    const current = await readCurrent(target.path);
+    let defined: boolean;
+    try {
+      defined = definesDotenvKey(STRICT_UTF8.decode(current), op.name);
+    } catch {
+      throw new SinkError("file_not_utf8", `${target.path} is not UTF-8 text`);
+    } finally {
+      current.fill(0);
+    }
+    return defined ? { status: "found", time: stats.mtime } : { status: "missing" };
   },
 };

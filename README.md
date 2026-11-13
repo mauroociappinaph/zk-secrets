@@ -64,6 +64,7 @@ A policy using every provider lives in [`zks.policy.example.json`](./zks.policy.
 | Clipboard (0.4.0) | `{"kind":"clipboard"}` source (to any destination, GitHub Actions included) and `zks capture clipboard --store SERVICE/ACCOUNT`; always asks, even for trusted destinations; the clipboard is cleared after reading only if unchanged | [Sources](#sources), [Clipboard capture](#clipboard-capture) |
 | File (0.5.0) | `zks capture file --store SERVICE/ACCOUNT PATH`: a downloaded key file (Google `.json`, Apple `.p8`) from `~/Downloads` or the project into the Keychain, then the file is deleted; always asks; never deleted on failure | [File capture](#file-capture) |
 | Where (0.7.0) | `zks where NAME`: every project file that names a key (workflows, Compose, Dockerfile, Railway, Vercel, Netlify, dotenv files, other CI, scripts, code), split into places zks manages, places it does not know and consumers; paths and line numbers only, never a line | [Where](#where) |
+| Rotate check (0.7.0) | `zks rotate NAME --check`: asks each destination when it last changed (metadata only) and marks it `current`, `stale`, `missing` or `unknown` against the last audited write | [Rotate --check](#rotate---check) |
 
 Planned next (not built yet): capture recipes per provider (`zks capture recipe vercel-token`), a Playwright/Chrome capture backend, capture inside modals and shadow DOM, a `zks mcp` stdio server so any agent can call `plan`/`apply`/`capture` without a shell, and `zks init --detect` that drafts the policy from `.env.example`, `vercel.json` and `railway.toml`. Tracked in [`odd/tasks/zks-v2.md`](./odd/tasks/zks-v2.md).
 
@@ -79,6 +80,10 @@ zks apply [--policy FILE] [--only A,B] [--target t1,t2] [--agent LABEL]
 zks rotate NAME [--target t1,t2] [--policy FILE]
                                             Write a NEW value of a generated variable to its targets
                                             and its derived variables; always asks (no revocation)
+zks rotate NAME --check [--target t1,t2] [--policy FILE]
+                                            When each destination of NAME (and its derived variables)
+                                            last changed vs the last audited write: current, stale,
+                                            missing or unknown; read-only, exit 0 only if all current
 zks run [--policy FILE] [--only A,B] [--agent LABEL] -- <command> [args...]
                                             Run one command with the variables as its env vars only;
                                             always asks (shows command, args, dir, names); exits
@@ -237,6 +242,40 @@ Keys trusted before this format (`vercel:<teamId>`) no longer match any write; `
 - A derived variable that also uses another generated value is refused the same way (`AB also uses B, another generated value; rotating A alone would replace it too`).
 - With `--target`, every derived variable must have all its targets inside the selection; otherwise the rotation is refused with `dependents_outside_selection` (exit 2): nothing is resolved or written, every write it would have made is audited `failed` with that code, and `error.dependents` lists `{dependent, targets}` for the targets outside the selection. Rerun without `--target`, or include those targets (they must be targets of NAME too).
 - The output is the `apply` output plus `rotated` (NAME) and `dependents` (the derived variables written).
+
+### Rotate --check
+
+`zks rotate NAME --check [--target t1,t2]` answers "did every place get the new value?" after a rotation or a renew. For every write `zks rotate NAME` would make (NAME and the variables derived from it, on its targets or the `--target` subset), it asks the destination **when it last changed**, from provider metadata only (never a value), and compares that time with the latest applied `set` or `rotate` audit record of the same variable × target × provider. It generates nothing, writes nothing, opens no dialog and appends no audit record; it reads provider tokens like `apply` does. It also accepts a variable without a `generate` source (no `not_rotatable`), to check its destinations after a manual renew and `zks apply`.
+
+- `current`: the provider time is at or after the audit write minus 120 seconds (clock tolerance).
+- `stale`: older than that: this destination probably still has the old value.
+- `missing`: the destination has no such variable, secret or file.
+- `unknown` with `reason`: the provider exposes no timestamp, there is no applied audit write for it (`providerTime` is still shown), or the call failed (for example a missing provider token, with its `zks auth set` hint, or `AWS AccessDeniedException`).
+
+| Provider | Timestamp read |
+| --- | --- |
+| `vercel` | `updatedAt` of the project env vars named NAME for each environment (the oldest; an environment without one is `missing`) |
+| `github` | `updated_at` of `secrets/NAME` (sensitive) or `variables/NAME`; 404 is `missing` |
+| `aws-ssm` | `LastModifiedDate` from `DescribeParameters` with an exact `Name` filter (never `GetParameter`). A target with `roleArn` gets `unknown` (`AWS AccessDeniedException`): the zks session policy allows writes only |
+| `aws-sm` | `LastChangedDate` from `DescribeSecret` (never `GetSecretValue`); `ResourceNotFoundException` is `missing` |
+| `netlify` | `updated_at` of the env var when Netlify returns one, otherwise `unknown` |
+| `dotenv` | the file's modification time when it defines NAME (the file is read only to find the name); no file or no definition is `missing` |
+| `compose` | the modification time of `<dir>/NAME` (never read) |
+| `railway`, `supabase`, `docker-swarm` | none: always `unknown` (`<provider> exposes no last-modified time`) |
+
+The output is `{ok, name, checks: [{variable, target, provider, destination, status, providerTime?, lastWrite?, reason?}]}`; exit 0 only when every check is `current`, 1 otherwise (`ok: false`). A file time or a provider time only says the place changed after the write, not that it holds the value zks wrote; `stale` and `missing` are what to fix.
+
+```json
+{
+  "ok": false, "name": "DB_PASSWORD",
+  "checks": [
+    { "variable": "DB_PASSWORD", "target": "web", "provider": "vercel", "destination": "vercel project prj_1 env production",
+      "status": "current", "providerTime": "2026-11-04T12:00:03.000Z", "lastWrite": "2026-11-04T12:00:00.000Z" },
+    { "variable": "DATABASE_URL", "target": "backup", "provider": "aws-sm", "destination": "aws-sm us-east-1 app/DATABASE_URL",
+      "status": "stale", "providerTime": "2026-08-01T08:00:00.000Z", "lastWrite": "2026-11-04T12:00:01.000Z" }
+  ]
+}
+```
 
 ## Run
 

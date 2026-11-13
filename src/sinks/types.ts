@@ -27,8 +27,27 @@ export interface SinkResult {
   version?: string;
 }
 
+/** When the destination last changed, from provider metadata only (never a value). */
+export type LastModified =
+  | { status: "found"; time: Date }
+  | { status: "missing" }
+  | { status: "unsupported"; reason: string };
+
 export interface Sink {
   apply(op: Operation, value: SecretBuffer, ctx: SinkContext): Promise<SinkResult>;
+  /**
+   * `zks rotate NAME --check`: read-only, metadata only. Absent when the provider exposes no
+   * timestamp. Failures throw SinkError like apply.
+   */
+  lastModified?(op: Operation, ctx: SinkContext): Promise<LastModified>;
+}
+
+/** A provider time as a Date; null when absent or unparsable. */
+export function providerTime(value: unknown): Date | null {
+  if (value instanceof Date) return Number.isFinite(value.getTime()) ? value : null;
+  if (typeof value !== "string" && typeof value !== "number") return null;
+  const time = new Date(value);
+  return Number.isFinite(time.getTime()) ? time : null;
 }
 
 /** Errors carry only a code, an HTTP status and a short provider-safe message. */

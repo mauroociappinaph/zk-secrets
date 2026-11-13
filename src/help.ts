@@ -16,6 +16,11 @@ Usage:
                                               Write a NEW value of a generated variable to its targets
                                               and its derived variables; always asks (no revocation)
                                               --target must cover every derived variable's targets
+  zks rotate NAME --check [--target t1,t2] [--policy FILE]
+                                              Ask each destination of NAME and its derived variables
+                                              when it last changed (metadata, never a value) vs the
+                                              last audited write: current, stale, missing or unknown;
+                                              no dialog, no write, no audit; exit 0 only if all current
   zks run [--policy FILE] [--only A,B] [--agent LABEL] -- <command> [args...]
                                               Run one command with the variables as its env vars only;
                                               always asks (shows command, args, dir, names); exits
