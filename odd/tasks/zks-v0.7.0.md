@@ -22,11 +22,12 @@ Every spec keeps the v1 guarantees of `odd/tasks/zks.md` S1 (no value in argv, e
 ## Tasks
 
 - [x] T1 — S1: `zks where` + tests + docs (worker) — commit: 3ef1091
-- [ ] T2 — S2: `zks rotate --check` + tests + docs (worker) — commit: pending
+- [x] T2 — S2: `zks rotate --check` + tests + docs (worker) — commit: a713850
 - [ ] T3 — S3: CHANGELOG, version, verify, PR, merge, install (parent) — commit: pending
 
 ## Log
 
 - L1 (user): "Riesgo: olvidarse de un lugar. La auditoría contó que las claves viven en seis lugares, y no tengo confirmada la lista exacta de cuáles usan estas en particular. Si queda uno con la llave vieja, esa parte deja de funcionar hasta corregirla. La candidata más probable es la copia de seguridad, que tiene su propio acceso a la base.  zks podemos crear una solucion para este problema ?"
 - L2 (user choice): "Las dos (recomendado)" — `zks where NOMBRE` and `zks rotate --check`.
+- L4 (decision, CTO): aws-ssm with roleArn stays `unknown` under --check; the session policy is not widened to ssm:DescribeParameters on Resource *. docker-swarm stays `unknown` for now.
 - L3 (decision, CTO): never print matched lines (a dotenv line holds the value); code/script references are consumers; 120 s clock tolerance; read-only, no dialog.
