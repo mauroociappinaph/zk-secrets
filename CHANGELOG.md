@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-13
+
+### Added
+
+- `clipboard` source (`{"kind":"clipboard"}`): reads the macOS clipboard with `/usr/bin/pbpaste` at apply or run time, drops one trailing newline, and clears the clipboard with `/usr/bin/pbcopy` only if it still holds the value read (re-read and compared in constant time; something copied in between is left alone): `apply` clears it only once every write succeeded and reports `clipboardCleared` (kept after a failed write so a retry finds it); `run` clears it on read. Works with every destination, GitHub Actions included (sealed with the repository public key). Must be `sensitive: true`; only one variable per policy may use it; an empty clipboard is `source_missing`. An apply or rotate that uses a clipboard value, directly or through a `template`/`public-key`, always asks, even when every destination is trusted, and the dialog names it (`Reads the clipboard: <names>`).
+- `zks capture clipboard --store SERVICE/ACCOUNT`: stores the clipboard in a Keychain item and then clears it if unchanged. Always asks before reading the clipboard (`zks: store the clipboard` for a new item, the replace dialog for an existing one); a denial reads nothing (exit 3, audited `denied`); a failed write restores the old value. Reports `length` and `clipboardCleared`; errors `clipboard_empty`, `clipboard_unavailable`. Audited as `capture-clipboard`; the `zks` service is refused.
+
 ## [0.3.0] - 2026-11-12
 
 ### Added
@@ -53,7 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hardening: zks ignores the caller's environment (`env -i`), ignores AWS `endpoint_url` and `gh` host config, rejects prototype keys and bounds the dialog size.
 - `install.sh` and `uninstall.sh`, a global agent skill (`skill/SKILL.md`), a `~/AGENTS.md` rule, architecture and agent-flow docs, and CI.
 
-[Unreleased]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/mauroociappinaph/zk-secrets/releases/tag/v0.1.0

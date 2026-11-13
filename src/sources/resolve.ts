@@ -1,4 +1,4 @@
-import { createPublicKey, generateKeyPair, randomBytes as nodeRandomBytes } from "node:crypto";
+import { createPublicKey, generateKeyPair, randomBytes as nodeRandomBytes, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
 import { readFile as nodeReadFile, realpath as nodeRealpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve as resolvePath } from "node:path";
@@ -20,6 +20,8 @@ export interface SourceDeps {
   readFile?: (path: string) => Promise<Buffer>;
   randomBytes?: (size: number) => Buffer;
   realpath?: (path: string) => Promise<string>;
+  /** Leave the clipboard as is after reading it; the caller clears it (apply, once every write succeeded). */
+  keepClipboard?: boolean;
 }
 
 export class SourceError extends Error {
@@ -60,6 +62,8 @@ async function resolveSource(name: string, source: SourceSpec, deps: SourceDeps)
       if (!value) throw new SourceError("source_cancelled", `no value entered for ${name}`);
       return value;
     }
+    case "clipboard":
+      return deps.keepClipboard ? pasteClipboard(deps.exec) : readClipboard(deps.exec);
     case "generate":
       return generate(source, deps.randomBytes ?? nodeRandomBytes);
     case "public-key":
@@ -277,6 +281,69 @@ async function generate(source: GenerateSource, random: (size: number) => Buffer
       return SecretBuffer.fromString(String(privateKey.export({ type: "pkcs8", format: "pem" })));
     }
   }
+}
+
+export const PBPASTE = "/usr/bin/pbpaste";
+export const PBCOPY = "/usr/bin/pbcopy";
+
+/**
+ * Reads the macOS clipboard, drops one trailing newline (a copy from a terminal adds it) and
+ * clears the clipboard so the value does not linger, unless it changed since the read. An empty
+ * clipboard is source_missing and is left as is. Clearing is best effort: the value is already read.
+ */
+export async function readClipboard(exec: Exec): Promise<SecretBuffer> {
+  const value = await pasteClipboard(exec);
+  await clearClipboard(exec, value);
+  return value;
+}
+
+/** Length of the clipboard bytes without one trailing \n or \r\n (a lone \r is kept). */
+function trimmedLength(bytes: Buffer): number {
+  let end = bytes.length;
+  if (end > 0 && bytes[end - 1] === 0x0a) {
+    end--;
+    if (end > 0 && bytes[end - 1] === 0x0d) end--;
+  }
+  return end;
+}
+
+/** Reads the clipboard without clearing it, with readClipboard's newline and error rules. */
+export async function pasteClipboard(exec: Exec): Promise<SecretBuffer> {
+  const res = await exec(PBPASTE, [], { timeoutMs: 10_000 }).catch(() => null);
+  if (!res) throw new SourceError("source_unavailable", "the clipboard is not available (pbpaste)");
+  if (res.code !== 0) {
+    res.stdout.fill(0);
+    throw new SourceError("source_failed", `pbpaste could not read the clipboard (exit ${res.code})`);
+  }
+  const copy = Buffer.from(res.stdout.subarray(0, trimmedLength(res.stdout)));
+  res.stdout.fill(0);
+  if (copy.length === 0) throw new SourceError("source_missing", "the clipboard is empty");
+  return SecretBuffer.adopt(copy);
+}
+
+/**
+ * Empties the clipboard only if it still holds `value` (the value zks read, same newline rule):
+ * it is re-read and compared in constant time, so content the human copied since is left alone.
+ * False when the clipboard changed, could not be re-read, or pbcopy failed.
+ */
+export async function clearClipboard(exec: Exec, value: SecretBuffer): Promise<boolean> {
+  const res = await exec(PBPASTE, [], { timeoutMs: 10_000 }).catch(() => null);
+  if (!res) return false;
+  const current = res.stdout;
+  try {
+    if (res.code !== 0 || value.disposed) return false;
+    const read = Buffer.from(value.reveal(), "utf8");
+    try {
+      const end = trimmedLength(current);
+      if (read.length !== end || !timingSafeEqual(read, current.subarray(0, end))) return false;
+    } finally {
+      read.fill(0);
+    }
+  } finally {
+    current.fill(0);
+  }
+  const cleared = await exec(PBCOPY, [], { input: Buffer.alloc(0), timeoutMs: 10_000 }).catch(() => null);
+  return cleared !== null && cleared.code === 0;
 }
 
 function adoptNonEmpty(name: string, bytes: Buffer): SecretBuffer {
