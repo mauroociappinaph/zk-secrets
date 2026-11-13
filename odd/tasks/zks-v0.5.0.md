@@ -19,7 +19,7 @@ Every spec keeps the v1 guarantees of `odd/tasks/zks.md` S1 (no value in argv, e
 
 ## Tasks
 
-- [ ] T1 — S1: `zks capture file` + tests + docs (worker) — commit: pending
+- [x] T1 — S1: `zks capture file` + tests + docs (worker) — commit: 617c4df
 - [ ] T2 — S2, S3: inventory --older-than, clipboard follow-ups + tests + docs (worker) — commit: pending
 - [ ] T3 — S4: CHANGELOG, version 0.5.0, review, PR, merge, install (parent) — commit: pending
 
