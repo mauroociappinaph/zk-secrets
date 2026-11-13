@@ -35,7 +35,7 @@ import type { Operation, Policy, Provider, TargetConfig } from "./policy/types.t
 import { Redactor } from "./secret/redactor.ts";
 import { SecretBuffer } from "./secret/secret-buffer.ts";
 import { SinkError, type AwsClientFactory, type Sink } from "./sinks/types.ts";
-import { SourceError, createResolver } from "./sources/resolve.ts";
+import { SourceError, clearClipboard, createResolver, pasteClipboard } from "./sources/resolve.ts";
 import { HELP_TEXT } from "./help.ts";
 import { constants as osConstants } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
@@ -178,13 +178,14 @@ const COMMAND_FLAGS: Record<string, string[]> = {
     "--page",
   ],
   "capture recipes": [],
+  "capture clipboard": ["--store"],
 };
 const SUBCOMMANDS: Record<string, string[]> = {
   auth: ["status", "set", "delete"],
   audit: ["list", "verify", "sync"],
   config: ["show", "set", "unset"],
   trust: ["list", "remove"],
-  capture: ["read", "fill", "login", "recipes"],
+  capture: ["read", "fill", "login", "recipes", "clipboard"],
 };
 const COMMANDS = ["init", "validate", "plan", "apply", "rotate", "run", "inventory", "doctor", ...Object.keys(SUBCOMMANDS)];
 
@@ -248,7 +249,7 @@ function positionalLimit(command: string, sub: string | undefined): number | und
     case "trust":
       return sub === "list" ? 2 : sub === "remove" ? 3 : undefined;
     case "capture":
-      return sub === "read" || sub === "fill" || sub === "login" || sub === "recipes" ? 2 : undefined;
+      return sub === "read" || sub === "fill" || sub === "login" || sub === "recipes" || sub === "clipboard" ? 2 : undefined;
     default:
       return undefined;
   }
@@ -1317,6 +1318,125 @@ interface CaptureRequest {
   generateBytes: number | null;
 }
 
+const CLIPBOARD_USAGE = "usage: zks capture clipboard --store SERVICE/ACCOUNT";
+type ClipboardFailure = "clipboard_empty" | "clipboard_unavailable" | "keychain_failed" | "not_approved" | "restore_failed";
+const CLIPBOARD_ERRORS: Record<ClipboardFailure, string> = {
+  clipboard_empty: "the clipboard is empty; nothing was stored",
+  clipboard_unavailable: "the clipboard could not be read (pbpaste); nothing was stored",
+  keychain_failed: "the macOS Keychain did not accept the item",
+  not_approved: "replacing the Keychain item was not approved; the clipboard was not read",
+  restore_failed: "the Keychain write failed and the previous value could not be written back",
+};
+
+/**
+ * `zks capture clipboard --store SERVICE/ACCOUNT`: the macOS clipboard into a Keychain item, then
+ * the clipboard is cleared. Replacing an item asks first, before the clipboard is read; a failed
+ * write puts the old value back. Only the length is reported. Not a page capture: it records no
+ * origin, so a later `fill --from` of the item always asks.
+ */
+async function captureClipboard(deps: Deps, flags: Map<string, string>, redactor: Redactor): Promise<RunOutput> {
+  const ref = flags.get("--store");
+  if (ref === undefined) throw new UsageError(CLIPBOARD_USAGE);
+  const { service, account } = keychainRef(ref, "--store");
+  if (service.toLowerCase() === ZKS_KEYCHAIN_SERVICE) {
+    throw new UsageError("capture clipboard cannot use the Keychain service zks; use `zks auth set` for provider tokens");
+  }
+  const store = `${service}/${account}`;
+  const base = { command: "capture", mode: "clipboard", store };
+  const audit = deps.openAudit();
+  try {
+    let approval: ApprovalMode | undefined;
+    const finish = async (result: AuditResult, outcome: { code: ClipboardFailure; restored?: true } | { length: number; cleared: boolean }) => {
+      const errorCode = "code" in outcome ? outcome.code : "";
+      const itemModified =
+        result === "applied" ? ((await deps.keychain.modifiedAt(service, account).catch(() => null))?.toISOString() ?? "") : "";
+      const entry = audit.append({
+        ts: deps.now().toISOString(),
+        actorHuman: deps.user,
+        actorAgent: deps.agentId,
+        project: service,
+        provider: "keychain",
+        target: store,
+        environment: "",
+        variableName: account,
+        action: "capture",
+        sensitive: true,
+        sourceKind: "capture-clipboard",
+        result,
+        providerVersion: itemModified,
+        errorCode,
+        ...(approval ? { approval } : {}),
+      });
+      const anchorError = await saveAnchor(deps, audit);
+      const mirror = await deps.mirror.sync(audit);
+      if (!("code" in outcome)) {
+        return json(EXIT_OK, {
+          ok: true,
+          ...base,
+          length: outcome.length,
+          clipboardCleared: outcome.cleared,
+          auditId: entry.auditId,
+          mirror,
+          ...anchorError,
+        });
+      }
+      return json(result === "denied" ? EXIT_DENIED : EXIT_FAILED, {
+        ok: false,
+        ...base,
+        error: { code: outcome.code, message: CLIPBOARD_ERRORS[outcome.code] },
+        ...(outcome.restored ? { restored: true } : {}),
+        auditId: entry.auditId,
+        mirror,
+        ...anchorError,
+      });
+    };
+
+    let previous: SecretBuffer | null = null;
+    if (await deps.keychain.has(service, account)) {
+      approval = "dialog";
+      const lines = [`Replace the Keychain item ${store}?`, "New value: read from the clipboard, which zks then clears"];
+      if (!(await deps.human.approve("zks: replace Keychain item", lines))) return await finish("denied", { code: "not_approved" });
+      try {
+        previous = await deps.keychain.get(service, account);
+      } catch {
+        return await finish("failed", { code: "keychain_failed" });
+      }
+      if (previous !== null) redactor.register(previous);
+    }
+
+    let value: SecretBuffer;
+    try {
+      value = await pasteClipboard(deps.exec);
+    } catch (error) {
+      previous?.dispose();
+      const empty = error instanceof SourceError && error.code === "source_missing";
+      return await finish("failed", { code: empty ? "clipboard_empty" : "clipboard_unavailable" });
+    }
+    redactor.register(value);
+    try {
+      try {
+        await deps.keychain.set(service, account, value);
+      } catch {
+        if (previous === null) return await finish("failed", { code: "keychain_failed" });
+        try {
+          await deps.keychain.set(service, account, previous);
+          return await finish("failed", { code: "keychain_failed", restored: true });
+        } catch {
+          return await finish("failed", { code: "restore_failed" });
+        }
+      }
+      // Cleared only once stored: after a failed write the clipboard still holds the value to retry.
+      const cleared = await clearClipboard(deps.exec);
+      return await finish("applied", { length: value.length, cleared });
+    } finally {
+      value.dispose();
+      previous?.dispose();
+    }
+  } finally {
+    audit.close();
+  }
+}
+
 /** Validates every capture option. Messages never echo a value: a selector could be a pasted secret. */
 function parseCapture(sub: string | undefined, flags: Map<string, string>): CaptureRequest {
   if (sub !== "read" && sub !== "fill") throw new UsageError(CAPTURE_USAGE);
@@ -1424,6 +1544,7 @@ async function capture(deps: Deps, sub: string | undefined, flags: Map<string, s
     return json(EXIT_OK, { ok: true, recipes: Object.entries(LOGIN_RECIPES).map(([name, recipe]) => ({ name, ...recipe })) });
   }
   if (sub === "login") return captureLogin(deps, flags);
+  if (sub === "clipboard") return captureClipboard(deps, flags, redactor);
   const req = parseCapture(sub, flags);
   const store = `${req.service}/${req.account}`;
   const base = { command: "capture", mode: req.mode, store, origin: req.origin, ...(req.isolated ? { isolated: true } : {}) };

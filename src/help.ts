@@ -1,7 +1,7 @@
 export const HELP_TEXT = `zks - zero-knowledge secrets and env vars for Vercel, AWS, GitHub, Railway, Supabase, Netlify and Docker
 
 Secret values never pass through argv, stdout, logs or the agent. zks reads them from a
-source (1Password, Keychain, hidden dialog, generator or dotenv file) and writes them straight
+source (1Password, Keychain, hidden dialog, clipboard, generator or dotenv file) and writes them straight
 to the provider after you approve a native dialog (Deny / Approve once / Always allow); writes to
 a destination you chose "Always allow" for skip the dialog. Output is JSON with metadata only.
 
@@ -48,6 +48,9 @@ Usage:
                                               unknown (the human finishes in the browser; --isolated keeps
                                               that page open and adds space and page); login_redirected
                                               (exit 1) when the page leaves --origin
+  zks capture clipboard --store SERVICE/ACCOUNT
+                                              Store the macOS clipboard in a Keychain item (one trailing
+                                              newline dropped), then clear the clipboard; length only
   zks capture recipes                         List login recipes (hostgator, cpanel); --recipe NAME fills
                                               the flags not given; verified:false = selectors not yet
                                               confirmed on a real run
@@ -66,7 +69,8 @@ Usage:
                                               (700) and their files (600) and lists what it cannot fix
   zks --version | zks help
 
-Sources (variables.<NAME>.source.kind): op, keychain, prompt, generate, dotenv, public-key, template.
+Sources (variables.<NAME>.source.kind): op, keychain, prompt, clipboard, generate, dotenv, public-key, template.
+  clipboard {}: macOS clipboard (pbpaste), one trailing newline dropped, cleared after reading; one variable per policy
   generate format: random (bytes, encoding), uuid, jwt-secret, password (length 12-128, lower, upper,
   digits, symbols), rsa-private-key (bits 2048|3072|4096), ed25519-private-key
   public-key {of: "VAR"}: public PEM of VAR's generated private key; may be sensitive: false
@@ -86,7 +90,7 @@ Run: the child gets HOME, USER, LOGNAME, LANG, PATH=<cwd>/node_modules/.bin:<fix
   usage error (its value exists only at its destinations). Arguments over 300 characters: arguments_too_long.
   On success zks exits with the command's own code: a denial is the not_approved JSON on stdout (exit 3).
   The command holds the values: \`zks run -- printenv\` shows them, so wrap single commands, never an agent session.
-Capture: zks/<vercel|railway|supabase|netlify|sheets-hmac> only from their own site (--origin https://vercel.com,
+Capture: zks/<vercel|railway|supabase|netlify|sheets-hmac> only from their own site, never from the clipboard (--origin https://vercel.com,
 https://railway.com, https://supabase.com, https://app.netlify.com, https://script.google.com); replacing an item asks first,
 and a replaced item gets its old value back when the capture fails.
 

@@ -290,6 +290,13 @@ export const PBCOPY = "/usr/bin/pbcopy";
  * is left as is. Clearing is best effort: the value is already read.
  */
 export async function readClipboard(exec: Exec): Promise<SecretBuffer> {
+  const value = await pasteClipboard(exec);
+  await clearClipboard(exec);
+  return value;
+}
+
+/** Reads the clipboard without clearing it, with readClipboard's newline and error rules. */
+export async function pasteClipboard(exec: Exec): Promise<SecretBuffer> {
   const res = await exec(PBPASTE, [], { timeoutMs: 10_000 }).catch(() => null);
   if (!res) throw new SourceError("source_unavailable", "the clipboard is not available (pbpaste)");
   if (res.code !== 0) {
@@ -302,7 +309,6 @@ export async function readClipboard(exec: Exec): Promise<SecretBuffer> {
   const copy = Buffer.from(res.stdout.subarray(0, end));
   res.stdout.fill(0);
   if (copy.length === 0) throw new SourceError("source_missing", "the clipboard is empty");
-  await clearClipboard(exec);
   return SecretBuffer.adopt(copy);
 }
 
