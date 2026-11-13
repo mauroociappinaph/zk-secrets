@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { test } from "node:test";
 import { HELP_TEXT } from "../src/help.ts";
@@ -343,4 +343,32 @@ test("S1/L4: a file inside a hidden directory is refused, in the project and in 
   assert.equal(parse(downloads.stdout).error.code, "file_invalid");
   assert.equal(existsSync(hidden), true);
   assert.deepEqual([...h.human.approvals, ...d.human.approvals], []);
+});
+
+test("S1/L4: a project directory inside a hidden directory is not an allowed root", async () => {
+  for (const sub of [".keysdir", join(".cfg", "proj")]) {
+    const h = harness({ approve: true });
+    const home = realpathSync(tempDir());
+    h.deps.home = home;
+    mkdirSync(join(home, sub), { recursive: true });
+    const file = join(home, sub, "id_key");
+    writeFileSync(file, CANARY);
+    h.deps.cwd = join(home, sub);
+    const out = await run(["capture", "file", "--store", "app/key", "id_key"], h.deps);
+    assert.equal(out.exitCode, 1, sub);
+    assert.equal(parse(out.stdout).error.code, "file_invalid");
+    assert.equal(h.human.approvals.length, 0);
+    assert.equal(h.keychain.store.has("app/key"), false);
+    assert.equal(readFileSync(file, "utf8"), CANARY);
+  }
+});
+
+test("S1/L7: a file with another hard link is refused and kept", async () => {
+  const { h, file } = setup({ approve: true });
+  linkSync(file, join(h.dir, "keys", "second-name.json"));
+  const out = await run(cmd("keys/" + NAME), h.deps);
+  assert.equal(out.exitCode, 1, out.stdout);
+  assert.equal(parse(out.stdout).error.code, "file_invalid");
+  assert.deepEqual(h.human.approvals, []);
+  assert.equal(existsSync(file), true);
 });

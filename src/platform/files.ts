@@ -8,6 +8,8 @@ export interface FileInfo {
   size: number;
   dev: bigint;
   ino: bigint;
+  /** Hard links to the inode; more than one means another name reaches the same contents. */
+  links: number;
 }
 
 /** The filesystem calls of `zks capture file`; the final path component is never followed. */
@@ -31,7 +33,7 @@ export class FileChangedError extends Error {
 }
 
 function infoOf(stats: BigIntStats): FileInfo {
-  return { regular: stats.isFile(), symlink: stats.isSymbolicLink(), size: Number(stats.size), dev: stats.dev, ino: stats.ino };
+  return { regular: stats.isFile(), symlink: stats.isSymbolicLink(), size: Number(stats.size), dev: stats.dev, ino: stats.ino, links: Number(stats.nlink) };
 }
 
 export function createFileIo(): FileIo {

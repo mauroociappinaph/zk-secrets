@@ -27,5 +27,6 @@ Every spec keeps the v1 guarantees of `odd/tasks/zks.md` S1 (no value in argv, e
 
 - L1 (user): "No importa que cambios me habias propuesto para una 0.5.0 version ?"
 - L2 (user): "Ok hacelo" — accepting: capture file, inventory --older-than, and the three 0.4.0 follow-ups; `init --detect` left for 0.6.0.
+- L7 (verify blocker + advisory, fixed): a cwd inside a hidden directory (`cd ~/.ssh`) reached the dialog; hidden directories are now also checked from home. Files with more than one hard link are `file_invalid`.
 - L4 (decision, CTO, from the T1 worker's risk report): cwd is an allowed root only when strictly inside the home directory, and a path through any hidden directory is `file_invalid`; non-UTF-8 files are `file_invalid` (binary .p12 deferred: keychain.set stores strings); dialog_too_long and control-character PATH refusals accepted.
 - L3 (decision, CTO): capture file is restricted to ~/Downloads or the project directory, always asks, never deletes on failure, 64 KiB limit; so an agent cannot stash and delete arbitrary files such as ~/.ssh keys.

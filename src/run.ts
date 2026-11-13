@@ -1631,7 +1631,11 @@ async function captureFile(deps: Deps, flags: Map<string, string>, path: string 
     if (root === undefined) {
       return await invalid(file, "is outside ~/Downloads and the project directory (a directory inside your home)");
     }
-    if (throughHiddenDir(root, parent)) return await invalid(file, "is inside a hidden directory");
+    // Checked from home too: a project directory that is itself inside ~/.ssh is still hidden.
+    const realHome = await deps.fileIo.realpath(deps.home).catch(() => resolvePath(deps.home));
+    if (throughHiddenDir(root, parent) || (inside(realHome, parent) && throughHiddenDir(realHome, parent))) {
+      return await invalid(file, "is inside a hidden directory");
+    }
     let info: FileInfo;
     try {
       info = await deps.fileIo.lstat(file);
@@ -1642,6 +1646,8 @@ async function captureFile(deps: Deps, flags: Map<string, string>, path: string 
     if (info.symlink) return await invalid(file, "is a symbolic link");
     if (!info.regular) return await invalid(file, "is not a regular file");
     if (info.size === 0) return await invalid(file, "is empty");
+    // Another name for the same inode (a hard link into ~/.ssh) would store that file's contents.
+    if (info.links > 1) return await invalid(file, "has other hard links");
     if (info.size > MAX_CAPTURE_FILE) return await invalid(file, `is larger than ${MAX_CAPTURE_FILE} bytes`);
 
     // Always one dialog before the file is read: the replace dialog for an existing item.
