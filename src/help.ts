@@ -90,8 +90,9 @@ Run: the child gets HOME, USER, LOGNAME, LANG, PATH=<cwd>/node_modules/.bin:<fix
   usage error (its value exists only at its destinations). Arguments over 300 characters: arguments_too_long.
   On success zks exits with the command's own code: a denial is the not_approved JSON on stdout (exit 3).
   The command holds the values: \`zks run -- printenv\` shows them, so wrap single commands, never an agent session.
-Capture: zks/<vercel|railway|supabase|netlify|sheets-hmac> only from their own site, never from the clipboard (--origin https://vercel.com,
-https://railway.com, https://supabase.com, https://app.netlify.com, https://script.google.com); replacing an item asks first,
+Capture: zks/<vercel|railway|supabase|netlify|sheets-hmac> only from their own site (--origin https://vercel.com,
+https://railway.com, https://supabase.com, https://app.netlify.com, https://script.google.com), never from the clipboard;
+replacing an item asks first,
 and a replaced item gets its old value back when the capture fails.
 
 Exit codes: 0 ok, 1 a write or check failed, 2 usage or policy error, 3 not approved.

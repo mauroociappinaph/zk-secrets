@@ -102,3 +102,22 @@ test("S2: a clipboard value is sealed into a GitHub Actions secret, never in pla
   for (const call of h.exec.calls) assert.ok(!`${call.args.join(" ")} ${call.input}`.includes(CANARY));
   assert.ok(!(await auditBytes(h.auditDb)).includes(CANARY));
 });
+
+test("S1: a lone trailing CR is kept (only \\n or \\r\\n is dropped)", async () => {
+  const exec = fakeExec(clipboardExec(`${CANARY}\r`));
+  const value = await resolveValue("API_KEY", { sensitive: true, source: { kind: "clipboard" }, targets: [] }, deps(exec));
+  assert.equal(value.reveal(), `${CANARY}\r`);
+  value.dispose();
+});
+
+test("S1: pbpaste that cannot start is source_unavailable and nothing is cleared", async () => {
+  const exec = fakeExec((c) => {
+    if (c.command === PBPASTE) throw new Error(`spawn ${CANARY}`);
+    return {};
+  });
+  await assert.rejects(
+    resolveValue("API_KEY", { sensitive: true, source: { kind: "clipboard" }, targets: [] }, deps(exec)),
+    (e: Error & { code?: string }) => e.code === "source_unavailable" && !e.message.includes(CANARY),
+  );
+  assert.deepEqual(exec.calls.map((c) => c.command), [PBPASTE]);
+});

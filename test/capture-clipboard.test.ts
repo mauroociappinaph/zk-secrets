@@ -114,3 +114,23 @@ test("S3: usage — needs --store, refuses the zks service and other flags", asy
 test("S3: help lists capture clipboard", () => {
   assert.ok(HELP_TEXT.includes("zks capture clipboard --store SERVICE/ACCOUNT"));
 });
+
+test("S3: a failed write and a failed restore is restore_failed, without the value, and the clipboard is kept", async () => {
+  const h = harness({ keychain: { "app/key": "old" }, approve: true, exec: clipboardExec(CANARY) });
+  h.deps.keychain.set = async () => {
+    throw new Error(`boom ${CANARY}`);
+  };
+  const out = await run(CMD, h.deps);
+  assert.equal(out.exitCode, 1, out.stdout);
+  assert.equal(parse(out.stdout).error.code, "restore_failed");
+  assert.ok(!out.stdout.includes(CANARY));
+  assert.ok(!(await auditBytes(h.auditDb)).includes(CANARY));
+  assert.deepEqual(h.exec.calls.map((c) => c.command), [PBPASTE]);
+});
+
+test("S3: a clipboard capture records no origin, so fill --from always asks", async () => {
+  const h = harness({ exec: clipboardExec(CANARY) });
+  assert.equal((await run(CMD, h.deps)).exitCode, 0);
+  await run(["capture", "fill", "--space", "1", "--page", "p1", "--selector", "#p", "--from", "app/key", "--origin", "https://x.com"], h.deps);
+  assert.equal(h.human.approvals.length, 1);
+});

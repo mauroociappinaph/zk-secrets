@@ -298,6 +298,7 @@ zks capture fill --space 7 --page p1 --selector "#password" --from indec/passwor
 - One-time codes that are not secrets worth keeping (an e-mail verification code) are not captured: the agent types them with normal ego actions.
 - Service `zks` (any case) is reserved: only `zks/vercel` (`--origin https://vercel.com`), `zks/railway` (`https://railway.com`), `zks/supabase` (`https://supabase.com`), `zks/netlify` (`https://app.netlify.com`) and `zks/sheets-hmac` (`https://script.google.com`) can be captured, only with `read` and only from that origin. `fill` never uses service `zks`.
 - Replacing an existing Keychain item (`read`, `fill --generate`) opens an approval dialog first; denial exits 3 and runs nothing. After approval zks reads the old value into memory (never output, audited or put in the script); if the capture then does not end ok (any error code, isolated refusals included, or a thrown error), zks writes the old value back after the script returns and the error output adds `restored: true`. If that write-back fails the error is `restore_failed` (exit 1, audited). The in-memory copy is zeroed in every case; on success the new value stays. The first capture into a new item, `zks/*` included, needs no approval (see [What is guaranteed, and what is not](#what-is-guaranteed-and-what-is-not)).
+
 ### Clipboard capture
 
 ```sh

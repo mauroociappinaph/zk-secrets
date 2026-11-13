@@ -304,8 +304,10 @@ export async function pasteClipboard(exec: Exec): Promise<SecretBuffer> {
     throw new SourceError("source_failed", `pbpaste could not read the clipboard (exit ${res.code})`);
   }
   let end = res.stdout.length;
-  if (end > 0 && res.stdout[end - 1] === 0x0a) end--;
-  if (end > 0 && res.stdout[end - 1] === 0x0d) end--;
+  if (end > 0 && res.stdout[end - 1] === 0x0a) {
+    end--;
+    if (end > 0 && res.stdout[end - 1] === 0x0d) end--;
+  }
   const copy = Buffer.from(res.stdout.subarray(0, end));
   res.stdout.fill(0);
   if (copy.length === 0) throw new SourceError("source_missing", "the clipboard is empty");
