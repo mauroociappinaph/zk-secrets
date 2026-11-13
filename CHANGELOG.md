@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-13
+
+### Added
+
+- `zks where NAME [--policy FILE]`: finds every file in the project that names a variable (GitHub workflows, Compose, Dockerfiles, Railway, Vercel, Netlify, dotenv files, other CI configs, scripts, code) and splits them into `managed` (a policy target of NAME covers it), `unmanaged` (a destination zks does not know) and `consumers` (code and scripts that read it). Path and line only, never the line text or a value.
+- `zks rotate NAME --check`: asks each destination of NAME and its derived variables for its last-modified time (metadata only) and compares it with the latest applied write in the audit: `current`, `stale`, `missing` or `unknown` (with a reason). No dialog, no write, no audit record; exit 0 only when every check is current. Works for non-generated variables too. Timestamps come from Vercel, GitHub, AWS SSM, AWS Secrets Manager, Netlify (when present), dotenv and Compose files; Railway, Supabase and Docker Swarm report `unknown`.
+
+### Changed
+
+- Options a command does not take now always say `option --X is not valid for <command>`.
+
 ## [0.6.0] - 2026-11-13
 
 ### Added
@@ -77,7 +88,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hardening: zks ignores the caller's environment (`env -i`), ignores AWS `endpoint_url` and `gh` host config, rejects prototype keys and bounds the dialog size.
 - `install.sh` and `uninstall.sh`, a global agent skill (`skill/SKILL.md`), a `~/AGENTS.md` rule, architecture and agent-flow docs, and CI.
 
-[Unreleased]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.3.0...v0.4.0

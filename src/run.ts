@@ -33,7 +33,9 @@ import {
   planOperations,
   sourceKindOf,
   validatePolicy,
+  VARIABLE_NAME,
 } from "./policy/validate.ts";
+import { WHERE_MAX_FILES, isDotenvTemplate, scanProject, type Reference } from "./where/scan.ts";
 import type { Operation, Policy, Provider, SourceSpec, TargetConfig } from "./policy/types.ts";
 import { Redactor } from "./secret/redactor.ts";
 import { SecretBuffer } from "./secret/secret-buffer.ts";
@@ -101,6 +103,8 @@ export interface Deps {
   home: string;
   /** `zks capture file`: lstat, realpath, no-follow read and unlink. */
   fileIo: FileIo;
+  /** `zks where`: most files read (default WHERE_MAX_FILES); tests lower it. */
+  whereMaxFiles?: number;
 }
 
 export interface RunOutput {
@@ -164,9 +168,10 @@ const COMMAND_FLAGS: Record<string, string[]> = {
   validate: ["--policy"],
   plan: ["--policy", "--only", "--target"],
   apply: ["--policy", "--only", "--target", "--agent"],
-  rotate: ["--policy", "--target"],
+  rotate: ["--policy", "--target", "--check"],
   run: ["--policy", "--only", "--agent"],
   inventory: ["--policy", "--project", "--older-than"],
+  where: ["--policy"],
   doctor: ["--fix"],
   "audit list": ["--limit", "--project"],
   "capture read": ["--space", "--page", "--selector", "--store", "--click", "--origin", "--isolated", "--url"],
@@ -197,7 +202,7 @@ const SUBCOMMANDS: Record<string, string[]> = {
   trust: ["list", "remove"],
   capture: ["read", "fill", "login", "recipes", "clipboard", "file"],
 };
-const COMMANDS = ["init", "validate", "plan", "apply", "rotate", "run", "inventory", "doctor", ...Object.keys(SUBCOMMANDS)];
+const COMMANDS = ["init", "validate", "plan", "apply", "rotate", "run", "inventory", "where", "doctor", ...Object.keys(SUBCOMMANDS)];
 
 interface ParsedArgs {
   positionals: string[];
@@ -220,7 +225,7 @@ function parseArgs(argv: string[]): ParsedArgs {
         "zks never accepts secret values on the command line; declare a source in zks.policy.json or use `zks auth set`",
       );
     }
-    if (flag === "--isolated" || flag === "--fix") {
+    if (flag === "--isolated" || flag === "--fix" || flag === "--check") {
       if (inline !== undefined) throw new UsageError(`option ${flag} takes no value`);
       flags.set(flag, "true");
       continue;
@@ -249,6 +254,7 @@ function positionalLimit(command: string, sub: string | undefined): number | und
     case "run":
       return 1;
     case "rotate":
+    case "where":
       return 2;
     case "audit":
       return 2;
@@ -415,6 +421,8 @@ async function dispatch(argv: string[], deps: Deps, redactor: Redactor): Promise
       return runCommand(deps, runArgv, flags, redactor);
     case "inventory":
       return inventory(deps, flags);
+    case "where":
+      return where(deps, sub, flags);
     case "auth":
       return auth(deps, sub, arg);
     case "audit":
@@ -508,6 +516,7 @@ async function rotate(deps: Deps, name: string | undefined, flags: Map<string, s
     const foreign = subset.find((t) => !variable.targets.includes(t));
     if (foreign !== undefined) throw new UsageError(`--target: "${foreign}" is not a target of ${name}`);
   }
+  if (flags.has("--check")) return rotateCheck(deps, policy, name, subset, redactor);
 
   let refusal: string | null = null;
   if (variable.source?.kind !== "generate") {
@@ -578,6 +587,107 @@ async function rotate(deps: Deps, name: string | undefined, flags: Map<string, s
     ],
     extra: { rotated: name, dependents: written },
   });
+}
+
+/** A provider time this much before the audit write still counts as that write (clock skew). */
+const CHECK_TOLERANCE_MS = 120_000;
+
+interface RotateCheck {
+  variable: string;
+  target: string;
+  provider: Provider;
+  destination: string;
+  status: "current" | "stale" | "missing" | "unknown";
+  providerTime?: string;
+  lastWrite?: string;
+  /** The newest applied write of the variable anywhere, when this destination did not get it. */
+  newestWrite?: string;
+  reason?: string;
+}
+
+/**
+ * `zks rotate NAME --check`: for every write the rotation would make (NAME and its derived
+ * variables), asks the destination when it last changed (metadata only, never a value) and
+ * compares it with the latest applied audit write. Read-only: no value, dialog, write or audit
+ * record; any variable is accepted, generated or not.
+ */
+async function rotateCheck(
+  deps: Deps,
+  policy: Policy,
+  name: string,
+  subset: string[] | undefined,
+  redactor: Redactor,
+): Promise<RunOutput> {
+  const ops = planOperations(policy, { only: [name, ...dependentsOf(policy, name)], targets: subset });
+  const store = deps.openAudit();
+  let rows: WrittenDestination[];
+  try {
+    rows = store.writtenDestinations(policy.project);
+  } finally {
+    store.close();
+  }
+  const key = (variable: string, target: string, provider: string) => `${variable}\u0000${target}\u0000${provider}`;
+  const lastWrites = new Map(rows.map((row) => [key(row.variableName, row.target, row.provider), row.lastWrittenAt]));
+  // The newest applied write of each variable to any destination: a destination it did not reach is stale,
+  // even when its provider time matches that destination's own older write (a partial rotation or renew).
+  const newest = new Map<string, number>();
+  for (const row of rows) {
+    const time = Date.parse(row.lastWrittenAt);
+    if (Number.isFinite(time) && time > (newest.get(row.variableName) ?? Number.NEGATIVE_INFINITY)) newest.set(row.variableName, time);
+  }
+  const ctx = { fetch: deps.fetch, exec: deps.exec, keychain: deps.keychain, aws: deps.aws, tools: deps.tools };
+
+  const checks: RotateCheck[] = [];
+  for (const op of ops) {
+    const provider = op.target.provider;
+    const lastWrite = lastWrites.get(key(op.name, op.targetKey, provider));
+    const own = lastWrite === undefined ? Number.NaN : Date.parse(lastWrite);
+    const newestTime = newest.get(op.name);
+    // Missed: the audit itself shows a newer write of this variable that did not reach this destination.
+    const missed = newestTime !== undefined && (!Number.isFinite(own) || own < newestTime - CHECK_TOLERANCE_MS);
+    const base = {
+      variable: op.name,
+      target: op.targetKey,
+      provider,
+      destination: describeDestination(op),
+      ...(lastWrite ? { lastWrite } : {}),
+      ...(missed ? { newestWrite: new Date(newestTime).toISOString() } : {}),
+    };
+    const missedReason = "the newest write of this variable did not reach this destination";
+    const sink = deps.sinks[provider];
+    if (!sink.lastModified) {
+      checks.push(missed ? { ...base, status: "stale", reason: missedReason } : { ...base, status: "unknown", reason: `${provider} exposes no last-modified time` });
+      continue;
+    }
+    let found: Date;
+    try {
+      const result = await sink.lastModified(op, ctx);
+      if (result.status === "missing") {
+        checks.push({ ...base, status: "missing" });
+        continue;
+      }
+      if (result.status === "unsupported") {
+        checks.push(missed ? { ...base, status: "stale", reason: missedReason } : { ...base, status: "unknown", reason: result.reason });
+        continue;
+      }
+      found = result.time;
+    } catch (error) {
+      const reason = error instanceof SinkError ? error.message : "the provider check failed";
+      checks.push({ ...base, status: "unknown", reason: redactor.scrub(reason).slice(0, 300) });
+      continue;
+    }
+    const withTime = { ...base, providerTime: found.toISOString() };
+    // Compared with the newest write of the variable anywhere, not only this destination's own.
+    const reference = newestTime ?? own;
+    if (!Number.isFinite(reference)) {
+      checks.push({ ...withTime, status: "unknown", reason: "no applied zks write of this variable to this target in the audit log" });
+      continue;
+    }
+    const current = !missed && found.getTime() >= reference - CHECK_TOLERANCE_MS;
+    checks.push(current ? { ...withTime, status: "current" } : { ...withTime, status: "stale", ...(missed ? { reason: missedReason } : {}) });
+  }
+  const ok = checks.every((c) => c.status === "current");
+  return json(ok ? EXIT_OK : EXIT_FAILED, { ok, name, checks });
 }
 
 const RUN_USAGE = "usage: zks run [--policy FILE] [--only A,B] [--agent LABEL] -- <command> [args...]";
@@ -954,6 +1064,72 @@ async function inventory(deps: Deps, flags: Map<string, string>): Promise<RunOut
     return !Number.isFinite(written) || now - written > limit;
   });
   return json(EXIT_OK, { ok: true, project: name, policy: policy ? policyFile : null, olderThanDays, entries: old });
+}
+
+const WHERE_USAGE = "usage: zks where NAME [--policy FILE]";
+
+/** Whether a policy target of the variable writes the place a reference points at. */
+function coveredBy(ref: Reference, targets: TargetConfig[], cwd: string): boolean {
+  const providers = new Set(targets.map((t) => t.provider));
+  switch (ref.kind) {
+    case "github-workflow":
+      return providers.has("github");
+    case "compose":
+    case "dockerfile":
+      return providers.has("compose") || providers.has("docker-swarm");
+    case "railway":
+    case "vercel":
+    case "netlify":
+      return providers.has(ref.kind);
+    case "dotenv": {
+      const path = resolvePath(cwd, ref.path);
+      return targets.some((t) => t.provider === "dotenv" && t.path === path);
+    }
+    default:
+      return false;
+  }
+}
+
+/**
+ * Every file of the project that names NAME (whole word), split into places a policy target of
+ * NAME writes, places zks does not know and code or scripts that read it. Read-only, metadata
+ * only: paths, line numbers and kinds, never a line of text; no dialog, no audit, no network.
+ */
+async function where(deps: Deps, name: string | undefined, flags: Map<string, string>): Promise<RunOutput> {
+  if (name === undefined) throw new UsageError(WHERE_USAGE);
+  // Never echoed when invalid: it might be a pasted secret.
+  if (!VARIABLE_NAME.test(name)) throw new UsageError(`NAME must match ${VARIABLE_NAME}`);
+  const policyFlag = flags.get("--policy");
+  const policy = await loadPolicy(deps, policyFlag);
+  const inPolicy = Object.hasOwn(policy.variables, name);
+  const keys = inPolicy ? (policy.variables[name] as Policy["variables"][string]).targets : [];
+  const configs = keys.map((key) => policy.targets[key] as TargetConfig);
+  const scan = await scanProject(deps.cwd, name, {
+    exec: deps.exec,
+    limit: deps.whereMaxFiles ?? WHERE_MAX_FILES,
+    // The policy names every variable; it is zks's own file, not a reference.
+    exclude: new Set([resolvePath(deps.cwd, policyFlag ?? "zks.policy.json")]),
+  });
+  const managed: Reference[] = [];
+  const unmanaged: Reference[] = [];
+  const consumers: Reference[] = [];
+  for (const ref of scan.references) {
+    if (ref.kind === "code" || ref.kind === "script") consumers.push(ref);
+    // A dotenv template only documents the name: managed as soon as the policy has NAME.
+    else if ((ref.kind === "dotenv" && isDotenvTemplate(ref.path)) ? inPolicy : coveredBy(ref, configs, deps.cwd)) managed.push(ref);
+    else unmanaged.push(ref);
+  }
+  return json(EXIT_OK, {
+    ok: true,
+    name,
+    inPolicy,
+    targets: keys.map((key, i) => ({ target: key, provider: (configs[i] as TargetConfig).provider })),
+    managed,
+    unmanaged,
+    consumers,
+    scanned: scan.scanned,
+    truncated: scan.truncated,
+  });
 }
 
 interface AuditContext {

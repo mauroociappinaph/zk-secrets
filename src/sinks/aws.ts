@@ -1,8 +1,8 @@
-import { CreateSecretCommand, PutSecretValueCommand } from "@aws-sdk/client-secrets-manager";
-import { PutParameterCommand } from "@aws-sdk/client-ssm";
+import { CreateSecretCommand, DescribeSecretCommand, PutSecretValueCommand } from "@aws-sdk/client-secrets-manager";
+import { DescribeParametersCommand, PutParameterCommand } from "@aws-sdk/client-ssm";
 import type { AwsSmTarget, AwsSsmTarget } from "../policy/types.ts";
 import { safeCode } from "./http.ts";
-import { SinkError, type Sink } from "./types.ts";
+import { SinkError, providerTime, type Sink } from "./types.ts";
 
 interface AwsErrorShape {
   name?: unknown;
@@ -36,6 +36,24 @@ export const awsSsmSink: Sink = {
       throw toSinkError(error);
     }
   },
+
+  /** DescribeParameters with an exact Name filter: metadata only, the value is never requested. */
+  async lastModified(op, ctx) {
+    const target = op.target as AwsSsmTarget;
+    const name = `${target.prefix}${op.name}`;
+    let out: { Parameters?: Array<{ Name?: unknown; LastModifiedDate?: unknown }> };
+    try {
+      out = (await ctx.aws.ssm(target).send(
+        new DescribeParametersCommand({ ParameterFilters: [{ Key: "Name", Option: "Equals", Values: [name] }] }),
+      )) as typeof out;
+    } catch (error) {
+      throw toSinkError(error);
+    }
+    const found = (out.Parameters ?? []).find((p) => p.Name === name);
+    if (!found) return { status: "missing" };
+    const time = providerTime(found.LastModifiedDate);
+    return time === null ? { status: "unsupported", reason: "AWS returned no LastModifiedDate" } : { status: "found", time };
+  },
 };
 
 /** Secrets Manager: new version of an existing secret, or create it on first write. */
@@ -60,5 +78,19 @@ export const awsSmSink: Sink = {
     } catch (error) {
       throw toSinkError(error);
     }
+  },
+
+  /** DescribeSecret (never GetSecretValue): LastChangedDate; ResourceNotFoundException is missing. */
+  async lastModified(op, ctx) {
+    const target = op.target as AwsSmTarget;
+    let out: { LastChangedDate?: unknown };
+    try {
+      out = (await ctx.aws.secretsManager(target).send(new DescribeSecretCommand({ SecretId: `${target.prefix}${op.name}` }))) as typeof out;
+    } catch (error) {
+      if ((error as AwsErrorShape)?.name === "ResourceNotFoundException") return { status: "missing" };
+      throw toSinkError(error);
+    }
+    const time = providerTime(out.LastChangedDate);
+    return time === null ? { status: "unsupported", reason: "AWS returned no LastChangedDate" } : { status: "found", time };
   },
 };
