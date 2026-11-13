@@ -8,6 +8,7 @@ import { createSheetsMirror } from "./audit/mirror.ts";
 import { openAuditStore } from "./audit/store.ts";
 import { createMacDialogs } from "./gate/dialog.ts";
 import { createExec, createSpawnInherited, isExecutableFile } from "./platform/exec.ts";
+import { createFileIo } from "./platform/files.ts";
 import { checkIntegrity, checkOwnership } from "./platform/integrity.ts";
 import { ZKS_KEYCHAIN_SERVICE, createKeychain } from "./platform/keychain.ts";
 import { SYSTEM_LIBEXEC, installLayout, zksPaths } from "./platform/paths.ts";
@@ -170,6 +171,8 @@ export async function main(identity: Identity): Promise<number> {
     fixPermissions: () => fixPermissions(paths),
     spawnInherited: createSpawnInherited({ home: identity.home, user: identity.user }),
     randomBytes,
+    home: identity.home,
+    fileIo: createFileIo(),
   };
 
   const out = await run(process.argv.slice(2), deps);

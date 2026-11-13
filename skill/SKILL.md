@@ -102,6 +102,7 @@ Capture straight into the Keychain item the app expects. Example: a tool that re
    | Situation | `source` |
    |---|---|
    | The key comes from a website | capture it first (Flow B), then `{"kind":"keychain","service":"<svc>","account":"<account>"}` |
+   | The site gives the key as a downloaded file (Google `.json`, Apple `.p8`) | `zks capture file --store <svc>/<account> <path>` (in `~/Downloads` or the project; always asks, then deletes the file), then `{"kind":"keychain","service":"<svc>","account":"<account>"}`. Never open, `cat` or move the file yourself |
    | Human keeps it in 1Password | `{"kind":"op","ref":"op://Vault/Item/field"}` — the `op://` reference is not secret |
    | New random key (signing key, webhook secret) | `{"kind":"generate","bytes":32}` — warn: a NEW value on every apply, so it rotates each time |
    | Already in the macOS Keychain | `{"kind":"keychain","service":"...","account":"..."}` |

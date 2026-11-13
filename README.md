@@ -62,8 +62,9 @@ A policy using every provider lives in [`zks.policy.example.json`](./zks.policy.
 | Run (0.3.0) | `zks run -- <command>`: the selected secrets exist only in that child process; dialog every time | [Run](#run) |
 | Login (0.3.0) | `zks capture login` with recipes (`hostgator`, `cpanel`): the agent's browser logs in with a Keychain password it never sees | [Login](#login-capture-login) |
 | Clipboard (0.4.0) | `{"kind":"clipboard"}` source (to any destination, GitHub Actions included) and `zks capture clipboard --store SERVICE/ACCOUNT`; always asks, even for trusted destinations; the clipboard is cleared after reading only if unchanged | [Sources](#sources), [Clipboard capture](#clipboard-capture) |
+| File (0.5.0) | `zks capture file --store SERVICE/ACCOUNT PATH`: a downloaded key file (Google `.json`, Apple `.p8`) from `~/Downloads` or the project into the Keychain, then the file is deleted; always asks; never deleted on failure | [File capture](#file-capture) |
 
-Planned next (not built yet): capture recipes per provider (`zks capture recipe vercel-token`), a Playwright/Chrome capture backend, reading tokens that arrive as a downloaded file, capture inside modals and shadow DOM, a `zks mcp` stdio server so any agent can call `plan`/`apply`/`capture` without a shell, and `zks init --detect` that drafts the policy from `.env.example`, `vercel.json` and `railway.toml`. Tracked in [`odd/tasks/zks-v2.md`](./odd/tasks/zks-v2.md).
+Planned next (not built yet): capture recipes per provider (`zks capture recipe vercel-token`), a Playwright/Chrome capture backend, capture inside modals and shadow DOM, a `zks mcp` stdio server so any agent can call `plan`/`apply`/`capture` without a shell, and `zks init --detect` that drafts the policy from `.env.example`, `vercel.json` and `railway.toml`. Tracked in [`odd/tasks/zks-v2.md`](./odd/tasks/zks-v2.md).
 
 ## Commands
 
@@ -108,6 +109,9 @@ zks capture login --origin ORIGIN --url URL --user USERNAME --user-selector CSS 
 zks capture clipboard --store SERVICE/ACCOUNT
                                             Store the macOS clipboard in a Keychain item, then clear it
                                             if unchanged; always asks first
+zks capture file --store SERVICE/ACCOUNT PATH
+                                            Store a downloaded key file (~/Downloads or the project)
+                                            in a Keychain item, then delete it; always asks first
 zks capture recipes                         List login recipes (hostgator, cpanel)
 zks audit list [--limit N] [--project P]    Show audit records (metadata only)
 zks audit verify                            Check the audit hash chain
@@ -312,6 +316,22 @@ zks capture clipboard --store stripe/api-key
 - A failed write to an existing item puts the old value back (`restored: true`).
 - Errors (exit 1): `clipboard_empty`, `clipboard_unavailable`, `keychain_failed`, `restore_failed`. Service `zks` is refused (exit 2): provider tokens use `zks auth set` or `capture read` from their pinned origin.
 - Audited as `sourceKind: "capture-clipboard"` with no origin, so a later `fill --from` of that item always asks.
+
+### File capture
+
+```sh
+zks capture file --store gcp/deploy-sa ~/Downloads/my-project-1234-abcd.json
+```
+
+For keys a site hands over as a download (a Google service-account `.json`, an Apple `.p8`): zks stores the file in the Keychain without the agent opening it, and deletes it.
+
+- PATH (relative to the current directory or absolute) must be inside `~/Downloads` or the current directory, compared after resolving symlinks of its parent directory (so `..` or a symlinked directory cannot leave them). The current directory counts only when it is strictly inside your home directory (never `~` itself or `/`), and no directory between the root and the file may start with `.` (`.ssh`, `.aws`, `.git`...), so the command cannot reach your dotfiles. The file itself must be a regular file, not a symlink, 1 to 65536 bytes. Anything else is `file_invalid` (exit 1) before any dialog, with nothing read or deleted; a missing file is `file_not_found`. Messages may name the path, never the contents.
+- Always asks before the file is read: a new item opens `zks: store a file` (`Store the file <path> (<size> bytes) in the Keychain item SERVICE/ACCOUNT?`, `zks deletes the file afterwards`), an existing item the replace dialog naming the same path and size (one dialog either way). Denial exits 3 with `not_approved`, reads nothing, keeps the file and is audited `denied`.
+- The file is opened with `O_NOFOLLOW` and must still be the file the dialog named (same inode and size). Its bytes are stored exactly as read, trailing newline included; a file that is not UTF-8 text is `file_invalid` and kept (the Keychain write takes text). The read buffer is zeroed afterwards.
+- Only after the item is stored is the file deleted. A failed write keeps the file and puts an existing item's old value back (`restored: true`), or reports `restore_failed`.
+- Output: `{ok, command: "capture", mode: "file", store, length, fileDeleted, auditId, mirror}`, never the contents. `fileDeleted: false` (still exit 0) means the delete failed or the path changed after the read: delete the file yourself.
+- Errors (exit 1): `file_invalid`, `file_not_found`, `keychain_failed`, `restore_failed`. Service `zks` is refused (exit 2), and so is a path whose dialog line would exceed 300 characters (`dialog_too_long`, exit 2, before the dialog).
+- Audited as `sourceKind: "capture-file"`, `provider: "keychain"`, with no path and no origin, so a later `fill --from` of that item always asks.
 
 ### Isolated capture (`--isolated`)
 

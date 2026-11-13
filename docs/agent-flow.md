@@ -112,6 +112,7 @@ Branches: `loggedIn: true` â†’ continue. `pending: "2fa" | "captcha"` (exit 0) â
 |---|---|---|---|
 | "It's in 1Password" | `op` | `{"kind":"op","ref":"op://Vault/Item/field"}` | Ask for the reference; it is not secret |
 | "Get a key from <site>" | capture, then `keychain` | `{"kind":"keychain","service":"svc","account":"key"}` | The agent registers and runs `zks capture read --store svc/key` first |
+| "The site gave me a key file" (Google `.json`, Apple `.p8`) | capture, then `keychain` | `{"kind":"keychain","service":"svc","account":"key"}` | `zks capture file --store svc/key <path>` (the file must be in `~/Downloads` or the project); it asks, stores the file and deletes it. Never open, `cat` or move the file yourself |
 | "I'll type it" | `prompt` | `{"kind":"prompt"}` | Hidden macOS dialog during apply |
 | "I already have it copied" | `clipboard` | `{"kind":"clipboard"}` | Read at apply; always asks, even for trusted destinations; the clipboard is cleared only if unchanged; or `zks capture clipboard --store svc/key` and then `keychain`. Never ask the human to copy it |
 | "Make a new random key" | `generate` | `{"kind":"generate","bytes":32}` | New value on **every** apply: it rotates each time |

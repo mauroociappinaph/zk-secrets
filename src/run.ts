@@ -16,6 +16,7 @@ import { runCapture, runLogin } from "./capture/run.ts";
 import { CAPTURE_WAIT_MS, ISOLATED_PAGE, type CaptureErrorCode, type CaptureOutcome, type LoginPending } from "./capture/script.ts";
 import { MAX_LINES, type HumanChannel } from "./gate/dialog.ts";
 import { SAFE_PATH, resolveExecutable, type Exec, type SpawnInherited, type SpawnedChild } from "./platform/exec.ts";
+import type { FileInfo, FileIo } from "./platform/files.ts";
 import { ZKS_KEYCHAIN_SERVICE, type Keychain } from "./platform/keychain.ts";
 import type { PermissionFix } from "./platform/permissions.ts";
 import type { ToolPaths } from "./platform/tools.ts";
@@ -39,7 +40,8 @@ import { SinkError, type AwsClientFactory, type Sink } from "./sinks/types.ts";
 import { SourceError, clearClipboard, createResolver, pasteClipboard } from "./sources/resolve.ts";
 import { HELP_TEXT } from "./help.ts";
 import { constants as osConstants } from "node:os";
-import { join, resolve as resolvePath } from "node:path";
+import { isUtf8 } from "node:buffer";
+import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
 
 export const EXIT_OK = 0;
 export const EXIT_FAILED = 1;
@@ -94,6 +96,10 @@ export interface Deps {
   /** `zks run`: starts the approved command with inherited stdio and childEnv plus the injected values. */
   spawnInherited: SpawnInherited;
   randomBytes?: (size: number) => Buffer;
+  /** The real home directory (from the OS user database): `zks capture file` allows ~/Downloads. */
+  home: string;
+  /** `zks capture file`: lstat, realpath, no-follow read and unlink. */
+  fileIo: FileIo;
 }
 
 export interface RunOutput {
@@ -180,13 +186,14 @@ const COMMAND_FLAGS: Record<string, string[]> = {
   ],
   "capture recipes": [],
   "capture clipboard": ["--store"],
+  "capture file": ["--store"],
 };
 const SUBCOMMANDS: Record<string, string[]> = {
   auth: ["status", "set", "delete"],
   audit: ["list", "verify", "sync"],
   config: ["show", "set", "unset"],
   trust: ["list", "remove"],
-  capture: ["read", "fill", "login", "recipes", "clipboard"],
+  capture: ["read", "fill", "login", "recipes", "clipboard", "file"],
 };
 const COMMANDS = ["init", "validate", "plan", "apply", "rotate", "run", "inventory", "doctor", ...Object.keys(SUBCOMMANDS)];
 
@@ -250,6 +257,7 @@ function positionalLimit(command: string, sub: string | undefined): number | und
     case "trust":
       return sub === "list" ? 2 : sub === "remove" ? 3 : undefined;
     case "capture":
+      if (sub === "file") return 3;
       return sub === "read" || sub === "fill" || sub === "login" || sub === "recipes" || sub === "clipboard" ? 2 : undefined;
     default:
       return undefined;
@@ -414,7 +422,7 @@ async function dispatch(argv: string[], deps: Deps, redactor: Redactor): Promise
     case "trust":
       return trust(deps, sub, arg);
     case "capture":
-      return capture(deps, sub, flags, redactor);
+      return capture(deps, sub, flags, redactor, arg);
     case "doctor": {
       if (!flags.has("--fix")) return json(EXIT_OK, { ok: true, ...(await deps.doctor()) });
       // Fix first, so the report shows the repaired state.
@@ -1475,6 +1483,226 @@ async function captureClipboard(deps: Deps, flags: Map<string, string>, redactor
   }
 }
 
+const FILE_USAGE = "usage: zks capture file --store SERVICE/ACCOUNT PATH";
+/** The largest key file `zks capture file` stores. */
+export const MAX_CAPTURE_FILE = 65536;
+/** A path the dialog can show on one line: printable, no control characters. */
+const CAPTURE_FILE_PATH = /^[^\x00-\x1f\x7f]{1,1024}$/;
+type FileFailure = "file_invalid" | "file_not_found" | "keychain_failed" | "not_approved" | "restore_failed";
+const FILE_ERRORS: Record<FileFailure, string> = {
+  file_invalid: "the file cannot be stored; nothing was stored or deleted",
+  file_not_found: "the file does not exist; nothing was stored",
+  keychain_failed: "the macOS Keychain did not accept the item; the file was kept",
+  not_approved: "replacing the Keychain item was not approved; the file was not read",
+  restore_failed: "the Keychain write failed and the previous value could not be written back; the file was kept",
+};
+
+const errnoOf = (error: unknown): string | undefined => (error as { code?: unknown })?.code as string | undefined;
+
+/**
+ * Realpaths of ~/Downloads and of cwd; a root that does not exist is skipped. cwd counts only when it
+ * is strictly inside the home directory: from ~ or / it would reach ~/.ssh and every other dotfile.
+ */
+async function fileCaptureRoots(deps: Deps): Promise<string[]> {
+  const real = (path: string) => deps.fileIo.realpath(path).catch(() => null);
+  const roots: string[] = [];
+  const downloads = await real(join(deps.home, "Downloads"));
+  if (downloads !== null) roots.push(downloads);
+  const cwd = await real(deps.cwd);
+  const home = (await real(deps.home)) ?? resolvePath(deps.home);
+  if (cwd !== null && cwd !== home && inside(home, cwd)) roots.push(cwd);
+  return roots;
+}
+
+/** A directory between the root and the file whose name starts with "." (.ssh, .aws, .git, ...). */
+const throughHiddenDir = (root: string, dir: string): boolean =>
+  relative(root, dir)
+    .split(sep)
+    .some((part) => part.startsWith("."));
+
+const inside = (root: string, dir: string): boolean => {
+  const rel = relative(root, dir);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+};
+
+/**
+ * `zks capture file --store SERVICE/ACCOUNT PATH`: a downloaded key file into a Keychain item, then
+ * the file is deleted. Only a regular, non-symlink file of 1-64 KiB inside ~/Downloads or cwd (after
+ * the parent's realpath) is accepted. It always asks first, before the file is read; a failed write
+ * puts the old value back and keeps the file. Only the length is reported; the audit holds no path.
+ */
+async function captureFile(deps: Deps, flags: Map<string, string>, path: string | undefined, redactor: Redactor): Promise<RunOutput> {
+  const ref = flags.get("--store");
+  if (ref === undefined || path === undefined) throw new UsageError(FILE_USAGE);
+  // Never echoed: a control character would forge a dialog line.
+  if (!CAPTURE_FILE_PATH.test(path)) throw new UsageError("PATH must be 1-1024 characters without control characters");
+  const { service, account } = keychainRef(ref, "--store");
+  if (service.toLowerCase() === ZKS_KEYCHAIN_SERVICE) {
+    throw new UsageError("capture file cannot use the Keychain service zks; use `zks auth set` for provider tokens");
+  }
+  const store = `${service}/${account}`;
+  const base = { command: "capture", mode: "file", store };
+  const audit = deps.openAudit();
+  try {
+    let approval: ApprovalMode | undefined;
+    const finish = async (
+      result: AuditResult,
+      outcome: { code: FileFailure; restored?: true; message?: string } | { length: number; deleted: boolean },
+    ) => {
+      const errorCode = "code" in outcome ? outcome.code : "";
+      const itemModified =
+        result === "applied" ? ((await deps.keychain.modifiedAt(service, account).catch(() => null))?.toISOString() ?? "") : "";
+      const entry = audit.append({
+        ts: deps.now().toISOString(),
+        actorHuman: deps.user,
+        actorAgent: deps.agentId,
+        project: service,
+        provider: "keychain",
+        target: store,
+        environment: "",
+        variableName: account,
+        action: "capture",
+        sensitive: true,
+        sourceKind: "capture-file",
+        result,
+        providerVersion: itemModified,
+        errorCode,
+        ...(approval ? { approval } : {}),
+      });
+      const anchorError = await saveAnchor(deps, audit);
+      const mirror = await deps.mirror.sync(audit);
+      if (!("code" in outcome)) {
+        return json(EXIT_OK, {
+          ok: true,
+          ...base,
+          length: outcome.length,
+          fileDeleted: outcome.deleted,
+          auditId: entry.auditId,
+          mirror,
+          ...anchorError,
+        });
+      }
+      return json(result === "denied" ? EXIT_DENIED : EXIT_FAILED, {
+        ok: false,
+        ...base,
+        error: { code: outcome.code, message: outcome.message ?? FILE_ERRORS[outcome.code] },
+        ...(outcome.restored ? { restored: true } : {}),
+        auditId: entry.auditId,
+        mirror,
+        ...anchorError,
+      });
+    };
+    const invalid = (file: string, why: string) =>
+      finish("failed", { code: "file_invalid", message: `${file} ${why}; nothing was stored or deleted` });
+
+    // The parent is resolved, the last component never is: the file must not be a symlink.
+    const requested = resolvePath(deps.cwd, path);
+    const name = basename(requested);
+    if (name === "") return await invalid(requested, "is not a file");
+    let parent: string;
+    try {
+      parent = await deps.fileIo.realpath(dirname(requested));
+    } catch (error) {
+      if (errnoOf(error) === "ENOENT") return await finish("failed", { code: "file_not_found", message: `${requested} does not exist; nothing was stored` });
+      return await invalid(requested, "has a parent directory that cannot be resolved");
+    }
+    const file = join(parent, name);
+    const roots = await fileCaptureRoots(deps);
+    const root = roots.find((candidate) => inside(candidate, parent));
+    if (root === undefined) {
+      return await invalid(file, "is outside ~/Downloads and the project directory (a directory inside your home)");
+    }
+    if (throughHiddenDir(root, parent)) return await invalid(file, "is inside a hidden directory");
+    let info: FileInfo;
+    try {
+      info = await deps.fileIo.lstat(file);
+    } catch (error) {
+      if (errnoOf(error) === "ENOENT") return await finish("failed", { code: "file_not_found", message: `${file} does not exist; nothing was stored` });
+      return await invalid(file, "cannot be inspected");
+    }
+    if (info.symlink) return await invalid(file, "is a symbolic link");
+    if (!info.regular) return await invalid(file, "is not a regular file");
+    if (info.size === 0) return await invalid(file, "is empty");
+    if (info.size > MAX_CAPTURE_FILE) return await invalid(file, `is larger than ${MAX_CAPTURE_FILE} bytes`);
+
+    // Always one dialog before the file is read: the replace dialog for an existing item.
+    let previous: SecretBuffer | null = null;
+    const exists = await deps.keychain.has(service, account);
+    const lines = exists
+      ? [`Replace the Keychain item ${store}?`, `New value: the file ${file} (${info.size} bytes), which zks then deletes`]
+      : [`Store the file ${file} (${info.size} bytes) in the Keychain item ${store}?`, "zks deletes the file afterwards"];
+    // The dialog shows the whole path or nothing: a cut line could hide where the file is.
+    if (lines.some((line) => line.length > MAX_DIALOG_LINE)) {
+      return json(EXIT_USAGE, {
+        ok: false,
+        ...base,
+        error: { code: "dialog_too_long", message: "the approval text is too long for one dialog (a line over 300 characters: shorten the path)" },
+      });
+    }
+    approval = "dialog";
+    const approved = await deps.human.approve(exists ? "zks: replace Keychain item" : "zks: store a file", lines);
+    if (!approved) {
+      const message = exists ? undefined : "storing the file was not approved; the file was not read";
+      return await finish("denied", { code: "not_approved", ...(message ? { message } : {}) });
+    }
+    if (exists) {
+      try {
+        previous = await deps.keychain.get(service, account);
+      } catch {
+        return await finish("failed", { code: "keychain_failed" });
+      }
+      if (previous !== null) redactor.register(previous);
+    }
+
+    let bytes: Buffer;
+    try {
+      bytes = await deps.fileIo.readNoFollow(file, info);
+    } catch (error) {
+      previous?.dispose();
+      const code = errnoOf(error);
+      if (code === "ENOENT") return await finish("failed", { code: "file_not_found", message: `${file} does not exist; nothing was stored` });
+      return await invalid(file, code === "ELOOP" ? "is a symbolic link" : "changed or could not be read");
+    }
+    // The Keychain write passes the value as UTF-8 text: any other bytes would not be stored exactly.
+    if (!isUtf8(bytes)) {
+      bytes.fill(0);
+      previous?.dispose();
+      return await invalid(file, "is not UTF-8 text");
+    }
+    // Adopted, so dispose() zeroes the read buffer on every path from here.
+    const value = SecretBuffer.adopt(bytes);
+    try {
+      redactor.register(value);
+      try {
+        await deps.keychain.set(service, account, value);
+      } catch {
+        if (previous === null) return await finish("failed", { code: "keychain_failed" });
+        try {
+          await deps.keychain.set(service, account, previous);
+          return await finish("failed", { code: "keychain_failed", restored: true });
+        } catch {
+          return await finish("failed", { code: "restore_failed" });
+        }
+      }
+      // Deleted only once stored, and only while the path still names the file that was read.
+      let deleted = false;
+      const now = await deps.fileIo.lstat(file).catch(() => null);
+      if (now !== null && !now.symlink && now.dev === info.dev && now.ino === info.ino) {
+        deleted = await deps.fileIo.unlink(file).then(
+          () => true,
+          () => false,
+        );
+      }
+      return await finish("applied", { length: value.length, deleted });
+    } finally {
+      value.dispose();
+      previous?.dispose();
+    }
+  } finally {
+    audit.close();
+  }
+}
+
 /** Validates every capture option. Messages never echo a value: a selector could be a pasted secret. */
 function parseCapture(sub: string | undefined, flags: Map<string, string>): CaptureRequest {
   if (sub !== "read" && sub !== "fill") throw new UsageError(CAPTURE_USAGE);
@@ -1577,12 +1805,19 @@ function keychainRef(value: string, flag: string): { service: string; account: s
  * reports only its length. Every capture is audited and mirrored; replacing an existing item needs
  * approval, and so does filling a stored item into any origin other than the one it came from.
  */
-async function capture(deps: Deps, sub: string | undefined, flags: Map<string, string>, redactor: Redactor): Promise<RunOutput> {
+async function capture(
+  deps: Deps,
+  sub: string | undefined,
+  flags: Map<string, string>,
+  redactor: Redactor,
+  path: string | undefined,
+): Promise<RunOutput> {
   if (sub === "recipes") {
     return json(EXIT_OK, { ok: true, recipes: Object.entries(LOGIN_RECIPES).map(([name, recipe]) => ({ name, ...recipe })) });
   }
   if (sub === "login") return captureLogin(deps, flags);
   if (sub === "clipboard") return captureClipboard(deps, flags, redactor);
+  if (sub === "file") return captureFile(deps, flags, path, redactor);
   const req = parseCapture(sub, flags);
   const store = `${req.service}/${req.account}`;
   const base = { command: "capture", mode: req.mode, store, origin: req.origin, ...(req.isolated ? { isolated: true } : {}) };

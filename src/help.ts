@@ -52,6 +52,13 @@ Usage:
                                               Store the macOS clipboard in a Keychain item (one trailing
                                               newline dropped), then clear the clipboard if unchanged;
                                               always asks first; length only
+  zks capture file --store SERVICE/ACCOUNT PATH
+                                              Store a downloaded key file (regular, not a symlink, 1-65536
+                                              bytes of UTF-8 text, inside ~/Downloads or a current
+                                              directory below your home, never through a hidden
+                                              directory) in a Keychain item exactly as read, then delete
+                                              the file; always asks first (path, size, store); length only;
+                                              the file is kept on any failure (fileDeleted false if unlink failed)
   zks capture recipes                         List login recipes (hostgator, cpanel); --recipe NAME fills
                                               the flags not given; verified:false = selectors not yet
                                               confirmed on a real run
@@ -94,7 +101,8 @@ Run: the child gets HOME, USER, LOGNAME, LANG, PATH=<cwd>/node_modules/.bin:<fix
   On success zks exits with the command's own code: a denial is the not_approved JSON on stdout (exit 3).
   The command holds the values: \`zks run -- printenv\` shows them, so wrap single commands, never an agent session.
 Capture: zks/<vercel|railway|supabase|netlify|sheets-hmac> only from their own site (--origin https://vercel.com,
-https://railway.com, https://supabase.com, https://app.netlify.com, https://script.google.com), never from the clipboard;
+https://railway.com, https://supabase.com, https://app.netlify.com, https://script.google.com), never from the clipboard
+or a file;
 replacing an item asks first,
 and a replaced item gets its old value back when the capture fails.
 

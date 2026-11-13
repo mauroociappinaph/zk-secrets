@@ -7,6 +7,7 @@ import { openAuditStore } from "../src/audit/store.ts";
 import type { Mirror } from "../src/audit/types.ts";
 import type { HumanChannel, TrustDecision } from "../src/gate/dialog.ts";
 import { createSpawnInherited, type Exec, type ExecOptions, type ExecResult } from "../src/platform/exec.ts";
+import { createFileIo } from "../src/platform/files.ts";
 import type { Keychain } from "../src/platform/keychain.ts";
 import type { ToolPaths } from "../src/platform/tools.ts";
 import type { TrustFile } from "../src/policy/trust.ts";
@@ -263,6 +264,9 @@ export function harness(
     // Real spawn, used only by `zks run` tests with a fake child script in the temp dir.
     spawnInherited: createSpawnInherited({ home: dir, user: "tester" }),
     randomBytes: (n) => Buffer.alloc(n, 7),
+    // A separate temp dir, so ~/Downloads is never the cwd; the real fs calls only touch temp dirs.
+    home: tempDir(),
+    fileIo: createFileIo(),
   };
   return h;
 }
