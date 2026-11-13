@@ -17,7 +17,7 @@ Every spec keeps the v1 guarantees of `odd/tasks/zks.md` S1 (no value in argv, e
 - [x] T1 — S1, S2: clipboard source, validation, describe, tests (inline) — commit: 2952328
 - [x] T2 — S3: `zks capture clipboard` + tests (inline) — commit: c12628b
 - [x] T3 — S4: help, docs, skill, CHANGELOG, version 0.4.0 (inline) — commit: aaefaf1, 12eb7a6, 07df034
-- [ ] T4 — S5: clipboard always asks, compare-before-clear (worker) — commit: pending
+- [x] T4 — S5: clipboard always asks, compare-before-clear (worker) — commit: 7dac5fd
 
 ## Log
 
