@@ -975,6 +975,8 @@ async function writeOperations(
 
     // One resolver per apply: each value is resolved once, in dependency order, and shared by the
     // templates and public keys derived from it. Every resolved value is zeroed in the finally below.
+    // A clipboard value is cleared from the clipboard only once every write succeeded (see below).
+    let clipboardRead = false;
     const resolver = createResolver(
       policy.variables,
       {
@@ -985,9 +987,11 @@ async function writeOperations(
         cwd: deps.cwd,
         readFile: deps.readFile,
         randomBytes: deps.randomBytes,
+        keepClipboard: true,
       },
       (_name, spec, value) => {
         if (spec.sensitive) redactor.register(value);
+        if (spec.source?.kind === "clipboard") clipboardRead = true;
       },
     );
     try {
@@ -1045,12 +1049,15 @@ async function writeOperations(
     const anchorError = await saveAnchor(deps, store);
     const mirror: MirrorResult = await deps.mirror.sync(store);
     const ok = results.every((r) => r.result === "applied");
+    // Kept after a failed write, so a retry finds the value; cleared once it reached every destination.
+    const clipboard = clipboardRead ? { clipboardCleared: ok ? await clearClipboard(deps.exec) : false } : {};
     return json(ok ? EXIT_OK : EXIT_FAILED, {
       ok,
       project: policy.project,
       ...extra,
       approval,
       results,
+      ...clipboard,
       mirror,
       ...trustChange,
       ...trustReport,

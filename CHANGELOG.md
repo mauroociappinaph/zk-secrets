@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `clipboard` source (`{"kind":"clipboard"}`): reads the macOS clipboard with `/usr/bin/pbpaste` at apply or run time, drops one trailing newline, and clears the clipboard with `/usr/bin/pbcopy`. Works with every destination, GitHub Actions included (sealed with the repository public key). Must be `sensitive: true`; only one variable per policy may use it; an empty clipboard is `source_missing`.
+- `clipboard` source (`{"kind":"clipboard"}`): reads the macOS clipboard with `/usr/bin/pbpaste` at apply or run time, drops one trailing newline, and clears the clipboard with `/usr/bin/pbcopy`: `apply` clears it only once every write succeeded and reports `clipboardCleared` (kept after a failed write so a retry finds it); `run` clears it on read. Works with every destination, GitHub Actions included (sealed with the repository public key). Must be `sensitive: true`; only one variable per policy may use it; an empty clipboard is `source_missing`.
 - `zks capture clipboard --store SERVICE/ACCOUNT`: stores the clipboard in a Keychain item and then clears it. Replacing an item asks first; a failed write restores the old value. Reports `length` and `clipboardCleared`; errors `clipboard_empty`, `clipboard_unavailable`. Audited as `capture-clipboard`; the `zks` service is refused.
 
 ## [0.3.0] - 2026-11-12

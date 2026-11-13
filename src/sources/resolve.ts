@@ -20,6 +20,8 @@ export interface SourceDeps {
   readFile?: (path: string) => Promise<Buffer>;
   randomBytes?: (size: number) => Buffer;
   realpath?: (path: string) => Promise<string>;
+  /** Leave the clipboard as is after reading it; the caller clears it (apply, once every write succeeded). */
+  keepClipboard?: boolean;
 }
 
 export class SourceError extends Error {
@@ -61,7 +63,7 @@ async function resolveSource(name: string, source: SourceSpec, deps: SourceDeps)
       return value;
     }
     case "clipboard":
-      return readClipboard(deps.exec);
+      return deps.keepClipboard ? pasteClipboard(deps.exec) : readClipboard(deps.exec);
     case "generate":
       return generate(source, deps.randomBytes ?? nodeRandomBytes);
     case "public-key":

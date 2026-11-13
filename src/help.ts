@@ -70,7 +70,8 @@ Usage:
   zks --version | zks help
 
 Sources (variables.<NAME>.source.kind): op, keychain, prompt, clipboard, generate, dotenv, public-key, template.
-  clipboard {}: macOS clipboard (pbpaste), one trailing newline dropped, cleared after reading; one variable per policy
+  clipboard {}: macOS clipboard (pbpaste), one trailing newline dropped; one variable per policy. apply clears it once
+  every write succeeded (clipboardCleared in the output; kept after a failed write for a retry); run clears it on read
   generate format: random (bytes, encoding), uuid, jwt-secret, password (length 12-128, lower, upper,
   digits, symbols), rsa-private-key (bits 2048|3072|4096), ed25519-private-key
   public-key {of: "VAR"}: public PEM of VAR's generated private key; may be sensitive: false

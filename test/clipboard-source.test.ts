@@ -121,3 +121,38 @@ test("S1: pbpaste that cannot start is source_unavailable and nothing is cleared
   );
   assert.deepEqual(exec.calls.map((c) => c.command), [PBPASTE]);
 });
+
+test("S1: apply clears the clipboard only after every write succeeded and reports clipboardCleared", async () => {
+  const h = harness({ policy: githubPolicy, exec: clipboardExec(CANARY) });
+  const out = await run(["apply"], h.deps);
+  assert.equal(out.exitCode, 0, out.stdout);
+  assert.equal(parse(out.stdout).clipboardCleared, true);
+  const order = h.exec.calls.map((c) => c.command);
+  assert.equal(order.at(-1), PBCOPY, "cleared after the GitHub write");
+  assert.ok(h.fetch.calls.some((c) => c.init.method === "PUT"));
+});
+
+test("S1: a failed write keeps the clipboard for a retry", async () => {
+  const h = harness({ policy: githubPolicy, exec: clipboardExec(CANARY) });
+  h.deps.fetch = async () => new Response("{}", { status: 500 });
+  const out = await run(["apply"], h.deps);
+  assert.equal(out.exitCode, 1, out.stdout);
+  assert.equal(parse(out.stdout).clipboardCleared, false);
+  assert.ok(!out.stdout.includes(CANARY));
+  assert.deepEqual(h.exec.calls.filter((c) => c.command === PBCOPY), []);
+});
+
+test("S1: a denied apply never reads the clipboard", async () => {
+  const h = harness({ policy: githubPolicy, approve: false, exec: clipboardExec(CANARY) });
+  const out = await run(["apply"], h.deps);
+  assert.equal(out.exitCode, 3, out.stdout);
+  assert.deepEqual(h.exec.calls.filter((c) => c.command === PBPASTE || c.command === PBCOPY), []);
+});
+
+test("S1: an apply without a clipboard variable has no clipboardCleared field", async () => {
+  const policy = { ...githubPolicy, variables: { API_KEY: { sensitive: true, source: { kind: "prompt" }, targets: ["gh"] } } };
+  const h = harness({ policy, prompt: CANARY });
+  const out = await run(["apply"], h.deps);
+  assert.equal(out.exitCode, 0, out.stdout);
+  assert.equal("clipboardCleared" in parse(out.stdout), false);
+});

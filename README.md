@@ -180,7 +180,7 @@ An option another format does not use is an `invalid_policy` issue (`variables.X
 }
 ```
 
-`clipboard` is read at `apply` (or `run`) time, never at `plan`; an empty clipboard is `source_missing` (`the clipboard is empty`) and nothing is written. It works with every destination; for GitHub Actions the value is sealed with the repository public key like any other source:
+`clipboard` is read at `apply` (or `run`) time, after the approval dialog and never at `plan`; an empty clipboard is `source_missing` (`the clipboard is empty`) and nothing is written. `apply` clears the clipboard only once every write succeeded and reports `clipboardCleared` (`false` after a failed write, so a retry still finds the value: clear it yourself if you give up); `run` clears it as soon as it is read. It works with every destination; for GitHub Actions the value is sealed with the repository public key like any other source:
 
 ```json
 "targets":   { "gh": { "provider": "github", "repo": "acme/web" } },
