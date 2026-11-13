@@ -50,7 +50,8 @@ Usage:
                                               (exit 1) when the page leaves --origin
   zks capture clipboard --store SERVICE/ACCOUNT
                                               Store the macOS clipboard in a Keychain item (one trailing
-                                              newline dropped), then clear the clipboard; length only
+                                              newline dropped), then clear the clipboard if unchanged;
+                                              always asks first; length only
   zks capture recipes                         List login recipes (hostgator, cpanel); --recipe NAME fills
                                               the flags not given; verified:false = selectors not yet
                                               confirmed on a real run
@@ -70,8 +71,9 @@ Usage:
   zks --version | zks help
 
 Sources (variables.<NAME>.source.kind): op, keychain, prompt, clipboard, generate, dotenv, public-key, template.
-  clipboard {}: macOS clipboard (pbpaste), one trailing newline dropped; one variable per policy. apply clears it once
-  every write succeeded (clipboardCleared in the output; kept after a failed write for a retry); run clears it on read
+  clipboard {}: macOS clipboard (pbpaste), one trailing newline dropped; one variable per policy. Always asks, even for
+  trusted destinations. Cleared only if unchanged since the read: apply clears it once every write succeeded
+  (clipboardCleared in the output; kept after a failed write for a retry); run clears it on read
   generate format: random (bytes, encoding), uuid, jwt-secret, password (length 12-128, lower, upper,
   digits, symbols), rsa-private-key (bits 2048|3072|4096), ed25519-private-key
   public-key {of: "VAR"}: public PEM of VAR's generated private key; may be sensitive: false

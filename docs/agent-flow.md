@@ -113,7 +113,7 @@ Branches: `loggedIn: true` â†’ continue. `pending: "2fa" | "captcha"` (exit 0) â
 | "It's in 1Password" | `op` | `{"kind":"op","ref":"op://Vault/Item/field"}` | Ask for the reference; it is not secret |
 | "Get a key from <site>" | capture, then `keychain` | `{"kind":"keychain","service":"svc","account":"key"}` | The agent registers and runs `zks capture read --store svc/key` first |
 | "I'll type it" | `prompt` | `{"kind":"prompt"}` | Hidden macOS dialog during apply |
-| "I already have it copied" | `clipboard` | `{"kind":"clipboard"}` | Read at apply, then the clipboard is cleared; or `zks capture clipboard --store svc/key` and then `keychain`. Never ask the human to copy it |
+| "I already have it copied" | `clipboard` | `{"kind":"clipboard"}` | Read at apply; always asks, even for trusted destinations; the clipboard is cleared only if unchanged; or `zks capture clipboard --store svc/key` and then `keychain`. Never ask the human to copy it |
 | "Make a new random key" | `generate` | `{"kind":"generate","bytes":32}` | New value on **every** apply: it rotates each time |
 | "It's in my Keychain" | `keychain` | `{"kind":"keychain","service":"svc","account":"acct"}` | Item must exist; service `zks` is reserved |
 | "It's in `.env.production`" | `dotenv` | `{"kind":"dotenv","path":".env.production","key":"NAME"}` | Relative `.env*` file inside the project; agent passes the path; only zks opens the file |

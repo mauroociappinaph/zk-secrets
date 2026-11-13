@@ -479,6 +479,19 @@ export function generatedDependencies(policy: Policy, name: string): string[] {
   return found;
 }
 
+/** True when a variable's value is read from the clipboard, directly or through the variables it is derived from. */
+export function usesClipboard(policy: Policy, name: string): boolean {
+  const seen = new Set<string>();
+  const walk = (current: string): boolean => {
+    if (seen.has(current)) return false;
+    seen.add(current);
+    const source = policy.variables[current]?.source;
+    if (source?.kind === "clipboard") return true;
+    return dependenciesOf(source).some(walk);
+  };
+  return walk(name);
+}
+
 /** Variables whose value is derived from name, directly or through other derived variables, in policy order. */
 export function dependentsOf(policy: Policy, name: string): string[] {
   const found = new Set<string>();

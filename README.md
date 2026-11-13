@@ -61,7 +61,7 @@ A policy using every provider lives in [`zks.policy.example.json`](./zks.policy.
 | Destinations | `netlify`, `docker-swarm` (unix socket only), `compose` secret files, `dotenv` (`.env*` files, mode 600) | [Providers](#providers) |
 | Run (0.3.0) | `zks run -- <command>`: the selected secrets exist only in that child process; dialog every time | [Run](#run) |
 | Login (0.3.0) | `zks capture login` with recipes (`hostgator`, `cpanel`): the agent's browser logs in with a Keychain password it never sees | [Login](#login-capture-login) |
-| Clipboard (0.4.0) | `{"kind":"clipboard"}` source (to any destination, GitHub Actions included) and `zks capture clipboard --store SERVICE/ACCOUNT`; the clipboard is cleared after reading | [Sources](#sources), [Clipboard capture](#clipboard-capture) |
+| Clipboard (0.4.0) | `{"kind":"clipboard"}` source (to any destination, GitHub Actions included) and `zks capture clipboard --store SERVICE/ACCOUNT`; always asks, even for trusted destinations; the clipboard is cleared after reading only if unchanged | [Sources](#sources), [Clipboard capture](#clipboard-capture) |
 
 Planned next (not built yet): capture recipes per provider (`zks capture recipe vercel-token`), a Playwright/Chrome capture backend, reading tokens that arrive as a downloaded file, capture inside modals and shadow DOM, a `zks mcp` stdio server so any agent can call `plan`/`apply`/`capture` without a shell, and `zks init --detect` that drafts the policy from `.env.example`, `vercel.json` and `railway.toml`. Tracked in [`odd/tasks/zks-v2.md`](./odd/tasks/zks-v2.md).
 
@@ -107,6 +107,7 @@ zks capture login --origin ORIGIN --url URL --user USERNAME --user-selector CSS 
                                             (never shown); always asks first
 zks capture clipboard --store SERVICE/ACCOUNT
                                             Store the macOS clipboard in a Keychain item, then clear it
+                                            if unchanged; always asks first
 zks capture recipes                         List login recipes (hostgator, cpanel)
 zks audit list [--limit N] [--project P]    Show audit records (metadata only)
 zks audit verify                            Check the audit hash chain
@@ -148,7 +149,7 @@ Rules: Vercel sensitive variables cannot target `development`; Supabase rejects 
 | `op` | `op read <ref>` (1Password CLI) | the value is in 1Password; the `op://` reference is not secret |
 | `keychain` | macOS Keychain item `service`/`account` | the value is already in the Keychain |
 | `prompt` | hidden macOS dialog | the human types or pastes it |
-| `clipboard` | macOS clipboard (`/usr/bin/pbpaste`), one trailing newline dropped, then cleared with `/usr/bin/pbcopy` | the human already copied the value; one variable per policy |
+| `clipboard` | macOS clipboard (`/usr/bin/pbpaste`), one trailing newline dropped, then cleared with `/usr/bin/pbcopy` if unchanged | the human already copied the value; one variable per policy; always asks |
 | `generate` | local CSPRNG; `format` (below), default `random` with `bytes` 16–512, `base64url` or `hex` | a new key, password or keypair; **rotates on every apply** |
 | `dotenv` | a dotenv file read by zks (`path`, optional `key`) | migrating an existing `.env` file |
 | `public-key` | SPKI PEM public key of another variable's generated private key (`of`) | publishing the verifying half of a keypair |
@@ -180,7 +181,7 @@ An option another format does not use is an `invalid_policy` issue (`variables.X
 }
 ```
 
-`clipboard` is read at `apply` (or `run`) time, after the approval dialog and never at `plan`; an empty clipboard is `source_missing` (`the clipboard is empty`) and nothing is written. `apply` clears the clipboard only once every write succeeded and reports `clipboardCleared` (`false` after a failed write, so a retry still finds the value: clear it yourself if you give up); `run` clears it as soon as it is read. It works with every destination; for GitHub Actions the value is sealed with the repository public key like any other source:
+`clipboard` is read at `apply` (or `run`) time, after the approval dialog and never at `plan`; an empty clipboard is `source_missing` (`the clipboard is empty`) and nothing is written. An `apply` or `rotate` whose writes use a clipboard value, directly or through a `template` or `public-key`, always opens the approval dialog, even when every destination is trusted ("Always allow" never skips it); the dialog adds `Reads the clipboard: <names>`. The clipboard is cleared only if it still holds the value zks read: zks reads it again, compares in constant time and calls pbcopy only when it is unchanged, so something you copied in between is left alone. `apply` clears it only once every write succeeded and reports `clipboardCleared` (`false` after a failed write, so a retry still finds the value, or when the clipboard changed: clear it yourself if you give up); `run` clears it as soon as it is read. It works with every destination; for GitHub Actions the value is sealed with the repository public key like any other source:
 
 ```json
 "targets":   { "gh": { "provider": "github", "repo": "acme/web" } },
@@ -203,7 +204,7 @@ Each command refuses options it does not use (`option --X is not valid for <comm
 
 ## Trusted destinations
 
-The first write to a destination opens the dialog with three buttons: **Deny** (default), **Approve once** and **Always allow**. "Always allow" trusts each `[NEW destination]` of that apply, from any project, from then on; an apply whose destinations are all trusted opens no dialog and is audited with `approval: "trusted"`.
+The first write to a destination opens the dialog with three buttons: **Deny** (default), **Approve once** and **Always allow**. "Always allow" trusts each `[NEW destination]` of that apply, from any project, from then on; an apply whose destinations are all trusted opens no dialog and is audited with `approval: "trusted"`, unless it reads the clipboard (a clipboard value always asks).
 
 | Destination key | Trusts |
 |---|---|
@@ -305,9 +306,10 @@ zks capture fill --space 7 --page p1 --selector "#password" --from indec/passwor
 zks capture clipboard --store stripe/api-key
 ```
 
-- Stores the macOS clipboard (`/usr/bin/pbpaste`, one trailing `\n` or `\r\n` dropped) in the Keychain item, then clears the clipboard with `/usr/bin/pbcopy`. The clipboard is cleared only after the item is stored, so a failed write leaves it there to retry.
-- Output: `{ok, command: "capture", mode: "clipboard", store, length, clipboardCleared, auditId, mirror}`, never the value. `clipboardCleared: false` means pbcopy failed: clear it yourself.
-- Replacing an existing item opens the replace dialog before the clipboard is read; denial exits 3. A failed write puts the old value back (`restored: true`).
+- Always asks before the clipboard is read: a new item opens `zks: store the clipboard` (`Store the clipboard in the Keychain item SERVICE/ACCOUNT?`), an existing item the replace dialog (one dialog either way). Denial exits 3 with `not_approved`, reads nothing and is audited `denied`.
+- Stores the macOS clipboard (`/usr/bin/pbpaste`, one trailing `\n` or `\r\n` dropped) in the Keychain item, then clears the clipboard with `/usr/bin/pbcopy` only if it still holds the value read (re-read and compared in constant time). The clipboard is cleared only after the item is stored, so a failed write leaves it there to retry.
+- Output: `{ok, command: "capture", mode: "clipboard", store, length, clipboardCleared, auditId, mirror}`, never the value. `clipboardCleared: false` means the clipboard changed since the read (left alone) or pbcopy failed: clear it yourself if needed.
+- A failed write to an existing item puts the old value back (`restored: true`).
 - Errors (exit 1): `clipboard_empty`, `clipboard_unavailable`, `keychain_failed`, `restore_failed`. Service `zks` is refused (exit 2): provider tokens use `zks auth set` or `capture read` from their pinned origin.
 - Audited as `sourceKind: "capture-clipboard"` with no origin, so a later `fill --from` of that item always asks.
 

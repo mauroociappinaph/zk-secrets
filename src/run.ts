@@ -27,6 +27,7 @@ import {
   dependentsOf,
   describeSource,
   generatedDependencies,
+  usesClipboard,
   planOperations,
   sourceKindOf,
   validatePolicy,
@@ -928,7 +929,11 @@ async function writeOperations(
   const trustState = await loadTrust(trustIo(deps));
   const trustedKeys = new Set(trustState.destinations.map((d) => d.key));
   const newKeys = [...new Set(ops.map(trustKeyOf))].filter((key) => !trustedKeys.has(key));
-  const lines = approvalLines(policy, ops, deps.cwd, new Set(newKeys), opts.header);
+  // A value read from the clipboard (directly or through a template/public key) always asks:
+  // trust never lets clipboard content reach a destination without the human seeing it.
+  const clipboardNames = [...new Set(ops.map((op) => op.name))].filter((name) => usesClipboard(policy, name));
+  const header = clipboardNames.length > 0 ? [...opts.header, `Reads the clipboard: ${clipboardNames.join(", ")}`] : opts.header;
+  const lines = approvalLines(policy, ops, deps.cwd, new Set(newKeys), header);
   if (lines.some((line) => line.length > MAX_DIALOG_LINE) || lines.join("\n").length > MAX_DIALOG_TEXT) {
     return json(EXIT_USAGE, {
       ok: false,
@@ -939,8 +944,9 @@ async function writeOperations(
 
   const agent = opts.agent;
   const extra = opts.extra;
-  // Every destination already trusted: no dialog (unless the command always asks). Otherwise the human sees every write.
-  const approval: ApprovalMode = newKeys.length === 0 && !opts.alwaysAsk ? "trusted" : "dialog";
+  // Every destination already trusted: no dialog (unless the command always asks or the clipboard is read).
+  // Otherwise the human sees every write.
+  const approval: ApprovalMode = newKeys.length === 0 && !opts.alwaysAsk && clipboardNames.length === 0 ? "trusted" : "dialog";
   const store = deps.openAudit();
   const results: OperationResult[] = [];
   try {
@@ -975,8 +981,10 @@ async function writeOperations(
 
     // One resolver per apply: each value is resolved once, in dependency order, and shared by the
     // templates and public keys derived from it. Every resolved value is zeroed in the finally below.
-    // A clipboard value is cleared from the clipboard only once every write succeeded (see below).
-    let clipboardRead = false;
+    // A clipboard value is cleared from the clipboard only once every write succeeded, and only if
+    // the clipboard still holds it (see below). The reference is the resolver's: zeroed by dispose().
+    let clipboardValue: SecretBuffer | null = null;
+    let clipboard: { clipboardCleared?: boolean } = {};
     const resolver = createResolver(
       policy.variables,
       {
@@ -991,7 +999,7 @@ async function writeOperations(
       },
       (_name, spec, value) => {
         if (spec.sensitive) redactor.register(value);
-        if (spec.source?.kind === "clipboard") clipboardRead = true;
+        if (spec.source?.kind === "clipboard") clipboardValue = value;
       },
     );
     try {
@@ -1037,6 +1045,14 @@ async function writeOperations(
           }
         }
       }
+      // Kept after a failed write, so a retry finds the value; cleared once it reached every destination.
+      // Compared before resolver.dispose() zeroes the value.
+      // Set by the onResolved callback, which TypeScript's narrowing does not see.
+      const readValue = clipboardValue as SecretBuffer | null;
+      if (readValue !== null) {
+        const allApplied = results.every((r) => r.result === "applied");
+        clipboard = { clipboardCleared: allApplied ? await clearClipboard(deps.exec, readValue) : false };
+      }
     } catch (error) {
       if (!(error instanceof AuditWriteError)) throw error;
       // Stop: further writes would go unaudited.
@@ -1049,8 +1065,6 @@ async function writeOperations(
     const anchorError = await saveAnchor(deps, store);
     const mirror: MirrorResult = await deps.mirror.sync(store);
     const ok = results.every((r) => r.result === "applied");
-    // Kept after a failed write, so a retry finds the value; cleared once it reached every destination.
-    const clipboard = clipboardRead ? { clipboardCleared: ok ? await clearClipboard(deps.exec) : false } : {};
     return json(ok ? EXIT_OK : EXIT_FAILED, {
       ok,
       project: policy.project,
@@ -1337,8 +1351,8 @@ const CLIPBOARD_ERRORS: Record<ClipboardFailure, string> = {
 
 /**
  * `zks capture clipboard --store SERVICE/ACCOUNT`: the macOS clipboard into a Keychain item, then
- * the clipboard is cleared. Replacing an item asks first, before the clipboard is read; a failed
- * write puts the old value back. Only the length is reported. Not a page capture: it records no
+ * the clipboard is cleared if it still holds that value. It always asks first, before the clipboard
+ * is read (the replace dialog for an existing item); a failed write puts the old value back. Only the length is reported. Not a page capture: it records no
  * origin, so a later `fill --from` of the item always asks.
  */
 async function captureClipboard(deps: Deps, flags: Map<string, string>, redactor: Redactor): Promise<RunOutput> {
@@ -1353,7 +1367,10 @@ async function captureClipboard(deps: Deps, flags: Map<string, string>, redactor
   const audit = deps.openAudit();
   try {
     let approval: ApprovalMode | undefined;
-    const finish = async (result: AuditResult, outcome: { code: ClipboardFailure; restored?: true } | { length: number; cleared: boolean }) => {
+    const finish = async (
+      result: AuditResult,
+      outcome: { code: ClipboardFailure; restored?: true; message?: string } | { length: number; cleared: boolean },
+    ) => {
       const errorCode = "code" in outcome ? outcome.code : "";
       const itemModified =
         result === "applied" ? ((await deps.keychain.modifiedAt(service, account).catch(() => null))?.toISOString() ?? "") : "";
@@ -1390,7 +1407,7 @@ async function captureClipboard(deps: Deps, flags: Map<string, string>, redactor
       return json(result === "denied" ? EXIT_DENIED : EXIT_FAILED, {
         ok: false,
         ...base,
-        error: { code: outcome.code, message: CLIPBOARD_ERRORS[outcome.code] },
+        error: { code: outcome.code, message: outcome.message ?? CLIPBOARD_ERRORS[outcome.code] },
         ...(outcome.restored ? { restored: true } : {}),
         auditId: entry.auditId,
         mirror,
@@ -1398,11 +1415,24 @@ async function captureClipboard(deps: Deps, flags: Map<string, string>, redactor
       });
     };
 
+    // Always one dialog before the clipboard is read: the replace dialog for an existing item.
     let previous: SecretBuffer | null = null;
-    if (await deps.keychain.has(service, account)) {
-      approval = "dialog";
-      const lines = [`Replace the Keychain item ${store}?`, "New value: read from the clipboard, which zks then clears"];
-      if (!(await deps.human.approve("zks: replace Keychain item", lines))) return await finish("denied", { code: "not_approved" });
+    const exists = await deps.keychain.has(service, account);
+    approval = "dialog";
+    const approved = exists
+      ? await deps.human.approve("zks: replace Keychain item", [
+          `Replace the Keychain item ${store}?`,
+          "New value: read from the clipboard, which zks then clears",
+        ])
+      : await deps.human.approve("zks: store the clipboard", [
+          `Store the clipboard in the Keychain item ${store}?`,
+          "zks clears the clipboard afterwards",
+        ]);
+    if (!approved) {
+      const message = exists ? undefined : "storing the clipboard was not approved; the clipboard was not read";
+      return await finish("denied", { code: "not_approved", ...(message ? { message } : {}) });
+    }
+    if (exists) {
       try {
         previous = await deps.keychain.get(service, account);
       } catch {
@@ -1432,8 +1462,9 @@ async function captureClipboard(deps: Deps, flags: Map<string, string>, redactor
           return await finish("failed", { code: "restore_failed" });
         }
       }
-      // Cleared only once stored: after a failed write the clipboard still holds the value to retry.
-      const cleared = await clearClipboard(deps.exec);
+      // Cleared only once stored (after a failed write the clipboard still holds the value to retry),
+      // and only if the clipboard still holds the value read.
+      const cleared = await clearClipboard(deps.exec, value);
       return await finish("applied", { length: value.length, cleared });
     } finally {
       value.dispose();

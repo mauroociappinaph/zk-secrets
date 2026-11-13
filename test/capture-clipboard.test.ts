@@ -16,7 +16,7 @@ function clipboardExec(clipboard: string, options: { pbpasteCode?: number; pbcop
   };
 }
 
-test("S3: stores the clipboard in a new Keychain item without a dialog and clears the clipboard", async () => {
+test("S3/S5: stores the clipboard in a new Keychain item after asking and clears the clipboard", async () => {
   const h = harness({ exec: clipboardExec(`${CANARY}\n`) });
   const out = await run(CMD, h.deps);
   assert.equal(out.exitCode, 0, out.stdout);
@@ -28,8 +28,8 @@ test("S3: stores the clipboard in a new Keychain item without a dialog and clear
   assert.equal(body.length, CANARY.length);
   assert.equal(body.clipboardCleared, true);
   assert.equal(h.keychain.store.get("app/key"), CANARY);
-  assert.deepEqual(h.human.approvals, []);
-  assert.deepEqual(h.exec.calls.map((c) => [c.command, c.input]), [[PBPASTE, ""], [PBCOPY, ""]]);
+  assert.deepEqual(h.human.approvals, [["Store the clipboard in the Keychain item app/key?", "zks clears the clipboard afterwards"]]);
+  assert.deepEqual(h.exec.calls.map((c) => [c.command, c.input]), [[PBPASTE, ""], [PBPASTE, ""], [PBCOPY, ""]]);
   assert.ok(!out.stdout.includes(CANARY));
   const audit = await auditBytes(h.auditDb);
   assert.ok(!audit.includes(CANARY));
@@ -51,7 +51,7 @@ test("S3: an approved replacement stores the new value", async () => {
   const out = await run(CMD, h.deps);
   assert.equal(out.exitCode, 0, out.stdout);
   assert.equal(h.keychain.store.get("app/key"), CANARY);
-  assert.equal(h.human.approvals.length, 1);
+  assert.deepEqual(h.human.approvals, [["Replace the Keychain item app/key?", "New value: read from the clipboard, which zks then clears"]]);
 });
 
 test("S3: an empty clipboard writes nothing", async () => {
@@ -131,6 +131,52 @@ test("S3: a failed write and a failed restore is restore_failed, without the val
 test("S3: a clipboard capture records no origin, so fill --from always asks", async () => {
   const h = harness({ exec: clipboardExec(CANARY) });
   assert.equal((await run(CMD, h.deps)).exitCode, 0);
+  assert.equal(h.human.approvals.length, 1, "the capture asked");
   await run(["capture", "fill", "--space", "1", "--page", "p1", "--selector", "#p", "--from", "app/key", "--origin", "https://x.com"], h.deps);
-  assert.equal(h.human.approvals.length, 1);
+  assert.equal(h.human.approvals.length, 2, "the fill asked too");
+});
+
+function records(h: ReturnType<typeof harness>) {
+  const store = h.deps.openAudit();
+  try {
+    return store.list({ limit: 100 });
+  } finally {
+    store.close();
+  }
+}
+
+test("S5: a denied capture of a new item reads nothing, exits 3 and is audited denied", async () => {
+  const h = harness({ approve: false, exec: clipboardExec(CANARY) });
+  const out = await run(CMD, h.deps);
+  assert.equal(out.exitCode, 3, out.stdout);
+  const body = parse(out.stdout);
+  assert.equal(body.error.code, "not_approved");
+  assert.equal(body.error.message, "storing the clipboard was not approved; the clipboard was not read");
+  assert.deepEqual(h.human.approvals, [["Store the clipboard in the Keychain item app/key?", "zks clears the clipboard afterwards"]]);
+  assert.deepEqual(h.exec.calls, []);
+  assert.equal(h.keychain.store.has("app/key"), false);
+  const [record] = records(h);
+  assert.deepEqual([record!.result, record!.errorCode, record!.approval, record!.sourceKind], ["denied", "not_approved", "dialog", "capture-clipboard"]);
+});
+
+test("S5: a denied replacement keeps its message and is audited denied", async () => {
+  const h = harness({ keychain: { "app/key": "old" }, approve: false, exec: clipboardExec(CANARY) });
+  const out = await run(CMD, h.deps);
+  assert.equal(parse(out.stdout).error.message, "replacing the Keychain item was not approved; the clipboard was not read");
+  assert.equal(records(h)[0]!.result, "denied");
+});
+
+test("S5: a clipboard that changed after the read is not cleared", async () => {
+  let n = 0;
+  const h = harness({
+    exec: (call: ExecCall) => {
+      if (call.command === PBPASTE) return { code: 0, stdout: Buffer.from(n++ === 0 ? CANARY : "copied later") };
+      return {};
+    },
+  });
+  const out = await run(CMD, h.deps);
+  assert.equal(out.exitCode, 0, out.stdout);
+  assert.equal(parse(out.stdout).clipboardCleared, false);
+  assert.equal(h.keychain.store.get("app/key"), CANARY);
+  assert.deepEqual(h.exec.calls.map((c) => c.command), [PBPASTE, PBPASTE]);
 });
