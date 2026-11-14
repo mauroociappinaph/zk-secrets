@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-14
+
 ### Changed
 
 - A Vercel 401 or 403 now fails with `vercel_forbidden` instead of `vercel_failed`, and the message names the project and the team (or personal account) the `zks/vercel` token cannot reach, so the agent can capture a token with that scope. Other Vercel errors keep `vercel_failed`.
@@ -92,7 +94,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hardening: zks ignores the caller's environment (`env -i`), ignores AWS `endpoint_url` and `gh` host config, rejects prototype keys and bounds the dialog size.
 - `install.sh` and `uninstall.sh`, a global agent skill (`skill/SKILL.md`), a `~/AGENTS.md` rule, architecture and agent-flow docs, and CI.
 
-[Unreleased]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.4.0...v0.5.0

@@ -50,7 +50,7 @@ zks apply --only STRIPE_SECRET_KEY --target vercel-prod
 
 A policy using every provider lives in [`zks.policy.example.json`](./zks.policy.example.json).
 
-## What 0.2.0 to 0.7.0 add
+## What 0.2.0 to 0.8.0 add
 
 | Area | Feature | Where to read |
 | --- | --- | --- |
@@ -65,6 +65,7 @@ A policy using every provider lives in [`zks.policy.example.json`](./zks.policy.
 | File (0.5.0) | `zks capture file --store SERVICE/ACCOUNT PATH`: a downloaded key file (Google `.json`, Apple `.p8`) from `~/Downloads` or the project into the Keychain, then the file is deleted; always asks; never deleted on failure | [File capture](#file-capture) |
 | Where (0.7.0) | `zks where NAME`: every project file that names a key (workflows, Compose, Dockerfile, Railway, Vercel, Netlify, dotenv files, other CI, scripts, code), split into places zks manages, places it does not know and consumers; paths and line numbers only, never a line | [Where](#where) |
 | Rotate check (0.7.0) | `zks rotate NAME --check`: asks each destination when it last changed (metadata only) and marks it `current`, `stale`, `missing` or `unknown` against the last audited write | [Rotate --check](#rotate---check) |
+| Vercel scope errors (0.8.0) | a Vercel 401/403 is `vercel_forbidden` and names the project and the team (or personal account) the `zks/vercel` token cannot access, so the agent captures a token with that scope instead of stopping | [Providers](#providers) |
 
 Planned next (not built yet): capture recipes per provider (`zks capture recipe vercel-token`), a Playwright/Chrome capture backend, capture inside modals and shadow DOM, a `zks mcp` stdio server so any agent can call `plan`/`apply`/`capture` without a shell, and `zks init --detect` that drafts the policy from `.env.example`, `vercel.json` and `railway.toml`. Tracked in [`odd/tasks/zks-v2.md`](./odd/tasks/zks-v2.md).
 
