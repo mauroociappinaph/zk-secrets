@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- A Vercel 401 or 403 now fails with `vercel_forbidden` instead of `vercel_failed`, and the message names the project and the team (or personal account) the `zks/vercel` token cannot reach, so the agent can capture a token with that scope. Other Vercel errors keep `vercel_failed`.
+
 ## [0.7.0] - 2026-11-13
 
 ### Added
