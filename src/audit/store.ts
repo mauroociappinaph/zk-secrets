@@ -3,9 +3,15 @@ import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { AuditAnchor, AuditEntryInput, AuditRecord, AuditStore, AuditVerification, WrittenDestination } from "./types.ts";
+import { compressText, decompressText } from "../compression/compressor.ts";
 
 export const GENESIS_HASH = "0".repeat(64);
 const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/** Text fields that benefit from compression (URLs, paths, emails, project names). */
+const COMPRESSIBLE_FIELDS = new Set<string>([
+  "target", "environment", "variableName", "actorHuman", "actorAgent", "project", "providerVersion",
+]);
 
 const COLUMNS: Array<[keyof AuditRecord, string]> = [
   ["auditId", "audit_id"],
@@ -86,7 +92,8 @@ type Row = Record<string, string | number | bigint | null>;
 function fromRow(row: Row): AuditRecord {
   const record: Record<string, unknown> = {};
   for (const [field, col] of COLUMNS) {
-    record[field] = col === "sensitive" ? Number(row[col]) === 1 : String(row[col] ?? "");
+    const raw = col === "sensitive" ? Number(row[col]) === 1 : String(row[col] ?? "");
+    record[field] = typeof raw === "string" && COMPRESSIBLE_FIELDS.has(field) ? decompressText(raw) : raw;
   }
   return record as unknown as AuditRecord;
 }
@@ -132,7 +139,9 @@ export function openAuditStore(dbPath: string): AuditStore {
         insert.run(
           ...COLUMNS.map(([field]) => {
             const value = record[field];
-            return typeof value === "boolean" ? (value ? 1 : 0) : value;
+            if (typeof value === "boolean") return value ? 1 : 0;
+            if (typeof value === "string" && COMPRESSIBLE_FIELDS.has(field)) return compressText(value);
+            return value;
           }),
         );
         db.exec("COMMIT");

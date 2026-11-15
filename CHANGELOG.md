@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-15
+
+### Added
+
+- Rate limiting: token bucket per provider with configurable policies (provider-api 60/min, apply 100/min, capture 20/min). Prevents abuse and provider rate limit exhaustion. Throws `rate_limited` (exit 1) when exceeded.
+- Audit log compression: gzip compression of text fields (target, environment, variable name, actor, project, etc.) in the SQLite audit store. Transparent on read; hash chain verification still works. Reduces audit log size by ~30-50%.
+
 ## [0.8.0] - 2026-11-14
 
 ### Changed
@@ -94,7 +101,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hardening: zks ignores the caller's environment (`env -i`), ignores AWS `endpoint_url` and `gh` host config, rejects prototype keys and bounds the dialog size.
 - `install.sh` and `uninstall.sh`, a global agent skill (`skill/SKILL.md`), a `~/AGENTS.md` rule, architecture and agent-flow docs, and CI.
 
-[Unreleased]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/mauroociappinaph/zk-secrets/compare/v0.5.0...v0.6.0

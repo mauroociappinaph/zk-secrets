@@ -12,6 +12,7 @@ import type { Keychain } from "../src/platform/keychain.ts";
 import type { ToolPaths } from "../src/platform/tools.ts";
 import type { TrustFile } from "../src/policy/trust.ts";
 import type { Deps, ZksConfig } from "../src/run.ts";
+import { TokenBucketRateLimiter } from "../src/rate-limit/rate-limiter.ts";
 import { SecretBuffer } from "../src/secret/secret-buffer.ts";
 import { createSinks } from "../src/sinks/index.ts";
 import type { AwsClient, AwsClientFactory } from "../src/sinks/types.ts";
@@ -239,6 +240,7 @@ export function harness(
     aws: aws.aws,
     sinks: createSinks(),
     openAudit: () => openAuditStore(auditDb),
+    rateLimiter: new TokenBucketRateLimiter(),
     mirror,
     readFile: async (path) => {
       const content = files.get(path);

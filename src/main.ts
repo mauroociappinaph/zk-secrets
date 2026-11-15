@@ -18,6 +18,7 @@ import { loadTrust, type TrustFile } from "./policy/trust.ts";
 import { TOKEN_ACCOUNTS, run, type Deps, type ZksConfig } from "./run.ts";
 import { createAwsClientFactory } from "./sinks/aws-clients.ts";
 import { createSinks } from "./sinks/index.ts";
+import { TokenBucketRateLimiter } from "./rate-limit/rate-limiter.ts";
 
 const appRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -106,6 +107,7 @@ export async function main(identity: Identity): Promise<number> {
     aws: createAwsClientFactory(),
     sinks: createSinks(),
     openAudit: () => openAuditStore(paths.auditDb),
+    rateLimiter: new TokenBucketRateLimiter(),
     mirror: createSheetsMirror({ fetch: globalThis.fetch, keychain, readConfig, now: () => new Date() }),
     readFile: (path) => readFile(path),
     createFile: async (path, data) => {

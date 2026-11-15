@@ -40,6 +40,7 @@ import type { Operation, Policy, Provider, SourceSpec, TargetConfig } from "./po
 import { Redactor } from "./secret/redactor.ts";
 import { SecretBuffer } from "./secret/secret-buffer.ts";
 import { SinkError, type AwsClientFactory, type Sink } from "./sinks/types.ts";
+import { TokenBucketRateLimiter, checkRateLimit } from "./rate-limit/rate-limiter.ts";
 import { SourceError, clearClipboard, createResolver, pasteClipboard } from "./sources/resolve.ts";
 import { HELP_TEXT } from "./help.ts";
 import { constants as osConstants } from "node:os";
@@ -84,6 +85,7 @@ export interface Deps {
   aws: AwsClientFactory;
   sinks: Record<Provider, Sink>;
   openAudit(): AuditStore;
+  rateLimiter: TokenBucketRateLimiter;
   mirror: Mirror;
   readFile(path: string): Promise<Buffer>;
   /** Writes a file only if it does not exist yet. */
@@ -1290,6 +1292,7 @@ async function writeOperations(
           for (const op of variableOps) {
             let version: string | undefined;
             try {
+              checkRateLimit(deps.rateLimiter, `apply:${op.target.provider}`);
               const sink = deps.sinks[op.target.provider];
               ({ version } = await sink.apply(op, value, {
                 fetch: deps.fetch,
