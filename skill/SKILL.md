@@ -43,7 +43,7 @@ When a task needs a website login (a hosting panel such as HostGator or cPanel, 
 - `loggedIn: true`: continue. `loggedIn: false` with `pending: "2fa"` or `"captcha"`: stop and tell the human to finish the 2FA or captcha in the browser, then continue. With `--isolated` the page stays open in the capture profile and the output names it (`space`, `page`): tell the human to finish the challenge there; do not claim or drive that space yourself. `pending: "unknown"`: the login did not go through (wrong password or selectors); snapshot the page (zks blanks the password field before reporting, so no password is shown), tell the human, do not loop. `login_redirected`: the page left the origin; report `finalOrigin` and do not retry blindly.
 - Prefer `--isolated` when a capture profile is configured; log out when the task is done.
 
-### Flow A — missing provider token (`missing_token` for Vercel, Railway or Supabase)
+### Flow A — missing provider token (`missing_token` for Vercel, Railway or Supabase; `vercel_forbidden`)
 
 | Provider | Token page | Store | `--origin` (pinned, mandatory) |
 |---|---|---|---|
@@ -131,6 +131,7 @@ Capture straight into the Keychain item the app expects. Example: a tool that re
 
 7. **Credentials.**
    - `missing_token` for Vercel, Railway or Supabase: Flow A. Never ask the human for the token.
+   - `vercel_forbidden` (Vercel answered 401/403): the `zks/vercel` token cannot access that project, usually because its scope is another team or the personal account, or it expired. Do not report it as "no permission" and stop: run Flow A, choosing as scope the team the message names (or the personal account), replace `zks/vercel` (replacing an existing token opens an approval dialog for the human: say so and wait, never click it), then retry the apply (or the `zks rotate --check`, where it shows as `unknown` with this message as its reason). Only if the logged-in Vercel account is not a member of that team, tell the human which team to join.
    - AWS uses the existing AWS SSO or profile. If credentials are expired, run `aws sso login` (add `--profile <name>` when the target sets `profile`) yourself; the human only completes the browser sign-in or 2FA step if one appears.
    - GitHub: zks reads the `gh auth login` token with `gh auth token` and calls `api.github.com` itself. If `missing_token`, run `gh auth login --web` yourself and finish the device flow in ego-browser; `github_unavailable` means `gh` was not found at install time (install it with `brew install gh`, then reinstall zks as in step 1); `github_failed` carries the HTTP status (for example 403: the login lacks write access to the repo).
 

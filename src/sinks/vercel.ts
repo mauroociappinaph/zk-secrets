@@ -10,8 +10,20 @@ function firstId(created: unknown): string | undefined {
   return typeof id === "string" ? id : undefined;
 }
 
-function failed(res: JsonResponse): SinkError {
+/**
+ * 401/403 means the zks/vercel token cannot reach this project (wrong scope, other team, revoked):
+ * `vercel_forbidden` names the project and scope so the agent can capture a token with that scope.
+ */
+function failed(res: JsonResponse, target: VercelTarget): SinkError {
   const code = safeCode((res.body as { error?: { code?: unknown } } | null)?.error?.code) ?? `http_${res.status}`;
+  if (res.status === 401 || res.status === 403) {
+    const scope = target.teamId ? `team ${target.teamId}` : "the personal account";
+    return new SinkError(
+      "vercel_forbidden",
+      `Vercel ${code}: the zks/vercel token cannot access project ${target.projectId} in ${scope}; capture a new token whose scope includes ${target.teamId ? "that team" : "the personal account"}`,
+      res.status,
+    );
+  }
   return new SinkError("vercel_failed", `Vercel ${code}`, res.status);
 }
 
@@ -40,7 +52,7 @@ export const vercelSink: Sink = {
     const res = await withToken(ctx.keychain, "vercel", (token) =>
       postJson(ctx.fetch, "vercel", url, { authorization: `Bearer ${token}` }, body),
     );
-    if (!res.ok) throw failed(res);
+    if (!res.ok) throw failed(res, target);
     const version = firstId((res.body as { created?: unknown } | null)?.created);
     return version ? { version } : {};
   },
@@ -57,7 +69,7 @@ export const vercelSink: Sink = {
     const res = await withToken(ctx.keychain, "vercel", (token) =>
       requestJson(ctx.fetch, "vercel", "GET", url, { authorization: `Bearer ${token}` }),
     );
-    if (!res.ok) throw failed(res);
+    if (!res.ok) throw failed(res, target);
     const envs = (res.body as { envs?: unknown } | null)?.envs;
     const entries = (Array.isArray(envs) ? (envs as VercelEnv[]) : []).filter(
       ({ key, gitBranch }) => key === op.name && (target.gitBranch ? gitBranch === target.gitBranch : !gitBranch),

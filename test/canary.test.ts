@@ -110,6 +110,26 @@ test("S1: a provider error that echoes the value is scrubbed from the output", a
   assert.ok(!(await auditBytes(h.auditDb)).includes(CANARY));
 });
 
+test("S1: a Vercel 403 that echoes the value is vercel_forbidden, scrubbed and audited", async () => {
+  const h = harness({
+    policy: allTargetsPolicy,
+    keychain: { ...tokens, "hismia/stripe": CANARY },
+    fetch: () => ({ status: 403, body: { error: { code: CANARY, message: CANARY } } }),
+  });
+
+  const out = await run(["apply", "--target", "vercel-prod"], h.deps);
+
+  assert.equal(out.exitCode, 1);
+  assert.ok(!out.stdout.includes(CANARY));
+  const result = parse(out.stdout).results[0];
+  assert.equal(result.error.code, "vercel_forbidden");
+  assert.match(result.error.message, /^Vercel \[REDACTED\]: the zks\/vercel token cannot access project \S+ in team \S+; capture a new token whose scope includes that team$/);
+  const store = openAuditStore(h.auditDb);
+  assert.deepEqual(store.list().map((r) => r.errorCode), ["vercel_forbidden"]);
+  store.close();
+  assert.ok(!(await auditBytes(h.auditDb)).includes(CANARY));
+});
+
 test("S5: denying the dialog writes nothing, audits denied and exits 3", async () => {
   const h = harness({ policy: allTargetsPolicy, keychain: { ...tokens, "hismia/stripe": CANARY }, approve: false });
 

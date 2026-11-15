@@ -73,10 +73,36 @@ test("vercel without a token fails with missing_token before any request", async
 });
 
 test("vercel errors expose only the provider error code", async () => {
-  const c = ctx({ fetch: fakeFetch(() => ({ status: 403, body: { error: { code: "forbidden", message: `nope ${CANARY}` } } })) });
+  const c = ctx({ fetch: fakeFetch(() => ({ status: 500, body: { error: { code: "internal_error", message: `nope ${CANARY}` } } })) });
   const err = await rejects(vercelSink.apply(op({ provider: "vercel", projectId: "p", environments: ["preview"] }), secret(), c.context), "vercel_failed");
-  assert.equal(err.message, "Vercel forbidden");
+  assert.equal(err.message, "Vercel internal_error");
+  assert.equal(err.status, 500);
+});
+
+test("vercel 403 fails with vercel_forbidden naming the project and team the token cannot reach", async () => {
+  const c = ctx({ fetch: fakeFetch(() => ({ status: 403, body: { error: { code: "forbidden", message: `nope ${CANARY}` } } })) });
+  const target = { provider: "vercel", projectId: "prj_1", teamId: "team_9", environments: ["preview"] } as const;
+  const err = await rejects(vercelSink.apply(op({ ...target, environments: ["preview"] }), secret(), c.context), "vercel_forbidden");
+  assert.equal(
+    err.message,
+    "Vercel forbidden: the zks/vercel token cannot access project prj_1 in team team_9; capture a new token whose scope includes that team",
+  );
   assert.equal(err.status, 403);
+});
+
+test("vercel 401 without a team fails with vercel_forbidden naming the personal account", async () => {
+  const c = ctx({ fetch: fakeFetch(() => ({ status: 401, body: { error: { code: "invalid_token" } } })) });
+  const err = await rejects(vercelSink.apply(op({ provider: "vercel", projectId: "p", environments: ["preview"] }), secret(), c.context), "vercel_forbidden");
+  assert.equal(
+    err.message,
+    "Vercel invalid_token: the zks/vercel token cannot access project p in the personal account; capture a new token whose scope includes the personal account",
+  );
+  assert.equal(err.status, 401);
+});
+
+test("vercel lastModified 403 also fails with vercel_forbidden", async () => {
+  const c = ctx({ fetch: fakeFetch(() => ({ status: 403, body: { error: { code: "forbidden" } } })) });
+  await rejects(vercelSink.lastModified!(op({ provider: "vercel", projectId: "p", environments: ["preview"] }), c.context), "vercel_forbidden");
 });
 
 test("aws-ssm writes a SecureString with the KMS key under the prefix", async () => {
