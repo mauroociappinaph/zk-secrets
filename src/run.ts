@@ -41,6 +41,8 @@ import { Redactor } from "./secret/redactor.ts";
 import { SecretBuffer } from "./secret/secret-buffer.ts";
 import { SinkError, type AwsClientFactory, type Sink } from "./sinks/types.ts";
 import { TokenBucketRateLimiter, checkRateLimit } from "./rate-limit/rate-limiter.ts";
+import { detectPolicy } from "./init/detect.ts";
+import { bashCompletion, zshCompletion, fishCompletion } from "./completions/index.ts";
 import { SourceError, clearClipboard, createResolver, pasteClipboard } from "./sources/resolve.ts";
 import { HELP_TEXT } from "./help.ts";
 import { constants as osConstants } from "node:os";
@@ -166,7 +168,7 @@ const FLAGS_WITH_VALUE = [
 
 /** Options each command uses; any other option is refused. --help and --version are global. */
 const COMMAND_FLAGS: Record<string, string[]> = {
-  init: ["--policy", "--project"],
+  init: ["--policy", "--project", "--detect"],
   validate: ["--policy"],
   plan: ["--policy", "--only", "--target"],
   apply: ["--policy", "--only", "--target", "--agent"],
@@ -204,7 +206,7 @@ const SUBCOMMANDS: Record<string, string[]> = {
   trust: ["list", "remove"],
   capture: ["read", "fill", "login", "recipes", "clipboard", "file"],
 };
-const COMMANDS = ["init", "validate", "plan", "apply", "rotate", "run", "inventory", "where", "doctor", ...Object.keys(SUBCOMMANDS)];
+const COMMANDS = ["init", "validate", "plan", "apply", "rotate", "run", "inventory", "where", "doctor", "completions", ...Object.keys(SUBCOMMANDS)];
 
 interface ParsedArgs {
   positionals: string[];
@@ -227,7 +229,7 @@ function parseArgs(argv: string[]): ParsedArgs {
         "zks never accepts secret values on the command line; declare a source in zks.policy.json or use `zks auth set`",
       );
     }
-    if (flag === "--isolated" || flag === "--fix" || flag === "--check") {
+    if (flag === "--detect" || flag === "--isolated" || flag === "--fix" || flag === "--check") {
       if (inline !== undefined) throw new UsageError(`option ${flag} takes no value`);
       flags.set(flag, "true");
       continue;
@@ -395,7 +397,7 @@ async function dispatch(argv: string[], deps: Deps, redactor: Redactor): Promise
 
   switch (command) {
     case "init":
-      return init(deps, flags.get("--policy"), flags.get("--project"));
+      return init(deps, flags.get("--policy"), flags.get("--project"), flags.has("--detect"));
     case "validate": {
       const policy = await loadPolicy(deps, flags.get("--policy"));
       return json(EXIT_OK, {
@@ -435,6 +437,13 @@ async function dispatch(argv: string[], deps: Deps, redactor: Redactor): Promise
       return trust(deps, sub, arg);
     case "capture":
       return capture(deps, sub, flags, redactor, arg);
+    case "completions": {
+      const shell = positionals[1] ?? "bash";
+      if (shell === "bash") return { exitCode: 0, stdout: bashCompletion() };
+      if (shell === "zsh") return { exitCode: 0, stdout: zshCompletion() };
+      if (shell === "fish") return { exitCode: 0, stdout: fishCompletion() };
+      throw new UsageError("usage: zks completions <bash|zsh|fish>");
+    }
     case "doctor": {
       if (!flags.has("--fix")) return json(EXIT_OK, { ok: true, ...(await deps.doctor()) });
       // Fix first, so the report shows the repaired state.
@@ -1386,23 +1395,31 @@ function toResult(
   };
 }
 
-async function init(deps: Deps, path: string | undefined, project: string | undefined): Promise<RunOutput> {
+async function init(deps: Deps, path: string | undefined, project: string | undefined, detect: boolean | undefined): Promise<RunOutput> {
   const file = resolvePath(deps.cwd, path ?? "zks.policy.json");
-  const template = {
-    version: 1,
-    project: project ?? "my-project",
-    targets: {
-      "vercel-prod": { provider: "vercel", projectId: "prj_REPLACE_ME", teamId: "team_REPLACE_ME", environments: ["production", "preview"] },
-      "aws-ssm-prod": { provider: "aws-ssm", region: "us-east-1", prefix: "/my-project/prod/" },
-    },
-    variables: {
-      API_SIGNING_KEY: { sensitive: true, source: { kind: "generate", bytes: 32 }, targets: ["vercel-prod", "aws-ssm-prod"] },
-      NEXT_PUBLIC_SITE_URL: { sensitive: false, value: "https://example.com", targets: ["vercel-prod"] },
-    },
-  };
+  let template: Record<string, unknown>;
+  let detected: string[] = [];
+  if (detect) {
+    const result = await detectPolicy(deps.cwd, project ?? "my-project");
+    template = { version: 1, project: result.project, targets: result.targets, variables: result.variables };
+    detected = result.detected;
+  } else {
+    template = {
+      version: 1,
+      project: project ?? "my-project",
+      targets: {
+        "vercel-prod": { provider: "vercel", projectId: "prj_REPLACE_ME", teamId: "team_REPLACE_ME", environments: ["production", "preview"] },
+        "aws-ssm-prod": { provider: "aws-ssm", region: "us-east-1", prefix: "/my-project/prod/" },
+      },
+      variables: {
+        API_SIGNING_KEY: { sensitive: true, source: { kind: "generate", bytes: 32 }, targets: ["vercel-prod", "aws-ssm-prod"] },
+        NEXT_PUBLIC_SITE_URL: { sensitive: false, value: "https://example.com", targets: ["vercel-prod"] },
+      },
+    };
+  }
   const created = await deps.createFile(file, `${JSON.stringify(template, null, 2)}\n`);
   if (!created) throw new UsageError(`${file} already exists`);
-  return json(EXIT_OK, { ok: true, created: file });
+  return json(EXIT_OK, { ok: true, created: file, detected: detect ? detected : undefined });
 }
 
 function parseAccount(value: string | undefined): TokenAccount {

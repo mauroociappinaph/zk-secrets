@@ -66,13 +66,20 @@ A policy using every provider lives in [`zks.policy.example.json`](./zks.policy.
 | Where (0.7.0) | `zks where NAME`: every project file that names a key (workflows, Compose, Dockerfile, Railway, Vercel, Netlify, dotenv files, other CI, scripts, code), split into places zks manages, places it does not know and consumers; paths and line numbers only, never a line | [Where](#where) |
 | Rotate check (0.7.0) | `zks rotate NAME --check`: asks each destination when it last changed (metadata only) and marks it `current`, `stale`, `missing` or `unknown` against the last audited write | [Rotate --check](#rotate---check) |
 | Vercel scope errors (0.8.0) | a Vercel 401/403 is `vercel_forbidden` and names the project and the team (or personal account) the `zks/vercel` token cannot access, so the agent captures a token with that scope instead of stopping | [Providers](#providers) |
+| Rate limiting (1.0.0) | token bucket per provider with configurable policies (provider-api 60/min, apply 100/min, capture 20/min); throws `rate_limited` when exceeded; applied to every `apply` write | [Apply](#apply) |
+| Audit log compression (1.0.0) | gzip compression of text fields (target, environment, variable name, actor, project, provider version) in the SQLite audit store; transparent on read; hash chain verification still works; reduces audit log size by ~30-50% | [Audit](#audit) |
+| `init --detect` (1.0.0) | reads `.env.example`, `vercel.json`, `railway.toml`, `netlify.toml`, `docker-compose.yml` and drafts a `zks.policy.json` with targets and variables already wired | [Quick start](#quick-start) |
+| Capture recipes (1.0.0) | 8 recipes (`hostgator`, `cpanel`, `github`, `vercel`, `railway`, `supabase`, `netlify`, `cloudflare`) for `zks capture login --recipe NAME` | [Login](#login-capture-login) |
+| Shell completions (1.0.0) | `zks completions <bash|zsh|fish>` prints a completion script to source in your shell | [Commands](#commands) |
 
-Planned next (not built yet): capture recipes per provider (`zks capture recipe vercel-token`), a Playwright/Chrome capture backend, capture inside modals and shadow DOM, a `zks mcp` stdio server so any agent can call `plan`/`apply`/`capture` without a shell, and `zks init --detect` that drafts the policy from `.env.example`, `vercel.json` and `railway.toml`. Tracked in [`odd/tasks/zks-v2.md`](./odd/tasks/zks-v2.md).
+Planned next (not built yet): a Playwright/Chrome capture backend, capture inside modals and shadow DOM, a `zks mcp` stdio server so any agent can call `plan`/`apply`/`capture` without a shell, and more sinks (Cloudflare Workers, Fly.io, Render, Heroku, GCP Secret Manager). Tracked in [`odd/tasks/zks-v2.md`](./odd/tasks/zks-v2.md).
 
 ## Commands
 
 ```text
-zks init [--policy FILE] [--project NAME]   Create a zks.policy.json template
+zks init [--policy FILE] [--project NAME] [--detect]   Create a zks.policy.json template; --detect reads .env.example,
+                                            vercel.json, railway.toml, netlify.toml, docker-compose.yml and drafts
+                                            targets and variables automatically
 zks validate [--policy FILE]                Check the policy
 zks plan [--policy FILE] [--only A,B] [--target t1,t2]
                                             List the writes apply would make (no network)
@@ -123,7 +130,8 @@ zks capture clipboard --store SERVICE/ACCOUNT
 zks capture file --store SERVICE/ACCOUNT PATH
                                             Store a downloaded key file (~/Downloads or the project)
                                             in a Keychain item, then delete it; always asks first
-zks capture recipes                         List login recipes (hostgator, cpanel)
+zks capture recipes                         List login recipes (hostgator, cpanel, github, vercel,
+                                            railway, supabase, netlify, cloudflare)
 zks audit list [--limit N] [--project P]    Show audit records (metadata only)
 zks audit verify                            Check the audit hash chain
 zks audit sync                              Push pending audit records to Google Sheets
@@ -137,6 +145,7 @@ zks config unset capture-profile
 zks doctor [--fix]                          Check tools, tokens, audit and install integrity;
                                             --fix creates/chmods ~/.config/zks, ~/.local/state/zks
                                             (700) and their files (600) and lists what it cannot fix
+zks completions <bash|zsh|fish>             Print a shell completion script to source in your shell
 zks --version | zks help
 ```
 
@@ -467,7 +476,7 @@ zks capture login --origin https://app.example.com --url https://app.example.com
 - The script (same guarantees as `fill --from`): goes to `--url` (on `--origin`; a pinned `zks` item is never used, any other origin is allowed because you approve it), checks the origin, sets the user field (exactly one non-password input) to the username, then fills the password field through fill's path (one `<input type="password">`, Keychain read inside ego, typed through the keyboard, never in the script, argv, env, output or audit), clicks `--submit-selector` and waits up to 15 s for the page to settle. A failure before the submit blanks the password field and leaves the page on `about:blank`. A pending result with the password field still on the page (the click did not submit, or the form came back) blanks that field before zks reports; the page itself stays.
 - Result, exit 0: `{ok: true, command: "capture", mode: "login", origin, from, loggedIn, finalOrigin, pending?, auditId, mirror}`. `loggedIn` is true when `--success-selector` is given and found (it wins over captcha and code-input detection), or, without it, when the password field is gone and no one-time-code input or captcha shows. A captcha frame or code input counts only if it appeared after the submit or the page changed (another URL, or the password field is gone); one already on the login page (an invisible reCAPTCHA, a phone field) does not. Otherwise `loggedIn: false` with `pending`: `captcha` (an iframe whose host contains `captcha`, or a `/recaptcha/` frame), `2fa` (an `input` of type `tel` or `number`, or `autocomplete="one-time-code"`) or `unknown` (the password field is still there on the same page after 15 s: wrong password, or the page did not react). Pending is not an error: the human finishes the 2FA or captcha in the browser. With `--isolated`, a pending login keeps its page open in the capture profile (`task.finish({ keep: [page] })`) and the output adds `space` (`zks-capture-<hex>`) and `page`, so the human finishes the challenge there; a logged-in or failed isolated login closes the space as before. Give `--success-selector` when the logged-in page has number or phone inputs, or they read as `2fa`.
 - Leaving `--origin` during the flow (a login wall on another origin, an SSO hop) is `login_redirected` (exit 1) with `finalOrigin` (the origin only, never the path). Other errors as `fill`: `not_found` (item, user field or submit), `not_password_field`, `keychain_failed`, `browser_failed`, `isolated_profile_*`.
-- Recipes: `--recipe NAME` fills the flags you did not give; explicit flags win. `zks capture recipes` lists them as JSON. `hostgator` (`https://portal.hostgator.com/login`, `input[name=email]`, `input[name=password]`, `button[type=submit]`); `cpanel` (your own host, so it needs `--origin`; `--url` defaults to `<origin>/`; `#user`, `#pass`, `#login_submit`). Both are `verified: false`: the selectors come from public documentation and are confirmed on the first real run; if one does not match, pass that flag explicitly.
+- Recipes: `--recipe NAME` fills the flags you did not give; explicit flags win. `zks capture recipes` lists them as JSON. `hostgator` (`https://portal.hostgator.com/login`, `input[name=email]`, `input[name=password]`, `button[type=submit]`); `cpanel` (your own host, so it needs `--origin`; `--url` defaults to `<origin>/`; `#user`, `#pass`, `#login_submit`); `github` (`https://github.com/login`, `#login_field`, `#password`, `input[type=submit]`); `vercel` (`https://vercel.com/login`, `input[name=email]`, `input[name=password]`, `button[type=submit]`); `railway` (`https://railway.com/login`, `input[name=email]`, `input[name=password]`, `button[type=submit]`); `supabase` (`https://supabase.com/dashboard/sign-in`, `input[type=email]`, `input[type=password]`, `button[type=submit]`); `netlify` (`https://app.netlify.com/login`, `input[name=email]`, `input[name=password]`, `button[type=submit]`); `cloudflare` (`https://dash.cloudflare.com/login`, `input[name=email]`, `input[name=password]`, `button[type=submit]`). All are `verified: false`: the selectors come from public documentation and are confirmed on the first real run; if one does not match, pass that flag explicitly.
 - Audit: `provider: "capture"`, `action: "capture"`, `sourceKind: "capture-login"`, `target: <origin>`, `variableName: "<service>/<account>"`, result `applied` (the form was submitted, logged in or pending), `denied` or `failed`. The username is not recorded.
 - Honest limit: the logged-in session then lives in that browser profile, and an agent driving the profile can use it. Prefer `--isolated` (the session stays in the capture profile, not the agent's; the space is closed afterwards, except the page of a pending login, which stays open for the human to finish the 2FA or captcha in that profile) and log out when done. The username appears in the dialog and in the script piped to ego.
 

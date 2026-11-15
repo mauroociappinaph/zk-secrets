@@ -6,7 +6,10 @@ to the provider after you approve a native dialog (Deny / Approve once / Always 
 a destination you chose "Always allow" for skip the dialog. Output is JSON with metadata only.
 
 Usage:
-  zks init [--policy FILE] [--project NAME]   Create a zks.policy.json template
+  zks init [--policy FILE] [--project NAME] [--detect]
+                                              Create a zks.policy.json template; --detect reads .env.example,
+                                              vercel.json, railway.toml, netlify.toml, docker-compose.yml
+                                              and drafts targets and variables automatically
   zks validate [--policy FILE]                Check the policy
   zks plan [--policy FILE] [--only A,B] [--target t1,t2]
                                               List the writes apply would make (no network)
@@ -85,6 +88,7 @@ Usage:
   zks config set capture-profile <profileId>  Separate ego-browser profile for capture --isolated
   zks config unset capture-profile
   zks doctor [--fix]                          Check tools, tokens, audit and install integrity;
+  zks completions <bash|zsh|fish>              Print a shell completion script
                                               --fix creates/chmods ~/.config/zks, ~/.local/state/zks
                                               (700) and their files (600) and lists what it cannot fix
   zks --version | zks help
